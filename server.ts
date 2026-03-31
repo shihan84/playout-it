@@ -15,7 +15,10 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-const upload = multer({ dest: os.tmpdir() });
+const upload = multer({ 
+  dest: os.tmpdir(),
+  limits: { fileSize: 1000 * 1024 * 1024 * 1024 } // 1000GB (1TB) limit
+});
 
 // WebSocket Setup
 const wss = new WebSocketServer({ noServer: true });
@@ -74,7 +77,8 @@ const broadcastStreamsUpdate = () => {
   }
 };
 
-app.use(express.json());
+app.use(express.json({ limit: '1000gb' }));
+app.use(express.urlencoded({ limit: '1000gb', extended: true }));
 
 // Database Setup
 const dbPath = process.env.DATABASE_PATH || 'flussonic.db';
@@ -97,25 +101,37 @@ try {
 }
 
 // Helper for Flussonic API calls to handle auth fallback
-async function flussonicRequest(method: string, url: string, server: any, data: any = null) {
+async function flussonicRequest(method: string, url: string, server: any, data: any = null, timeout = 30000, extraHeaders: any = {}) {
   let authString = server.api_key.includes(':') ? server.api_key : `flussonic:${server.api_key}`;
+  const headers = { 
+    'Authorization': `Basic ${Buffer.from(authString).toString('base64')}`,
+    ...extraHeaders
+  };
   try {
     return await axios({
       method,
       url,
       data,
-      headers: { 'Authorization': `Basic ${Buffer.from(authString).toString('base64')}` },
-      timeout: 10000
+      headers,
+      timeout: timeout,
+      maxContentLength: Infinity,
+      maxBodyLength: Infinity
     });
   } catch (e: any) {
     if (e.response && (e.response.status === 401 || e.response.status === 403) && !server.api_key.includes(':')) {
       authString = `admin:${server.api_key}`;
+      const retryHeaders = {
+        'Authorization': `Basic ${Buffer.from(authString).toString('base64')}`,
+        ...extraHeaders
+      };
       return await axios({
         method,
         url,
         data,
-        headers: { 'Authorization': `Basic ${Buffer.from(authString).toString('base64')}` },
-        timeout: 10000
+        headers: retryHeaders,
+        timeout: timeout,
+        maxContentLength: Infinity,
+        maxBodyLength: Infinity
       });
     }
     throw e;
@@ -959,7 +975,7 @@ app.delete('/api/vods/:id', async (req, res) => {
 });
 
 async function updateVodPlaylistFile(vod: any) {
-  const files = db.prepare('SELECT filename FROM vod_files WHERE vod_id = ? AND filename != "playlist.txt" ORDER BY created_at ASC').all(vod.id) as any[];
+  const files = db.prepare("SELECT filename FROM vod_files WHERE vod_id = ? AND filename != 'playlist.txt' ORDER BY created_at ASC").all(vod.id) as any[];
   if (files.length === 0) return; // Don't create empty playlist
 
   const playlistContent = files.map(v => v.filename).join('\n');
@@ -969,7 +985,7 @@ async function updateVodPlaylistFile(vod: any) {
     if (server) {
       // Try to find the first storage that is not a read-only one if possible, but default to 0
       const uploadUrl = `${server.url}/flussonic/api/v3/vods/${encodeURIComponent(vod.name)}/storages/0/files/playlist.txt`;
-      await flussonicRequest('PUT', uploadUrl, server, playlistContent);
+      await flussonicRequest('PUT', uploadUrl, server, playlistContent, 30000, { 'Content-Type': 'text/plain' });
       console.log(`Playlist uploaded to Flussonic VOD: ${vod.name}`);
     }
   } catch (e: any) {
@@ -1007,6 +1023,18 @@ async function syncVodFilesFromRemote(vod: any, server: any) {
   }
 }
 
+app.post('/api/vods/:id/playlist/update', async (req, res) => {
+  try {
+    const vod = db.prepare('SELECT * FROM vods WHERE id = ?').get(req.params.id) as any;
+    if (!vod) return res.status(404).json({ error: 'VOD not found' });
+    
+    await updateVodPlaylistFile(vod);
+    res.json({ success: true });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 app.get('/api/vods/:id/files', (req, res) => {
   try {
     const files = db.prepare('SELECT * FROM vod_files WHERE vod_id = ? ORDER BY created_at DESC').all(req.params.id);
@@ -1016,7 +1044,145 @@ app.get('/api/vods/:id/files', (req, res) => {
   }
 });
 
-app.post('/api/vods/:id/files', upload.single('file'), async (req, res) => {
+app.get('/api/vods/:id/upload-info', (req, res) => {
+  try {
+    const vod = db.prepare('SELECT * FROM vods WHERE id = ?').get(req.params.id) as any;
+    if (!vod) return res.status(404).json({ error: 'VOD not found' });
+
+    const server = db.prepare('SELECT * FROM servers WHERE id = ?').get(vod.server_id) as any;
+    if (!server) return res.status(404).json({ error: 'Server not found' });
+
+    let authString = server.api_key.includes(':') ? server.api_key : `flussonic:${server.api_key}`;
+    const authHeader = `Basic ${Buffer.from(authString).toString('base64')}`;
+    
+    let altAuthHeader = null;
+    if (!server.api_key.includes(':')) {
+      const altAuthString = `admin:${server.api_key}`;
+      altAuthHeader = `Basic ${Buffer.from(altAuthString).toString('base64')}`;
+    }
+
+    res.json({
+      serverUrl: server.url,
+      vodName: vod.name,
+      authHeader,
+      altAuthHeader
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/vods/:id/files/confirm-upload', async (req, res) => {
+  const { filename, size } = req.body;
+  if (!filename || !size) return res.status(400).json({ error: 'Missing filename or size' });
+
+  try {
+    const vod = db.prepare('SELECT * FROM vods WHERE id = ?').get(req.params.id) as any;
+    if (!vod) return res.status(404).json({ error: 'VOD not found' });
+
+    db.prepare('INSERT INTO vod_files (vod_id, filename, size) VALUES (?, ?, ?)').run(vod.id, filename, size);
+    await updateVodPlaylistFile(vod);
+
+    res.json({ success: true });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/vods/:id/files/init-chunked', (req, res) => {
+  const { filename, totalChunks } = req.body;
+  if (!filename || !totalChunks) return res.status(400).json({ error: 'Missing filename or totalChunks' });
+
+  const uploadId = Math.random().toString(36).substring(2, 15);
+  const chunkDir = path.join(os.tmpdir(), `upload_${uploadId}`);
+  
+  if (!fs.existsSync(chunkDir)) {
+    fs.mkdirSync(chunkDir, { recursive: true });
+  }
+
+  res.json({ uploadId, chunkDir });
+});
+
+app.post('/api/vods/:id/files/chunk', upload.single('chunk'), (req, res) => {
+  const { uploadId, chunkIndex } = req.body;
+  if (!uploadId || chunkIndex === undefined || !req.file) {
+    return res.status(400).json({ error: 'Missing uploadId, chunkIndex, or chunk file' });
+  }
+
+  const chunkDir = path.join(os.tmpdir(), `upload_${uploadId}`);
+  if (!fs.existsSync(chunkDir)) {
+    return res.status(400).json({ error: 'Upload session not found' });
+  }
+
+  const chunkPath = path.join(chunkDir, `chunk_${chunkIndex}`);
+  fs.renameSync(req.file.path, chunkPath);
+
+  res.json({ success: true });
+});
+
+app.post('/api/vods/:id/files/complete-chunked', async (req, res) => {
+  const { uploadId, filename, totalChunks, size } = req.body;
+  if (!uploadId || !filename || !totalChunks || !size) {
+    return res.status(400).json({ error: 'Missing required parameters' });
+  }
+
+  const chunkDir = path.join(os.tmpdir(), `upload_${uploadId}`);
+  const finalPath = path.join(os.tmpdir(), `final_${uploadId}_${filename}`);
+
+  try {
+    const writeStream = fs.createWriteStream(finalPath);
+    for (let i = 0; i < totalChunks; i++) {
+      const chunkPath = path.join(chunkDir, `chunk_${i}`);
+      if (!fs.existsSync(chunkPath)) throw new Error(`Chunk ${i} missing`);
+      const chunkData = fs.readFileSync(chunkPath);
+      writeStream.write(chunkData);
+      fs.unlinkSync(chunkPath);
+    }
+    writeStream.end();
+
+    await new Promise<void>((resolve, reject) => {
+      writeStream.on('finish', () => resolve());
+      writeStream.on('error', reject);
+    });
+
+    // Now push to Flussonic
+    const vod = db.prepare('SELECT * FROM vods WHERE id = ?').get(req.params.id) as any;
+    if (!vod) throw new Error('VOD not found');
+
+    const server = db.prepare('SELECT * FROM servers WHERE id = ?').get(vod.server_id) as any;
+    if (!server) throw new Error('Server not found');
+
+    const uploadUrl = `${server.url}/flussonic/api/v3/vods/${encodeURIComponent(vod.name)}/storages/0/files/${filename}`;
+    const fileStream = fs.createReadStream(finalPath);
+    
+    await flussonicRequest('PUT', uploadUrl, server, fileStream, 3600000);
+    
+    db.prepare('INSERT INTO vod_files (vod_id, filename, size) VALUES (?, ?, ?)').run(vod.id, filename, size);
+    await updateVodPlaylistFile(vod);
+
+    res.json({ success: true });
+  } catch (error: any) {
+    console.error('Chunked upload completion failed:', error.message);
+    res.status(500).json({ error: error.message });
+  } finally {
+    if (fs.existsSync(chunkDir)) fs.rmSync(chunkDir, { recursive: true, force: true });
+    if (fs.existsSync(finalPath)) fs.unlinkSync(finalPath);
+  }
+});
+
+app.post('/api/vods/:id/files', (req, res, next) => {
+  upload.single('file')(req, res, (err) => {
+    if (err instanceof multer.MulterError) {
+      if (err.code === 'LIMIT_FILE_SIZE') {
+        return res.status(413).json({ error: 'File too large. Max limit is 1000GB.' });
+      }
+      return res.status(400).json({ error: err.message });
+    } else if (err) {
+      return res.status(500).json({ error: err.message || 'Upload error' });
+    }
+    next();
+  });
+}, async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
   
   const vod = db.prepare('SELECT * FROM vods WHERE id = ?').get(req.params.id) as any;
@@ -1030,9 +1196,10 @@ app.post('/api/vods/:id/files', upload.single('file'), async (req, res) => {
     if (!server) throw new Error('Server not found');
 
     const uploadUrl = `${server.url}/flussonic/api/v3/vods/${encodeURIComponent(vod.name)}/storages/0/files/${req.file.originalname}`;
-    const fileBuffer = fs.readFileSync(req.file.path);
+    const fileStream = fs.createReadStream(req.file.path);
     
-    await flussonicRequest('PUT', uploadUrl, server, fileBuffer);
+    // Use a much longer timeout for file uploads (1 hour)
+    await flussonicRequest('PUT', uploadUrl, server, fileStream, 3600000);
     console.log(`File uploaded to Flussonic VOD: ${vod.name}/${req.file.originalname}`);
 
     db.prepare('INSERT INTO vod_files (vod_id, filename, size) VALUES (?, ?, ?)').run(vod.id, req.file.originalname, req.file.size);

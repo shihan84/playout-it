@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
-import { Plus, Trash2, Folder, AlertCircle, RefreshCw, Edit2, FileVideo, Upload, X, Copy, Check } from 'lucide-react';
+import { Plus, Trash2, Folder, AlertCircle, RefreshCw, Edit2, FileVideo, Upload, X, Copy, Check, FileText } from 'lucide-react';
 
 export default function VodManager() {
   const [vods, setVods] = useState<any[]>([]);
@@ -140,28 +140,139 @@ export default function VodManager() {
     }
   };
 
+  const handleUpdatePlaylist = async () => {
+    if (!managingFilesFor) return;
+    setIsUploading(true);
+    try {
+      await axios.post(`/api/vods/${managingFilesFor.id}/playlist/update`);
+      alert('Playlist updated successfully!');
+    } catch (error: any) {
+      console.error('Failed to update playlist', error);
+      alert(error.response?.data?.error || 'Failed to update playlist');
+    } finally {
+      setIsUploading(false);
+    }
+  };
+
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     if (!e.target.files || e.target.files.length === 0 || !managingFilesFor) return;
     
     const file = e.target.files[0];
-    const formData = new FormData();
-    formData.append('file', file);
-
     setIsUploading(true);
     setUploadProgress(0);
 
     try {
-      await axios.post(`/api/vods/${managingFilesFor.id}/files`, formData, {
-        headers: { 'Content-Type': 'multipart/form-data' },
-        onUploadProgress: (progressEvent) => {
-          const percentCompleted = Math.round((progressEvent.loaded * 100) / (progressEvent.total || 1));
-          setUploadProgress(percentCompleted);
+      // 1. Get upload info from our backend
+      const infoRes = await axios.get(`/api/vods/${managingFilesFor.id}/upload-info`);
+      const { serverUrl, vodName, authHeader, altAuthHeader } = infoRes.data;
+
+      // Ensure serverUrl doesn't have a trailing slash for consistency
+      const cleanServerUrl = serverUrl.replace(/\/$/, '');
+      const uploadUrl = `${cleanServerUrl}/flussonic/api/v3/vods/${encodeURIComponent(vodName)}/storages/0/files/${file.name}`;
+      
+      // Check for mixed content
+      if (window.location.protocol === 'https:' && cleanServerUrl.startsWith('http:')) {
+        console.warn('Mixed content detected: App is HTTPS but Flussonic is HTTP. Direct upload will likely fail.');
+      }
+
+      const performDirectUpload = async (header: string) => {
+        return await axios.put(uploadUrl, file, {
+          headers: { 
+            'Authorization': header,
+            'Content-Type': file.type || 'application/octet-stream'
+          },
+          onUploadProgress: (progressEvent) => {
+            const percentCompleted = Math.round((progressEvent.loaded * 100) / (progressEvent.total || 1));
+            setUploadProgress(percentCompleted);
+          }
+        });
+      };
+
+      try {
+        try {
+          await performDirectUpload(authHeader);
+        } catch (firstError: any) {
+          // If 403 and we have an alternate header, try it
+          if (firstError.response?.status === 403 && altAuthHeader) {
+            console.log('Direct upload failed with 403, trying alternate auth header...');
+            await performDirectUpload(altAuthHeader);
+          } else {
+            throw firstError;
+          }
         }
-      });
-      fetchVodFiles(managingFilesFor.id);
+
+        // 3. Confirm upload with our backend
+        await axios.post(`/api/vods/${managingFilesFor.id}/files/confirm-upload`, {
+          filename: file.name,
+          size: file.size
+        });
+
+        fetchVodFiles(managingFilesFor.id);
+      } catch (directError: any) {
+        console.error('Direct upload failed', directError);
+        
+        let errorMsg = 'Direct upload to Flussonic failed. ';
+        if (window.location.protocol === 'https:' && cleanServerUrl.startsWith('http:')) {
+          errorMsg += 'This is likely due to "Mixed Content" (App is HTTPS, Flussonic is HTTP). Please use HTTPS for your Flussonic server URL or access the app via HTTP.';
+        } else if (directError.code === 'ERR_NETWORK') {
+          errorMsg += 'Network error. Please ensure the Flussonic server URL is accessible from your browser and CORS is enabled.';
+        } else {
+          errorMsg += directError.message || 'Unknown error';
+        }
+        
+        // Fallback to chunked upload if direct upload fails
+        console.log('Falling back to chunked upload...');
+        
+        try {
+          const CHUNK_SIZE = 5 * 1024 * 1024; // 5MB chunks
+          const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+          
+          // 1. Init chunked upload
+          const initRes = await axios.post(`/api/vods/${managingFilesFor.id}/files/init-chunked`, {
+            filename: file.name,
+            totalChunks
+          });
+          const { uploadId } = initRes.data;
+
+          // 2. Upload chunks
+          for (let i = 0; i < totalChunks; i++) {
+            const start = i * CHUNK_SIZE;
+            const end = Math.min(start + CHUNK_SIZE, file.size);
+            const chunk = file.slice(start, end);
+            
+            const chunkFormData = new FormData();
+            chunkFormData.append('chunk', chunk);
+            chunkFormData.append('uploadId', uploadId);
+            chunkFormData.append('chunkIndex', i.toString());
+            
+            await axios.post(`/api/vods/${managingFilesFor.id}/files/chunk`, chunkFormData, {
+              onUploadProgress: (progressEvent) => {
+                const chunkProgress = Math.round((progressEvent.loaded * 100) / (progressEvent.total || 1));
+                const overallProgress = Math.round(((i * 100) + chunkProgress) / totalChunks);
+                setUploadProgress(overallProgress);
+              }
+            });
+          }
+
+          // 3. Complete chunked upload
+          await axios.post(`/api/vods/${managingFilesFor.id}/files/complete-chunked`, {
+            uploadId,
+            filename: file.name,
+            totalChunks,
+            size: file.size
+          });
+
+          fetchVodFiles(managingFilesFor.id);
+        } catch (chunkError: any) {
+          console.error('Chunked upload fallback failed', chunkError);
+          const finalError = chunkError.response?.data?.error || chunkError.message || 'Failed to upload file';
+          alert(`${errorMsg}\n\nFallback also failed: ${finalError}`);
+        }
+      }
     } catch (error: any) {
       console.error('Failed to upload file', error);
-      alert(error.response?.data?.error || 'Failed to upload file');
+      const errorMsg = error.response?.data?.error || error.message || 'Failed to upload file';
+      alert(errorMsg);
     } finally {
       setIsUploading(false);
       setUploadProgress(0);
@@ -244,7 +355,7 @@ export default function VodManager() {
                   <div className="flex flex-col items-center justify-center pt-5 pb-6">
                     <Upload className="w-8 h-8 mb-3 text-zinc-500 group-hover:text-emerald-400 transition-colors" />
                     <p className="mb-2 text-sm text-zinc-400"><span className="font-semibold text-white">Click to upload</span> or drag and drop</p>
-                    <p className="text-xs text-zinc-500">MP4, TS, MKV (Max 2GB)</p>
+                    <p className="text-xs text-zinc-500">MP4, TS, MKV (Max 1000GB)</p>
                   </div>
                   <input 
                     type="file" 
@@ -267,6 +378,47 @@ export default function VodManager() {
                         style={{ width: `${uploadProgress}%` }}
                       ></div>
                     </div>
+                  </div>
+                )}
+              </div>
+
+              <div className="space-y-3">
+                <div className="flex items-center justify-between">
+                  <h4 className="text-sm font-medium text-zinc-400 uppercase tracking-wider">Playlist</h4>
+                  <button 
+                    onClick={handleUpdatePlaylist}
+                    disabled={isUploading || vodFiles.length === 0}
+                    className="text-xs font-medium text-emerald-400 hover:text-emerald-300 flex items-center gap-1 transition-colors disabled:opacity-50"
+                  >
+                    <RefreshCw size={12} />
+                    Update Playlist
+                  </button>
+                </div>
+                {vodFiles.length > 0 ? (
+                  <div className="p-3 bg-zinc-950 border border-zinc-800 rounded-xl">
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-2 overflow-hidden">
+                        <FileText size={16} className="text-emerald-400 flex-shrink-0" />
+                        <span className="text-sm text-zinc-300 truncate font-mono">playlist.txt</span>
+                      </div>
+                      <button 
+                        onClick={() => {
+                          const url = `playlist://${managingFilesFor.name}/playlist.txt`;
+                          navigator.clipboard.writeText(url);
+                          alert('Copied to clipboard!');
+                        }}
+                        className="text-xs text-zinc-500 hover:text-white transition-colors"
+                      >
+                        Copy URL
+                      </button>
+                    </div>
+                    <p className="text-[10px] text-zinc-500 mt-1 truncate font-mono">
+                      playlist://{managingFilesFor.name}/playlist.txt
+                    </p>
+                  </div>
+                ) : (
+                  <div className="text-center py-4 text-zinc-500 bg-zinc-900/50 rounded-xl border border-zinc-800/50 text-xs">
+                    Upload files to generate a playlist.
                   </div>
                 )}
               </div>
