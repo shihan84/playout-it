@@ -403,7 +403,7 @@ export default function VodManager() {
                       </div>
                       <button 
                         onClick={() => {
-                          const url = `playlist://${managingFilesFor.name}/playlist.txt`;
+                          const url = `playlist:///${managingFilesFor.name}/playlist.txt`;
                           navigator.clipboard.writeText(url);
                           alert('Copied to clipboard!');
                         }}
@@ -413,7 +413,7 @@ export default function VodManager() {
                       </button>
                     </div>
                     <p className="text-[10px] text-zinc-500 mt-1 truncate font-mono">
-                      playlist://{managingFilesFor.name}/playlist.txt
+                      playlist:///{managingFilesFor.name}/playlist.txt
                     </p>
                   </div>
                 ) : (

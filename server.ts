@@ -13,7 +13,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = 3000;
 
 const upload = multer({ 
   dest: os.tmpdir(),
@@ -978,7 +978,7 @@ async function updateVodPlaylistFile(vod: any) {
   const files = db.prepare("SELECT filename FROM vod_files WHERE vod_id = ? AND filename != 'playlist.txt' ORDER BY created_at ASC").all(vod.id) as any[];
   if (files.length === 0) return; // Don't create empty playlist
 
-  const playlistContent = files.map(v => v.filename).join('\n');
+  const playlistContent = files.map(v => `${vod.name}/${v.filename}`).join('\n');
 
   try {
     const server = db.prepare('SELECT * FROM servers WHERE id = ?').get(vod.server_id) as any;
@@ -994,9 +994,41 @@ async function updateVodPlaylistFile(vod: any) {
 }
 
 async function syncVodFilesFromRemote(vod: any, server: any) {
-  const flussonicUrl = `${server.url}/flussonic/api/v3/vods/${encodeURIComponent(vod.name)}/storages/0/files`;
+  const baseUrl = server.url.replace(/\/$/, '');
+  const encodedName = encodeURIComponent(vod.name);
+  
+  // Try multiple URL patterns for VOD files
+  const urls = [
+    `${baseUrl}/flussonic/api/v3/vods/${encodedName}/storages/0/files`,
+    `${baseUrl}/flussonic/api/v3/vods/${encodedName}/files`,
+    `${baseUrl}/flussonic/api/v3/vods/${vod.name}/storages/0/files`,
+    `${baseUrl}/flussonic/api/v3/vods/${vod.name}/files`
+  ];
+
+  let response;
+  let lastError;
+
+  for (const url of urls) {
+    try {
+      console.log(`[syncVodFilesFromRemote] Trying URL: ${url}`);
+      response = await flussonicRequest('GET', url, server);
+      if (response && response.data) break;
+    } catch (e: any) {
+      lastError = e;
+      console.warn(`[syncVodFilesFromRemote] Failed for ${url}:`, e.message);
+      // Continue to next URL if it's a 404 or 500
+      if (e.response && (e.response.status === 404 || e.response.status === 500)) {
+        continue;
+      }
+      throw e;
+    }
+  }
+
+  if (!response) {
+    throw lastError || new Error('Failed to fetch VOD files from any known endpoint');
+  }
+
   try {
-    const response = await flussonicRequest('GET', flussonicUrl, server);
     let remoteFiles: any[] = [];
     
     if (Array.isArray(response.data)) {
@@ -1018,7 +1050,7 @@ async function syncVodFilesFromRemote(vod: any, server: any) {
     await updateVodPlaylistFile(vod);
     return remoteFiles.length;
   } catch (e: any) {
-    console.error(`Failed to sync files for VOD ${vod.name}:`, e.message);
+    console.error(`Failed to process synced files for VOD ${vod.name}:`, e.message);
     throw e;
   }
 }
@@ -1565,4 +1597,7 @@ async function startServer() {
   });
 }
 
-startServer();
+startServer().catch(err => {
+  console.error("Failed to start server:", err);
+  process.exit(1);
+});
