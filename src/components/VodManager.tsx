@@ -126,6 +126,20 @@ export default function VodManager() {
     }
   };
 
+  const handleSyncVodFiles = async () => {
+    if (!managingFilesFor) return;
+    setIsUploading(true);
+    try {
+      await axios.post(`/api/vods/${managingFilesFor.id}/files/sync`);
+      fetchVodFiles(managingFilesFor.id);
+    } catch (error: any) {
+      console.error('Failed to sync VOD files', error);
+      alert(error.response?.data?.error || 'Failed to sync VOD files');
+    } finally {
+      setIsUploading(false);
+    }
+  };
+
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     if (!e.target.files || e.target.files.length === 0 || !managingFilesFor) return;
     
@@ -258,7 +272,17 @@ export default function VodManager() {
               </div>
 
               <div className="space-y-3">
-                <h4 className="text-sm font-medium text-zinc-400 uppercase tracking-wider">Uploaded Files</h4>
+                <div className="flex items-center justify-between">
+                  <h4 className="text-sm font-medium text-zinc-400 uppercase tracking-wider">Uploaded Files</h4>
+                  <button 
+                    onClick={handleSyncVodFiles}
+                    disabled={isUploading}
+                    className="text-xs font-medium text-emerald-400 hover:text-emerald-300 flex items-center gap-1 transition-colors disabled:opacity-50"
+                  >
+                    <RefreshCw size={12} className={isUploading ? 'animate-spin' : ''} />
+                    Sync Files
+                  </button>
+                </div>
                 {vodFiles.length === 0 ? (
                   <div className="text-center py-8 text-zinc-500 bg-zinc-900/50 rounded-xl border border-zinc-800/50">
                     No files uploaded yet.

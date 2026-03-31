@@ -13,7 +13,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
-const PORT = 3000;
+const PORT = process.env.PORT || 3000;
 
 const upload = multer({ dest: os.tmpdir() });
 
@@ -77,7 +77,7 @@ const broadcastStreamsUpdate = () => {
 app.use(express.json());
 
 // Database Setup
-const dbPath = 'flussonic.db';
+const dbPath = process.env.DATABASE_PATH || 'flussonic.db';
 let db: any;
 
 try {
@@ -959,18 +959,51 @@ app.delete('/api/vods/:id', async (req, res) => {
 });
 
 async function updateVodPlaylistFile(vod: any) {
-  const files = db.prepare('SELECT filename FROM vod_files WHERE vod_id = ? ORDER BY created_at ASC').all(vod.id) as any[];
+  const files = db.prepare('SELECT filename FROM vod_files WHERE vod_id = ? AND filename != "playlist.txt" ORDER BY created_at ASC').all(vod.id) as any[];
+  if (files.length === 0) return; // Don't create empty playlist
+
   const playlistContent = files.map(v => v.filename).join('\n');
 
   try {
     const server = db.prepare('SELECT * FROM servers WHERE id = ?').get(vod.server_id) as any;
     if (server) {
+      // Try to find the first storage that is not a read-only one if possible, but default to 0
       const uploadUrl = `${server.url}/flussonic/api/v3/vods/${encodeURIComponent(vod.name)}/storages/0/files/playlist.txt`;
       await flussonicRequest('PUT', uploadUrl, server, playlistContent);
       console.log(`Playlist uploaded to Flussonic VOD: ${vod.name}`);
     }
   } catch (e: any) {
     console.warn('Failed to upload playlist to Flussonic VOD:', e.message);
+  }
+}
+
+async function syncVodFilesFromRemote(vod: any, server: any) {
+  const flussonicUrl = `${server.url}/flussonic/api/v3/vods/${encodeURIComponent(vod.name)}/storages/0/files`;
+  try {
+    const response = await flussonicRequest('GET', flussonicUrl, server);
+    let remoteFiles: any[] = [];
+    
+    if (Array.isArray(response.data)) {
+      remoteFiles = response.data;
+    } else if (response.data && Array.isArray(response.data.files)) {
+      remoteFiles = response.data.files;
+    }
+
+    db.transaction(() => {
+      db.prepare('DELETE FROM vod_files WHERE vod_id = ?').run(vod.id);
+      const insertStmt = db.prepare('INSERT INTO vod_files (vod_id, filename, size) VALUES (?, ?, ?)');
+      for (const file of remoteFiles) {
+        const name = file.path || file.name;
+        if (!name || name === 'playlist.txt' || file.type === 'directory') continue;
+        insertStmt.run(vod.id, name, file.size || 0);
+      }
+    })();
+
+    await updateVodPlaylistFile(vod);
+    return remoteFiles.length;
+  } catch (e: any) {
+    console.error(`Failed to sync files for VOD ${vod.name}:`, e.message);
+    throw e;
   }
 }
 
@@ -1038,6 +1071,21 @@ app.delete('/api/vods/:id/files/:filename', async (req, res) => {
   }
 });
 
+app.post('/api/vods/:id/files/sync', async (req, res) => {
+  try {
+    const vod = db.prepare('SELECT * FROM vods WHERE id = ?').get(req.params.id) as any;
+    if (!vod) return res.status(404).json({ error: 'VOD not found' });
+    
+    const server = db.prepare('SELECT * FROM servers WHERE id = ?').get(vod.server_id) as any;
+    if (!server) return res.status(404).json({ error: 'Server not found' });
+
+    const count = await syncVodFilesFromRemote(vod, server);
+    res.json({ success: true, count });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 app.post('/api/vods/:id/sync', async (req, res) => {
   try {
     const vod = db.prepare('SELECT * FROM vods WHERE id = ?').get(req.params.id) as any;
@@ -1081,6 +1129,14 @@ app.post('/api/vods/:id/sync', async (req, res) => {
 
       if (paths.length > 0) {
         db.prepare('UPDATE vods SET paths = ? WHERE id = ?').run(JSON.stringify(paths), vod.id);
+        
+        // Also sync files
+        try {
+          await syncVodFilesFromRemote(vod, server);
+        } catch (e: any) {
+          console.warn('Failed to sync files during VOD sync:', e.message);
+        }
+
         res.json({ success: true, paths });
       } else {
         res.json({ success: true, message: 'No paths found or unchanged' });
@@ -1327,7 +1383,7 @@ async function startServer() {
     });
   }
 
-  const server = app.listen(PORT, "0.0.0.0", () => {
+  const server = app.listen(Number(PORT), "0.0.0.0", () => {
     console.log(`Server running on http://localhost:${PORT}`);
   });
 
