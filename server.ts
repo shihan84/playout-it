@@ -324,6 +324,7 @@ app.post('/api/streams', async (req, res) => {
     const server = db.prepare('SELECT * FROM servers WHERE id = ?').get(server_id) as any;
     if (!server) return res.status(404).json({ error: 'Server not found' });
 
+    const baseUrl = server.url.replace(/\/$/, '');
     // Automatically create a VOD folder for this stream
     const vodName = name;
     const vodPath = `/storage/${vodName}`;
@@ -334,15 +335,20 @@ app.post('/api/streams', async (req, res) => {
       const vodPayload = {
         storages: [{ url: vodPath }]
       };
-      const flussonicVodUrl = `${server.url}/flussonic/api/v3/vods/${encodeURIComponent(vodName)}`;
+      const flussonicVodUrl = `${baseUrl}/flussonic/api/v3/vods/${encodeURIComponent(vodName)}`;
       await flussonicRequest('PUT', flussonicVodUrl, server, vodPayload)
-        .catch(e => console.warn('Flussonic create VOD error (ignored for preview):', e.message));
+        .catch(e => {
+          console.warn(`Flussonic create VOD error for ${vodName}:`, e.message);
+          // Try alternative payload if first fails
+          return flussonicRequest('PUT', flussonicVodUrl, server, { storage: vodPath })
+            .catch(e2 => console.warn('Alternative VOD create failed:', e2.message));
+        });
       
       db.prepare('INSERT INTO vods (server_id, name, paths) VALUES (?, ?, ?)').run(server_id, vodName, JSON.stringify([vodPath]));
     }
 
     // Configure stream on Flussonic
-    const flussonicUrl = `${server.url}/flussonic/api/v3/streams/${encodeURIComponent(name)}`;
+    const flussonicUrl = `${baseUrl}/flussonic/api/v3/streams/${encodeURIComponent(name)}`;
     
     const payload: any = {
       inputs: streamInputs
@@ -526,7 +532,8 @@ app.get('/api/streams/:id/details', async (req, res) => {
 
 // Helper to sync streams for a server
 async function syncServerStreams(server: any) {
-  const flussonicUrl = `${server.url}/flussonic/api/v3/streams`;
+  const baseUrl = server.url.replace(/\/$/, '');
+  const flussonicUrl = `${baseUrl}/flussonic/api/v3/streams`;
   const response = await flussonicRequest('GET', flussonicUrl, server);
 
   let streams: any[] = [];
@@ -596,7 +603,8 @@ async function syncServerStreams(server: any) {
 
 // Helper to sync VODs for a server
 async function syncServerVods(server: any) {
-  const flussonicUrl = `${server.url}/flussonic/api/v3/vods`;
+  const baseUrl = server.url.replace(/\/$/, '');
+  const flussonicUrl = `${baseUrl}/flussonic/api/v3/vods`;
   try {
     let response;
     try {
@@ -605,7 +613,7 @@ async function syncServerVods(server: any) {
     } catch (e: any) {
       if (e.response && e.response.status === 404) {
         // Fallback to config API if /vods endpoint is not available
-        const configUrl = `${server.url}/flussonic/api/v3/config`;
+        const configUrl = `${baseUrl}/flussonic/api/v3/config`;
         response = await flussonicRequest('GET', configUrl, server);
         console.log(`[syncServerVods] /config response for ${server.name}:`, JSON.stringify(response.data.vods || {}).substring(0, 500));
         if (response.data && response.data.vods) {
@@ -910,10 +918,18 @@ app.post('/api/vods', async (req, res) => {
     const server = db.prepare('SELECT * FROM servers WHERE id = ?').get(server_id) as any;
     if (!server) return res.status(404).json({ error: 'Server not found' });
 
-    const flussonicUrl = `${server.url}/flussonic/api/v3/vods/${encodeURIComponent(name)}`;
+    const baseUrl = server.url.replace(/\/$/, '');
+    const flussonicUrl = `${baseUrl}/flussonic/api/v3/vods/${encodeURIComponent(name)}`;
     await flussonicRequest('PUT', flussonicUrl, server, {
       storages: paths.map((p: string) => ({ url: p }))
-    }).catch(e => console.warn('Flussonic create VOD error (ignored for preview):', e.message));
+    }).catch(e => {
+      console.warn(`Flussonic create VOD error for ${name}:`, e.message);
+      // Try alternative payload
+      if (paths.length > 0) {
+        return flussonicRequest('PUT', flussonicUrl, server, { storage: paths[0] })
+          .catch(e2 => console.warn('Alternative VOD create failed:', e2.message));
+      }
+    });
 
     const stmt = db.prepare('INSERT INTO vods (server_id, name, paths) VALUES (?, ?, ?)');
     const info = stmt.run(server_id, name, JSON.stringify(paths));
@@ -933,20 +949,28 @@ app.put('/api/vods/:id', async (req, res) => {
     const server = db.prepare('SELECT * FROM servers WHERE id = ?').get(server_id) as any;
     if (!server) return res.status(404).json({ error: 'Server not found' });
 
-    const flussonicUrl = `${server.url}/flussonic/api/v3/vods/${encodeURIComponent(name)}`;
+    const baseUrl = server.url.replace(/\/$/, '');
+    const flussonicUrl = `${baseUrl}/flussonic/api/v3/vods/${encodeURIComponent(name)}`;
     
     // If name changed, we might need to delete old one and create new, but for simplicity let's just update the new one
     if (vod.name !== name) {
       const oldServer = db.prepare('SELECT * FROM servers WHERE id = ?').get(vod.server_id) as any;
       if (oldServer) {
-        const oldFlussonicUrl = `${oldServer.url}/flussonic/api/v3/vods/${encodeURIComponent(vod.name)}`;
+        const oldBaseUrl = oldServer.url.replace(/\/$/, '');
+        const oldFlussonicUrl = `${oldBaseUrl}/flussonic/api/v3/vods/${encodeURIComponent(vod.name)}`;
         await flussonicRequest('DELETE', oldFlussonicUrl, oldServer).catch(() => {});
       }
     }
 
     await flussonicRequest('PUT', flussonicUrl, server, {
       storages: paths.map((p: string) => ({ url: p }))
-    }).catch(e => console.warn('Flussonic update VOD error (ignored for preview):', e.message));
+    }).catch(e => {
+      console.warn(`Flussonic update VOD error for ${name}:`, e.message);
+      if (paths.length > 0) {
+        return flussonicRequest('PUT', flussonicUrl, server, { storage: paths[0] })
+          .catch(e2 => console.warn('Alternative VOD update failed:', e2.message));
+      }
+    });
 
     db.prepare('UPDATE vods SET server_id = ?, name = ?, paths = ? WHERE id = ?').run(server_id, name, JSON.stringify(paths), req.params.id);
     res.json({ id: req.params.id, server_id, name, paths });
@@ -975,10 +999,14 @@ app.delete('/api/vods/:id', async (req, res) => {
 });
 
 async function updateVodPlaylistFile(vod: any) {
-  const files = db.prepare("SELECT filename FROM vod_files WHERE vod_id = ? AND filename != 'playlist.txt' ORDER BY created_at ASC").all(vod.id) as any[];
+  const files = db.prepare("SELECT filename FROM vod_files WHERE vod_id = ? AND filename NOT LIKE '%playlist.txt' ORDER BY created_at ASC").all(vod.id) as any[];
   if (files.length === 0) return; // Don't create empty playlist
 
-  const playlistContent = files.map(v => `${vod.name}/${v.filename}`).join('\n');
+  const firstPart = vod.name.split('/')[0];
+  const playlistContent = files.map(v => {
+    if (v.filename.startsWith(`${firstPart}/`)) return v.filename;
+    return `${firstPart}/${v.filename}`;
+  }).join('\n');
 
   try {
     const server = db.prepare('SELECT * FROM servers WHERE id = ?').get(vod.server_id) as any;
@@ -1042,7 +1070,7 @@ async function syncVodFilesFromRemote(vod: any, server: any) {
       const insertStmt = db.prepare('INSERT INTO vod_files (vod_id, filename, size) VALUES (?, ?, ?)');
       for (const file of remoteFiles) {
         const name = file.path || file.name;
-        if (!name || name === 'playlist.txt' || file.type === 'directory') continue;
+        if (!name || name.endsWith('playlist.txt') || file.type === 'directory') continue;
         insertStmt.run(vod.id, name, file.size || 0);
       }
     })();
@@ -1054,6 +1082,24 @@ async function syncVodFilesFromRemote(vod: any, server: any) {
     throw e;
   }
 }
+
+app.get('/api/vods/:id/playlist/content', (req, res) => {
+  try {
+    const vod = db.prepare('SELECT * FROM vods WHERE id = ?').get(req.params.id) as any;
+    if (!vod) return res.status(404).json({ error: 'VOD not found' });
+    
+    const files = db.prepare("SELECT filename FROM vod_files WHERE vod_id = ? AND filename NOT LIKE '%playlist.txt' ORDER BY created_at ASC").all(vod.id) as any[];
+    const firstPart = vod.name.split('/')[0];
+    const playlistContent = files.map(v => {
+      if (v.filename.startsWith(`${firstPart}/`)) return v.filename;
+      return `${firstPart}/${v.filename}`;
+    }).join('\n');
+    
+    res.json({ content: playlistContent });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
 
 app.post('/api/vods/:id/playlist/update', async (req, res) => {
   try {
@@ -1256,7 +1302,8 @@ app.delete('/api/vods/:id/files/:filename', async (req, res) => {
 
     const server = db.prepare('SELECT * FROM servers WHERE id = ?').get(vod.server_id) as any;
     if (server) {
-      const deleteUrl = `${server.url}/flussonic/api/v3/vods/${encodeURIComponent(vod.name)}/storages/0/files/${req.params.filename}`;
+      const baseUrl = server.url.replace(/\/$/, '');
+      const deleteUrl = `${baseUrl}/flussonic/api/v3/vods/${encodeURIComponent(vod.name)}/storages/0/files/${req.params.filename}`;
       await flussonicRequest('DELETE', deleteUrl, server).catch(e => console.warn('Failed to delete from Flussonic (ignored):', e.message));
     }
 
@@ -1293,14 +1340,15 @@ app.post('/api/vods/:id/sync', async (req, res) => {
     const server = db.prepare('SELECT * FROM servers WHERE id = ?').get(vod.server_id) as any;
     if (!server) return res.status(404).json({ error: 'Server not found' });
 
-    const flussonicUrl = `${server.url}/flussonic/api/v3/vods/${encodeURIComponent(vod.name)}`;
+    const baseUrl = server.url.replace(/\/$/, '');
+    const flussonicUrl = `${baseUrl}/flussonic/api/v3/vods/${encodeURIComponent(vod.name)}`;
     try {
       let response;
       try {
         response = await flussonicRequest('GET', flussonicUrl, server);
       } catch (e: any) {
         if (e.response && e.response.status === 404) {
-          const configUrl = `${server.url}/flussonic/api/v3/config`;
+          const configUrl = `${baseUrl}/flussonic/api/v3/config`;
           const configRes = await flussonicRequest('GET', configUrl, server);
           if (configRes.data && configRes.data.vods && configRes.data.vods[vod.name]) {
             response = { data: configRes.data.vods[vod.name] };

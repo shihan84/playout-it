@@ -16,6 +16,9 @@ export default function VodManager() {
   const [isUploading, setIsUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
   const [copiedId, setCopiedId] = useState<number | null>(null);
+  const [playlistContent, setPlaylistContent] = useState<string | null>(null);
+  const [showPlaylistContent, setShowPlaylistContent] = useState(false);
+  const [isLoadingPlaylist, setIsLoadingPlaylist] = useState(false);
 
   useEffect(() => {
     fetchData();
@@ -146,11 +149,30 @@ export default function VodManager() {
     try {
       await axios.post(`/api/vods/${managingFilesFor.id}/playlist/update`);
       alert('Playlist updated successfully!');
+      // Refresh content if it's currently shown
+      if (showPlaylistContent) {
+        fetchPlaylistContent();
+      }
     } catch (error: any) {
       console.error('Failed to update playlist', error);
       alert(error.response?.data?.error || 'Failed to update playlist');
     } finally {
       setIsUploading(false);
+    }
+  };
+
+  const fetchPlaylistContent = async () => {
+    if (!managingFilesFor) return;
+    setIsLoadingPlaylist(true);
+    try {
+      const res = await axios.get(`/api/vods/${managingFilesFor.id}/playlist/content`);
+      setPlaylistContent(res.data.content);
+      setShowPlaylistContent(true);
+    } catch (error: any) {
+      console.error('Failed to fetch playlist content', error);
+      alert(error.response?.data?.error || 'Failed to fetch playlist content');
+    } finally {
+      setIsLoadingPlaylist(false);
     }
   };
 
@@ -385,14 +407,24 @@ export default function VodManager() {
               <div className="space-y-3">
                 <div className="flex items-center justify-between">
                   <h4 className="text-sm font-medium text-zinc-400 uppercase tracking-wider">Playlist</h4>
-                  <button 
-                    onClick={handleUpdatePlaylist}
-                    disabled={isUploading || vodFiles.length === 0}
-                    className="text-xs font-medium text-emerald-400 hover:text-emerald-300 flex items-center gap-1 transition-colors disabled:opacity-50"
-                  >
-                    <RefreshCw size={12} />
-                    Update Playlist
-                  </button>
+                  <div className="flex items-center gap-3">
+                    <button 
+                      onClick={fetchPlaylistContent}
+                      disabled={isUploading || vodFiles.length === 0 || isLoadingPlaylist}
+                      className="text-xs font-medium text-blue-400 hover:text-blue-300 flex items-center gap-1 transition-colors disabled:opacity-50"
+                    >
+                      {isLoadingPlaylist ? <RefreshCw size={12} className="animate-spin" /> : <FileText size={12} />}
+                      View Content
+                    </button>
+                    <button 
+                      onClick={handleUpdatePlaylist}
+                      disabled={isUploading || vodFiles.length === 0}
+                      className="text-xs font-medium text-emerald-400 hover:text-emerald-300 flex items-center gap-1 transition-colors disabled:opacity-50"
+                    >
+                      <RefreshCw size={12} />
+                      Update Playlist
+                    </button>
+                  </div>
                 </div>
                 {vodFiles.length > 0 ? (
                   <div className="p-3 bg-zinc-950 border border-zinc-800 rounded-xl">
@@ -419,6 +451,23 @@ export default function VodManager() {
                 ) : (
                   <div className="text-center py-4 text-zinc-500 bg-zinc-900/50 rounded-xl border border-zinc-800/50 text-xs">
                     Upload files to generate a playlist.
+                  </div>
+                )}
+
+                {showPlaylistContent && (
+                  <div className="mt-4 p-4 bg-zinc-950 border border-zinc-800 rounded-xl animate-in fade-in slide-in-from-top-2">
+                    <div className="flex items-center justify-between mb-2">
+                      <h5 className="text-xs font-medium text-zinc-400 uppercase tracking-wider">playlist.txt Content</h5>
+                      <button 
+                        onClick={() => setShowPlaylistContent(false)}
+                        className="text-zinc-500 hover:text-white transition-colors"
+                      >
+                        <X size={14} />
+                      </button>
+                    </div>
+                    <pre className="text-[11px] text-zinc-300 font-mono bg-black/50 p-3 rounded-lg overflow-x-auto max-h-60 overflow-y-auto whitespace-pre-wrap">
+                      {playlistContent || 'Playlist is empty'}
+                    </pre>
                   </div>
                 )}
               </div>
