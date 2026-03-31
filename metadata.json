@@ -1,0 +1,5 @@
+{
+  "name": "Flussonic Manager",
+  "description": "Vercel-based Flussonic Media Server management dashboard with playlist fallback and Telegram watchdog.",
+  "requestFramePermissions": []
+}
