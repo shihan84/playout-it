@@ -1658,109 +1658,129 @@ const sendTelegramNotification = async (message: string) => {
   }
 };
 
+let isChecking = false;
 const checkStreams = async () => {
-  const streams = db.prepare('SELECT * FROM streams').all() as any[];
-  const servers = db.prepare('SELECT * FROM servers').all() as any[];
+  if (isChecking) return;
+  isChecking = true;
   
-  const serverMap = servers.reduce((acc, s) => { acc[s.id] = s; return acc; }, {});
-  
-  // Group streams by server
-  const streamsByServer: Record<number, any[]> = {};
-  for (const stream of streams) {
-    if (!streamsByServer[stream.server_id]) streamsByServer[stream.server_id] = [];
-    streamsByServer[stream.server_id].push(stream);
-  }
+  try {
+    const streams = db.prepare('SELECT * FROM streams').all() as any[];
+    const servers = db.prepare('SELECT * FROM servers').all() as any[];
+    
+    const serverMap = servers.reduce((acc, s) => { acc[s.id] = s; return acc; }, {});
+    
+    // Group streams by server
+    const streamsByServer: Record<number, any[]> = {};
+    for (const stream of streams) {
+      if (!streamsByServer[stream.server_id]) streamsByServer[stream.server_id] = [];
+      streamsByServer[stream.server_id].push(stream);
+    }
 
-  let hasUpdates = false;
+    let hasUpdates = false;
 
-  for (const serverId of Object.keys(streamsByServer)) {
-    const server = serverMap[Number(serverId)];
-    if (!server) continue;
+    for (const serverId of Object.keys(streamsByServer)) {
+      const server = serverMap[Number(serverId)];
+      if (!server) continue;
 
-    try {
-      const flussonicUrl = `${server.url}/flussonic/api/v3/streams`;
-      const response = await flussonicRequest('GET', flussonicUrl, server);
-      const remoteStreams = Array.isArray(response.data) ? response.data : (response.data.streams || []);
-      const remoteStreamMap = remoteStreams.reduce((acc: any, s: any) => { acc[s.name] = s; return acc; }, {});
+      try {
+        const flussonicUrl = `${server.url}/flussonic/api/v3/streams`;
+        const response = await flussonicRequest('GET', flussonicUrl, server);
+        const remoteStreams = Array.isArray(response.data) ? response.data : (response.data.streams || []);
+        const remoteStreamMap = remoteStreams.reduce((acc: any, s: any) => { acc[s.name] = s; return acc; }, {});
 
-      for (const stream of streamsByServer[Number(serverId)]) {
-        const remoteStream = remoteStreamMap[stream.name];
-        let newStatus = 'offline';
-        let newInputStatus = 'offline';
-        let newSourceType = 'unknown';
-        let newUptime = 0;
-        let newPushStatus = '[]';
+        for (const stream of streamsByServer[Number(serverId)]) {
+          const remoteStream = remoteStreamMap[stream.name];
+          let newStatus = 'offline';
+          let newInputStatus = 'offline';
+          let newSourceType = 'unknown';
+          let newUptime = 0;
+          let newPushStatus = '[]';
 
-        if (remoteStream) {
-          const stats = remoteStream.stats;
-          const isAlive = stats && stats.alive;
-          newStatus = isAlive ? 'online' : 'offline';
-          newInputStatus = stats?.input_alive ? 'online' : 'offline';
-          newSourceType = stats?.source_type || 'unknown';
-          newUptime = stats?.uptime || 0;
+          if (remoteStream) {
+            const stats = remoteStream.stats;
+            const isAlive = stats && stats.alive;
+            newStatus = isAlive ? 'online' : 'offline';
+            newInputStatus = stats?.input_alive ? 'online' : 'offline';
+            newSourceType = stats?.source_type || 'unknown';
+            newUptime = stats?.uptime || 0;
+            
+            if (remoteStream.pushes && remoteStream.pushes.length > 0) {
+              newPushStatus = JSON.stringify(remoteStream.pushes.map((p: any) => ({
+                url: p.url,
+                status: p.stats?.status || 'unknown'
+              })));
+            }
+          }
+
+          // Notifications Consolidation
+          const notifications: string[] = [];
           
-          if (remoteStream.pushes && remoteStream.pushes.length > 0) {
-            newPushStatus = JSON.stringify(remoteStream.pushes.map((p: any) => ({
-              url: p.url,
-              status: p.stats?.status || 'unknown'
-            })));
+          if (stream.status !== newStatus && stream.status !== 'unknown') {
+            const emoji = newStatus === 'online' ? '✅' : '❌';
+            notifications.push(`${emoji} <b>Status:</b> ${newStatus.toUpperCase()}`);
+          }
+
+          if (stream.input_status !== newInputStatus && stream.input_status !== 'unknown' && newStatus === 'online') {
+            const emoji = newInputStatus === 'online' ? '📥' : '⚠️';
+            const msg = newInputStatus === 'online' ? 'RESTORED' : 'DROPPED';
+            notifications.push(`${emoji} <b>Input:</b> ${msg}`);
+          }
+
+          if (stream.source_type !== newSourceType && stream.source_type !== 'unknown' && newStatus === 'online') {
+            const emoji = newSourceType === 'live' ? '📡' : (newSourceType === 'playlist' || newSourceType === 'static' ? '📁' : '❓');
+            const typeLabel = newSourceType === 'live' ? 'LIVE' : (newSourceType === 'playlist' ? 'PLAYLIST' : (newSourceType === 'static' ? 'VOD' : newSourceType.toUpperCase()));
+            notifications.push(`${emoji} <b>Source:</b> ${typeLabel}`);
+          }
+
+          if (newUptime < stream.uptime && newUptime > 0 && stream.uptime > 0 && newStatus === 'online' && (stream.status === newStatus)) {
+            // Only notify restart if status didn't just change to online (to avoid double notification with status change)
+            notifications.push(`🔄 <b>Stream Restarted</b> (Uptime: ${newUptime}s)`);
+          }
+
+          if (notifications.length > 0) {
+            const header = `<b>Stream Update: ${stream.name}</b>\n<b>Server:</b> ${server.name}\n\n`;
+            await sendTelegramNotification(header + notifications.join('\n'));
+          }
+
+          const result = db.prepare('UPDATE streams SET status = ?, input_status = ?, source_type = ?, uptime = ?, push_status = ?, last_checked = CURRENT_TIMESTAMP WHERE id = ?').run(
+            newStatus, 
+            newInputStatus, 
+            newSourceType, 
+            newUptime, 
+            newPushStatus, 
+            stream.id
+          );
+
+          if (result.changes > 0 && (
+            stream.status !== newStatus || 
+            stream.input_status !== newInputStatus || 
+            stream.source_type !== newSourceType || 
+            stream.push_status !== newPushStatus
+          )) {
+            hasUpdates = true;
           }
         }
-
-        // Notifications
-        if (stream.status !== newStatus && stream.status !== 'unknown') {
-          const emoji = newStatus === 'online' ? '✅' : '❌';
-          await sendTelegramNotification(`${emoji} <b>Stream Status Changed</b>\n\n<b>Stream:</b> ${stream.name}\n<b>Server:</b> ${server.name}\n<b>Status:</b> ${newStatus.toUpperCase()}`);
-        }
-
-        if (stream.input_status !== newInputStatus && stream.input_status !== 'unknown' && newStatus === 'online') {
-          const emoji = newInputStatus === 'online' ? '📥' : '⚠️';
-          const msg = newInputStatus === 'online' ? 'Input Stream Restored' : 'Input Stream Dropped';
-          await sendTelegramNotification(`${emoji} <b>${msg}</b>\n\n<b>Stream:</b> ${stream.name}\n<b>Server:</b> ${server.name}\n<b>Input Status:</b> ${newInputStatus.toUpperCase()}`);
-        }
-
-        if (stream.source_type !== newSourceType && stream.source_type !== 'unknown' && newStatus === 'online') {
-          const emoji = newSourceType === 'live' ? '📡' : '📁';
-          const typeLabel = newSourceType === 'live' ? 'LIVE' : 'VOD (Fallback)';
-          await sendTelegramNotification(`${emoji} <b>Source Type Switched</b>\n\n<b>Stream:</b> ${stream.name}\n<b>Server:</b> ${server.name}\n<b>Source:</b> ${typeLabel}`);
-        }
-
-        if (newUptime < stream.uptime && newUptime > 0 && stream.uptime > 0 && newStatus === 'online') {
-          await sendTelegramNotification(`🔄 <b>Stream Restarted</b>\n\n<b>Stream:</b> ${stream.name}\n<b>Server:</b> ${server.name}\n<b>New Uptime:</b> ${newUptime}s`);
-        }
-
-        const result = db.prepare('UPDATE streams SET status = ?, input_status = ?, source_type = ?, uptime = ?, push_status = ?, last_checked = CURRENT_TIMESTAMP WHERE id = ?').run(
-          newStatus, 
-          newInputStatus, 
-          newSourceType, 
-          newUptime, 
-          newPushStatus, 
-          stream.id
-        );
-
-        if (result.changes > 0 && (
-          stream.status !== newStatus || 
-          stream.input_status !== newInputStatus || 
-          stream.source_type !== newSourceType || 
-          stream.push_status !== newPushStatus
-        )) {
-          hasUpdates = true;
-        }
-      }
-    } catch (error: any) {
-      console.error(`Failed to check streams for server ${server.name}:`, error.message);
-      for (const stream of streamsByServer[Number(serverId)]) {
-        if (stream.status !== 'offline') {
-          await sendTelegramNotification(`❌ <b>Stream Offline (Error)</b>\n\n<b>Stream:</b> ${stream.name}\n<b>Server:</b> ${server.name}\n<b>Error:</b> ${error.message}`);
-          db.prepare('UPDATE streams SET status = ?, push_status = ?, last_checked = CURRENT_TIMESTAMP WHERE id = ?').run('offline', '[]', stream.id);
-          hasUpdates = true;
+      } catch (error: any) {
+        console.error(`Failed to check streams for server ${server.name}:`, error.message);
+        const affectedStreams = streamsByServer[Number(serverId)].filter(s => s.status !== 'offline');
+        
+        if (affectedStreams.length > 0) {
+          const streamNames = affectedStreams.map(s => s.name).join(', ');
+          await sendTelegramNotification(`❌ <b>Server Unreachable</b>\n\n<b>Server:</b> ${server.name}\n<b>Error:</b> ${error.message}\n<b>Affected Streams:</b> ${streamNames}`);
+          
+          for (const stream of affectedStreams) {
+            db.prepare('UPDATE streams SET status = ?, push_status = ?, last_checked = CURRENT_TIMESTAMP WHERE id = ?').run('offline', '[]', stream.id);
+            hasUpdates = true;
+          }
         }
       }
     }
-  }
 
-  if (hasUpdates) {
-    broadcastStreamsUpdate();
+    if (hasUpdates) {
+      broadcastStreamsUpdate();
+    }
+  } finally {
+    isChecking = false;
   }
 };
 

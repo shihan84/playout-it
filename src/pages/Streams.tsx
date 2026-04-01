@@ -917,7 +917,10 @@ export default function Streams() {
                         <div className="bg-zinc-950 border border-zinc-800 p-4 rounded-xl">
                           <p className="text-[10px] text-zinc-500 uppercase font-bold tracking-wider mb-1">Source Type</p>
                           <p className="text-lg font-bold text-white uppercase">
-                            {streamDetails.source_type === 'live' ? '📡 LIVE' : streamDetails.source_type === 'static' ? '📁 VOD' : '❓ UNKNOWN'}
+                            {streamDetails.source_type === 'live' ? '📡 LIVE' : 
+                             streamDetails.source_type === 'playlist' ? '📁 PLAYLIST' :
+                             streamDetails.source_type === 'static' ? '📁 VOD' : 
+                             `❓ ${streamDetails.source_type || 'UNKNOWN'}`}
                           </p>
                         </div>
                         <div className="bg-zinc-950 border border-zinc-800 p-4 rounded-xl">
@@ -937,7 +940,7 @@ export default function Streams() {
                         <div className="w-full aspect-video bg-zinc-900 rounded-lg overflow-hidden border border-zinc-800 relative">
                           {streamDetails.status === 'online' ? (
                             <iframe 
-                              src={`${streamDetails.server_url.replace(/\/$/, '')}/${encodeURIComponent(streamDetails.name)}/embed.html?realtime=true&autoplay=true&mute=true`}
+                              src={`${streamDetails.server_url.replace(/\/$/, '')}/${encodeURIComponent(streamDetails.name)}/embed.html?autoplay=true&mute=true${streamDetails.source_type === 'live' ? '&realtime=true' : ''}`}
                               width="100%" 
                               height="100%" 
                               frameBorder="0" 
