@@ -18,6 +18,7 @@ export default function Streams() {
   const [isSyncing, setIsSyncing] = useState(false);
   
   const [activeTab, setActiveTab] = useState<'details' | 'vods'>('details');
+  const [vodSearchQuery, setVodSearchQuery] = useState('');
   const [vods, setVods] = useState<any[]>([]);
   const [availableVods, setAvailableVods] = useState<any[]>([]);
   const [enableVodFallback, setEnableVodFallback] = useState(false);
@@ -1090,74 +1091,101 @@ export default function Streams() {
                     )}
 
                     <div className="bg-zinc-950 border border-zinc-800 rounded-xl p-4 mb-6">
-                      <label className="block text-sm font-medium text-zinc-400 mb-2">Select VOD Location to Manage</label>
-                      <select
-                        value={selectedVodLocationId || ''}
-                        onChange={(e) => {
-                          const val = e.target.value;
-                          setSelectedVodLocationId(val ? Number(val) : null);
-                          if (val) {
-                            fetchVodFiles(Number(val));
-                          } else {
-                            // Fetch stream's default VOD files
-                            axios.get(`/api/streams/${selectedStreamId}/videos`).then(res => {
-                              setVods(Array.isArray(res.data) ? res.data : []);
-                            });
-                          }
-                        }}
-                        className="w-full bg-zinc-900 border border-zinc-700 rounded-xl px-4 py-2 text-white focus:outline-none focus:border-emerald-500 transition-colors"
-                      >
-                        <option value="">{streamDetails.name} (Stream's Default VOD)</option>
-                        {availableVods.filter(v => v.name !== streamDetails.name).map(v => (
-                          <option key={v.id} value={v.id}>{v.name}</option>
-                        ))}
-                      </select>
+                      <div className="flex flex-col md:flex-row gap-4">
+                        <div className="flex-1">
+                          <label className="block text-sm font-medium text-zinc-400 mb-2">Select VOD Location to Manage</label>
+                          <select
+                            value={selectedVodLocationId || ''}
+                            onChange={(e) => {
+                              const val = e.target.value;
+                              setSelectedVodLocationId(val ? Number(val) : null);
+                              if (val) {
+                                fetchVodFiles(Number(val));
+                              } else {
+                                // Fetch stream's default VOD files
+                                axios.get(`/api/streams/${selectedStreamId}/videos`).then(res => {
+                                  setVods(Array.isArray(res.data) ? res.data : []);
+                                });
+                              }
+                            }}
+                            className="w-full bg-zinc-900 border border-zinc-700 rounded-xl px-4 py-2 text-white focus:outline-none focus:border-emerald-500 transition-colors"
+                          >
+                            <option value="">{streamDetails.name} (Stream's Default VOD)</option>
+                            {availableVods.filter(v => v.name !== streamDetails.name).map(v => (
+                              <option key={v.id} value={v.id}>{v.name}</option>
+                            ))}
+                          </select>
+                        </div>
+                        <div className="flex-1">
+                          <label className="block text-sm font-medium text-zinc-400 mb-2">Search Videos</label>
+                          <div className="relative">
+                            <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500" size={18} />
+                            <input
+                              type="text"
+                              placeholder="Filter by filename..."
+                              value={vodSearchQuery}
+                              onChange={(e) => setVodSearchQuery(e.target.value)}
+                              className="w-full bg-zinc-900 border border-zinc-700 rounded-xl pl-10 pr-4 py-2 text-white focus:outline-none focus:border-emerald-500 transition-colors"
+                            />
+                          </div>
+                        </div>
+                      </div>
                     </div>
 
                     <div className="bg-zinc-950 border border-zinc-800 rounded-xl overflow-hidden">
-                      {vods.length === 0 ? (
-                        <div className="text-center py-12 text-zinc-500">
-                          <FileVideo size={48} className="mx-auto mb-4 opacity-20" />
-                          <p>No videos uploaded yet.</p>
-                          <p className="text-sm mt-1">Upload videos to use them as a fallback playlist.</p>
-                        </div>
-                      ) : (
-                        <table className="w-full text-left border-collapse">
-                          <thead>
-                            <tr className="bg-zinc-900 border-b border-zinc-800 text-zinc-400 text-sm">
-                              <th className="px-6 py-4 font-medium">Filename</th>
-                              <th className="px-6 py-4 font-medium">Size</th>
-                              <th className="px-6 py-4 font-medium">Uploaded</th>
-                              <th className="px-6 py-4 font-medium text-right">Actions</th>
-                            </tr>
-                          </thead>
-                          <tbody className="divide-y divide-zinc-800/50">
-                            {vods.map((vod, idx) => (
-                              <tr key={idx} className="text-zinc-300 hover:bg-zinc-800/20 transition-colors">
-                                <td className="px-6 py-4 font-medium flex items-center gap-3">
-                                  <FileVideo size={18} className="text-emerald-400" />
-                                  {vod.name}
-                                </td>
-                                <td className="px-6 py-4 text-zinc-400">
-                                  {(vod.size / (1024 * 1024)).toFixed(2)} MB
-                                </td>
-                                <td className="px-6 py-4 text-zinc-400">
-                                  {new Date(vod.created_at).toLocaleDateString()}
-                                </td>
-                                <td className="px-6 py-4 text-right">
-                                  <button 
-                                    onClick={() => setVodToDeleteFilename(vod.name)}
-                                    className="text-zinc-500 hover:text-rose-400 transition-colors p-2"
-                                    title="Delete Video"
-                                  >
-                                    <Trash2 size={18} />
-                                  </button>
-                                </td>
+                      {(() => {
+                        const filteredVods = vods.filter(v => 
+                          v.name.toLowerCase().includes(vodSearchQuery.toLowerCase())
+                        );
+                        
+                        if (filteredVods.length === 0) {
+                          return (
+                            <div className="text-center py-12 text-zinc-500">
+                              <FileVideo size={48} className="mx-auto mb-4 opacity-20" />
+                              <p>{vodSearchQuery ? 'No videos match your search.' : 'No videos uploaded yet.'}</p>
+                              {!vodSearchQuery && <p className="text-sm mt-1">Upload videos to use them as a fallback playlist.</p>}
+                            </div>
+                          );
+                        }
+
+                        return (
+                          <table className="w-full text-left border-collapse">
+                            <thead>
+                              <tr className="bg-zinc-900 border-b border-zinc-800 text-zinc-400 text-sm">
+                                <th className="px-6 py-4 font-medium">Filename</th>
+                                <th className="px-6 py-4 font-medium">Size</th>
+                                <th className="px-6 py-4 font-medium">Uploaded</th>
+                                <th className="px-6 py-4 font-medium text-right">Actions</th>
                               </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      )}
+                            </thead>
+                            <tbody className="divide-y divide-zinc-800/50">
+                              {filteredVods.map((vod, idx) => (
+                                <tr key={idx} className="text-zinc-300 hover:bg-zinc-800/20 transition-colors">
+                                  <td className="px-6 py-4 font-medium flex items-center gap-3">
+                                    <FileVideo size={18} className="text-emerald-400" />
+                                    {vod.name}
+                                  </td>
+                                  <td className="px-6 py-4 text-zinc-400">
+                                    {(vod.size / (1024 * 1024)).toFixed(2)} MB
+                                  </td>
+                                  <td className="px-6 py-4 text-zinc-400">
+                                    {new Date(vod.created_at).toLocaleDateString()}
+                                  </td>
+                                  <td className="px-6 py-4 text-right">
+                                    <button 
+                                      onClick={() => setVodToDeleteFilename(vod.name)}
+                                      className="text-zinc-500 hover:text-rose-400 transition-colors p-2"
+                                      title="Delete Video"
+                                    >
+                                      <Trash2 size={18} />
+                                    </button>
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        );
+                      })()}
                     </div>
                     
                     <div className="bg-zinc-950 border border-zinc-800 rounded-xl p-4">

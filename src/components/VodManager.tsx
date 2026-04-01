@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
-import { Plus, Trash2, Folder, AlertCircle, RefreshCw, Edit2, FileVideo, Upload, X, Copy, Check, FileText } from 'lucide-react';
+import { Plus, Trash2, Folder, AlertCircle, RefreshCw, Edit2, FileVideo, Upload, X, Copy, Check, FileText, Search } from 'lucide-react';
 
 export default function VodManager() {
   const [vods, setVods] = useState<any[]>([]);
@@ -10,6 +10,8 @@ export default function VodManager() {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [syncingId, setSyncingId] = useState<number | null>(null);
   const [formData, setFormData] = useState({ server_id: '', name: '', paths: [''] });
+  const [searchQuery, setSearchQuery] = useState('');
+  const [fileSearchQuery, setFileSearchQuery] = useState('');
   
   const [managingFilesFor, setManagingFilesFor] = useState<any | null>(null);
   const [vodFiles, setVodFiles] = useState<any[]>([]);
@@ -332,6 +334,19 @@ export default function VodManager() {
     }
   };
 
+  const filteredVods = vods.filter(vod => {
+    const query = searchQuery.toLowerCase();
+    return (
+      vod.name.toLowerCase().includes(query) ||
+      (vod.server_name && vod.server_name.toLowerCase().includes(query)) ||
+      (vod.paths && vod.paths.some((p: string) => p.toLowerCase().includes(query)))
+    );
+  });
+
+  const filteredFiles = vodFiles.filter(file => 
+    file.filename.toLowerCase().includes(fileSearchQuery.toLowerCase())
+  );
+
   const handleSyncAll = async () => {
     setIsSubmitting(true);
     try {
@@ -482,22 +497,34 @@ export default function VodManager() {
               <div className="space-y-3">
                 <div className="flex items-center justify-between">
                   <h4 className="text-sm font-medium text-zinc-400 uppercase tracking-wider">Uploaded Files</h4>
-                  <button 
-                    onClick={handleSyncVodFiles}
-                    disabled={isUploading}
-                    className="text-xs font-medium text-emerald-400 hover:text-emerald-300 flex items-center gap-1 transition-colors disabled:opacity-50"
-                  >
-                    <RefreshCw size={12} className={isUploading ? 'animate-spin' : ''} />
-                    Sync Files
-                  </button>
+                  <div className="flex items-center gap-3">
+                    <div className="relative">
+                      <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 text-zinc-500" size={14} />
+                      <input
+                        type="text"
+                        placeholder="Search files..."
+                        value={fileSearchQuery}
+                        onChange={(e) => setFileSearchQuery(e.target.value)}
+                        className="bg-zinc-950 border border-zinc-800 rounded-lg pl-8 pr-3 py-1 text-xs text-white focus:outline-none focus:border-emerald-500 transition-colors w-40"
+                      />
+                    </div>
+                    <button 
+                      onClick={handleSyncVodFiles}
+                      disabled={isUploading}
+                      className="text-xs font-medium text-emerald-400 hover:text-emerald-300 flex items-center gap-1 transition-colors disabled:opacity-50"
+                    >
+                      <RefreshCw size={12} className={isUploading ? 'animate-spin' : ''} />
+                      Sync Files
+                    </button>
+                  </div>
                 </div>
-                {vodFiles.length === 0 ? (
+                {filteredFiles.length === 0 ? (
                   <div className="text-center py-8 text-zinc-500 bg-zinc-900/50 rounded-xl border border-zinc-800/50">
-                    No files uploaded yet.
+                    {fileSearchQuery ? 'No files match your search.' : 'No files uploaded yet.'}
                   </div>
                 ) : (
                   <div className="space-y-2">
-                    {vodFiles.map((file) => (
+                    {filteredFiles.map((file) => (
                       <div key={file.id} className="flex items-center justify-between p-3 bg-zinc-950 border border-zinc-800 rounded-xl hover:border-zinc-700 transition-colors">
                         <div className="flex items-center gap-3 overflow-hidden">
                           <FileVideo size={16} className="text-blue-400 flex-shrink-0" />
@@ -523,11 +550,23 @@ export default function VodManager() {
         </div>
       )}
 
-      <div className="flex items-center justify-between">
-        <h2 className="text-xl font-semibold text-white flex items-center gap-2">
-          <Folder className="text-zinc-400" />
-          VOD Locations
-        </h2>
+      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
+        <div className="flex items-center gap-4">
+          <h2 className="text-xl font-semibold text-white flex items-center gap-2">
+            <Folder className="text-zinc-400" />
+            VOD Locations
+          </h2>
+          <div className="relative max-w-xs">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500" size={18} />
+            <input
+              type="text"
+              placeholder="Search VODs..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className="w-full bg-zinc-900 border border-zinc-800 rounded-xl pl-10 pr-4 py-2 text-sm text-white focus:outline-none focus:border-emerald-500 transition-colors"
+            />
+          </div>
+        </div>
         <div className="flex items-center gap-3">
           <button 
             onClick={handleSyncAll}
@@ -631,9 +670,9 @@ export default function VodManager() {
       )}
 
       <div className="bg-zinc-900 border border-zinc-800 rounded-2xl overflow-hidden">
-        {vods.length === 0 ? (
+        {filteredVods.length === 0 ? (
           <div className="text-center py-8 text-zinc-500">
-            No VOD locations configured yet.
+            {searchQuery ? 'No VOD locations match your search.' : 'No VOD locations configured yet.'}
           </div>
         ) : (
           <div className="overflow-x-auto">
@@ -647,7 +686,7 @@ export default function VodManager() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-zinc-800/50">
-                {vods.map((vod) => (
+                {filteredVods.map((vod) => (
                   <tr key={vod.id} className="text-zinc-300 hover:bg-zinc-800/20 transition-colors">
                     <td className="px-6 py-4 font-medium flex items-center gap-3">
                       <Folder size={18} className="text-amber-400" />
