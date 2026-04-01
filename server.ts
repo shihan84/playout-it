@@ -61,7 +61,7 @@ const broadcastStreamsUpdate = () => {
     const streams = db.prepare(`
       SELECT streams.*, servers.name as server_name, servers.url as server_url 
       FROM streams 
-      JOIN servers ON streams.server_id = servers.id
+      LEFT JOIN servers ON streams.server_id = servers.id
     `).all();
     
     const parsedStreams = streams.map(parseStream);
@@ -87,6 +87,7 @@ let db: any;
 try {
   db = new Database(dbPath);
   db.pragma('journal_mode = WAL');
+  db.pragma('foreign_keys = ON');
 } catch (e: any) {
   if (e.code === 'SQLITE_CORRUPT' || e.message?.includes('malformed')) {
     console.error('Database corrupted on open, recreating...');
@@ -149,25 +150,28 @@ const schema = `
 
   CREATE TABLE IF NOT EXISTS streams (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    server_id INTEGER NOT NULL,
+    server_id INTEGER,
     name TEXT NOT NULL,
     live_url TEXT NOT NULL,
     playlist_url TEXT NOT NULL,
     push_urls TEXT DEFAULT '[]',
     push_status TEXT DEFAULT '[]',
     status TEXT DEFAULT 'unknown',
+    input_status TEXT DEFAULT 'unknown',
+    source_type TEXT DEFAULT 'unknown',
+    uptime INTEGER DEFAULT 0,
     last_checked DATETIME,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY(server_id) REFERENCES servers(id)
+    FOREIGN KEY(server_id) REFERENCES servers(id) ON DELETE SET NULL
   );
 
   CREATE TABLE IF NOT EXISTS vods (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    server_id INTEGER NOT NULL,
+    server_id INTEGER,
     name TEXT NOT NULL,
     paths TEXT NOT NULL,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY(server_id) REFERENCES servers(id)
+    FOREIGN KEY(server_id) REFERENCES servers(id) ON DELETE SET NULL
   );
 
   CREATE TABLE IF NOT EXISTS videos (
@@ -196,6 +200,16 @@ const schema = `
 
 try {
   db.exec(schema);
+  // Migration for new columns
+  try {
+    db.prepare('ALTER TABLE streams ADD COLUMN input_status TEXT DEFAULT "unknown"').run();
+  } catch (e) {}
+  try {
+    db.prepare('ALTER TABLE streams ADD COLUMN source_type TEXT DEFAULT "unknown"').run();
+  } catch (e) {}
+  try {
+    db.prepare('ALTER TABLE streams ADD COLUMN uptime INTEGER DEFAULT 0').run();
+  } catch (e) {}
 } catch (e: any) {
   if (e.code === 'SQLITE_CORRUPT' || e.message?.includes('malformed')) {
     console.error('Database corrupted on schema exec, recreating...');
@@ -239,6 +253,11 @@ const initSettings = () => {
     // Column already exists
   }
 
+  const telegramEnabled = db.prepare('SELECT value FROM settings WHERE key = ?').get('telegram_enabled');
+  if (!telegramEnabled) {
+    db.prepare('INSERT INTO settings (key, value) VALUES (?, ?)').run('telegram_enabled', 'false');
+  }
+
   const telegramBotToken = db.prepare('SELECT value FROM settings WHERE key = ?').get('telegram_bot_token');
   if (!telegramBotToken) {
     db.prepare('INSERT INTO settings (key, value) VALUES (?, ?)').run('telegram_bot_token', '');
@@ -253,6 +272,71 @@ const initSettings = () => {
   if (!autoSyncEnabled) {
     db.prepare('INSERT INTO settings (key, value) VALUES (?, ?)').run('auto_sync_enabled', 'false');
     db.prepare('INSERT INTO settings (key, value) VALUES (?, ?)').run('auto_sync_interval', '60');
+  }
+
+  // Migration to make server_id nullable and add ON DELETE SET NULL
+  try {
+    const tableInfo = db.prepare("PRAGMA table_info(streams)").all() as any[];
+    const serverIdCol = tableInfo.find(c => c.name === 'server_id');
+    if (serverIdCol && serverIdCol.notnull === 1) {
+      console.log('Migrating streams table to allow NULL server_id...');
+      db.pragma('foreign_keys = OFF');
+      db.transaction(() => {
+        db.exec(`
+          CREATE TABLE streams_new (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            server_id INTEGER,
+            name TEXT NOT NULL,
+            live_url TEXT NOT NULL,
+            playlist_url TEXT NOT NULL,
+            push_urls TEXT DEFAULT '[]',
+            push_status TEXT DEFAULT '[]',
+            status TEXT DEFAULT 'unknown',
+            last_checked DATETIME,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            inputs TEXT DEFAULT '[]',
+            FOREIGN KEY(server_id) REFERENCES servers(id) ON DELETE SET NULL
+          );
+          INSERT INTO streams_new (id, server_id, name, live_url, playlist_url, push_urls, push_status, status, last_checked, created_at, inputs)
+          SELECT id, server_id, name, live_url, playlist_url, push_urls, push_status, status, last_checked, created_at, inputs FROM streams;
+          DROP TABLE streams;
+          ALTER TABLE streams_new RENAME TO streams;
+        `);
+      })();
+      db.pragma('foreign_keys = ON');
+    }
+  } catch (e) {
+    console.error('Failed to migrate streams table:', e);
+    db.pragma('foreign_keys = ON');
+  }
+
+  try {
+    const tableInfo = db.prepare("PRAGMA table_info(vods)").all() as any[];
+    const serverIdCol = tableInfo.find(c => c.name === 'server_id');
+    if (serverIdCol && serverIdCol.notnull === 1) {
+      console.log('Migrating vods table to allow NULL server_id...');
+      db.pragma('foreign_keys = OFF');
+      db.transaction(() => {
+        db.exec(`
+          CREATE TABLE vods_new (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            server_id INTEGER,
+            name TEXT NOT NULL,
+            paths TEXT NOT NULL,
+            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+            FOREIGN KEY(server_id) REFERENCES servers(id) ON DELETE SET NULL
+          );
+          INSERT INTO vods_new (id, server_id, name, paths, created_at)
+          SELECT id, server_id, name, paths, created_at FROM vods;
+          DROP TABLE vods;
+          ALTER TABLE vods_new RENAME TO vods;
+        `);
+      })();
+      db.pragma('foreign_keys = ON');
+    }
+  } catch (e) {
+    console.error('Failed to migrate vods table:', e);
+    db.pragma('foreign_keys = ON');
   }
 };
 initSettings();
@@ -292,10 +376,71 @@ app.post('/api/servers', async (req, res) => {
   res.json(server);
 });
 
-app.delete('/api/servers/:id', (req, res) => {
-  db.prepare('DELETE FROM streams WHERE server_id = ?').run(req.params.id);
-  db.prepare('DELETE FROM servers WHERE id = ?').run(req.params.id);
-  res.json({ success: true });
+app.delete('/api/servers/:id', async (req, res) => {
+  try {
+    const serverId = req.params.id;
+    console.log(`Attempting to delete server with ID: ${serverId}`);
+    const serverToDelete = db.prepare('SELECT * FROM servers WHERE id = ?').get(serverId) as any;
+    
+    if (!serverToDelete) {
+      console.warn(`Server with ID ${serverId} not found for deletion`);
+      return res.status(404).json({ error: 'Server not found' });
+    }
+
+    // Check if there are streams or vods associated with this server
+    const streams = db.prepare('SELECT * FROM streams WHERE server_id = ?').all(serverId) as any[];
+    const vods = db.prepare('SELECT * FROM vods WHERE server_id = ?').all(serverId) as any[];
+    
+    console.log(`Server ${serverId} has ${streams.length} streams and ${vods.length} VODs`);
+
+    // Look for a duplicate server (same URL) to reassign to
+    const normalizedUrl = serverToDelete.url.replace(/\/$/, '');
+    const duplicateServer = db.prepare('SELECT id FROM servers WHERE (url = ? OR url = ? OR url = ?) AND id != ?')
+      .get(normalizedUrl, normalizedUrl + '/', serverToDelete.url, serverId) as any;
+    
+    if (duplicateServer) {
+      // Reassign to the duplicate server (no effect on Flussonic)
+      console.log(`Reassigning data from server ${serverId} to duplicate server ${duplicateServer.id}`);
+      db.prepare('UPDATE streams SET server_id = ? WHERE server_id = ?').run(duplicateServer.id, serverId);
+      db.prepare('UPDATE vods SET server_id = ? WHERE server_id = ?').run(duplicateServer.id, serverId);
+    } else {
+      // No duplicate, so we should effect the Flussonic server as requested
+      console.log(`No duplicate server found for ${serverId}, deleting associated data from Flussonic and local DB`);
+      
+      // Delete streams from Flussonic
+      for (const stream of streams) {
+        const flussonicUrl = `${serverToDelete.url}/flussonic/api/v3/streams/${encodeURIComponent(stream.name)}`;
+        await flussonicRequest('DELETE', flussonicUrl, serverToDelete)
+          .catch(e => console.error(`Failed to delete stream ${stream.name} from Flussonic:`, e.message));
+        
+        // Also try to delete the associated VOD location if it exists (Flussonic often creates one for streams)
+        const vodUrl = `${serverToDelete.url}/flussonic/api/v3/vods/${encodeURIComponent(stream.name)}`;
+        await flussonicRequest('DELETE', vodUrl, serverToDelete)
+          .catch(() => {}); // Ignore errors for this secondary delete
+      }
+
+      // Delete VOD locations from Flussonic
+      for (const vod of vods) {
+        const flussonicUrl = `${serverToDelete.url}/flussonic/api/v3/vods/${encodeURIComponent(vod.name)}`;
+        await flussonicRequest('DELETE', flussonicUrl, serverToDelete)
+          .catch(e => console.error(`Failed to delete VOD ${vod.name} from Flussonic:`, e.message));
+      }
+
+      // Delete from local DB
+      db.prepare('DELETE FROM streams WHERE server_id = ?').run(serverId);
+      db.prepare('DELETE FROM vods WHERE server_id = ?').run(serverId);
+    }
+
+    console.log(`Deleting server ${serverId} from servers table`);
+    db.prepare('DELETE FROM servers WHERE id = ?').run(serverId);
+    console.log(`Successfully deleted server ${serverId}`);
+    
+    broadcastStreamsUpdate(); // Notify clients
+    res.json({ success: true });
+  } catch (error: any) {
+    console.error('Failed to delete server:', error);
+    res.status(500).json({ error: error.message });
+  }
 });
 
 // Streams
@@ -304,7 +449,7 @@ app.get('/api/streams', (req, res) => {
     const streams = db.prepare(`
       SELECT streams.*, servers.name as server_name, servers.url as server_url 
       FROM streams 
-      JOIN servers ON streams.server_id = servers.id
+      LEFT JOIN servers ON streams.server_id = servers.id
     `).all();
     
     const parsedStreams = streams.map(parseStream);
@@ -464,7 +609,7 @@ app.get('/api/streams/:id/details', async (req, res) => {
     const stream = db.prepare(`
       SELECT streams.*, servers.name as server_name, servers.url as server_url, servers.api_key 
       FROM streams 
-      JOIN servers ON streams.server_id = servers.id
+      LEFT JOIN servers ON streams.server_id = servers.id
       WHERE streams.id = ?
     `).get(req.params.id) as any;
 
@@ -899,7 +1044,7 @@ app.get('/api/vods', (req, res) => {
   const vods = db.prepare(`
     SELECT vods.*, servers.name as server_name 
     FROM vods 
-    JOIN servers ON vods.server_id = servers.id
+    LEFT JOIN servers ON vods.server_id = servers.id
   `).all();
   res.json(vods.map((v: any) => {
     let paths = [];
@@ -1458,10 +1603,11 @@ app.get('/api/settings', (req, res) => {
 });
 
 app.post('/api/settings', (req, res) => {
-  const { telegram_bot_token, telegram_chat_id, watchdog_interval, auto_sync_enabled, auto_sync_interval } = req.body;
+  const { telegram_enabled, telegram_bot_token, telegram_chat_id, watchdog_interval, auto_sync_enabled, auto_sync_interval } = req.body;
   const stmt = db.prepare('UPDATE settings SET value = ? WHERE key = ?');
   
   db.transaction(() => {
+    if (telegram_enabled !== undefined) stmt.run(telegram_enabled.toString(), 'telegram_enabled');
     if (telegram_bot_token !== undefined) stmt.run(telegram_bot_token, 'telegram_bot_token');
     if (telegram_chat_id !== undefined) stmt.run(telegram_chat_id, 'telegram_chat_id');
     if (watchdog_interval !== undefined) stmt.run(watchdog_interval, 'watchdog_interval');
@@ -1472,8 +1618,30 @@ app.post('/api/settings', (req, res) => {
   res.json({ success: true });
 });
 
+app.post('/api/settings/test-telegram', async (req, res) => {
+  const { telegram_bot_token, telegram_chat_id } = req.body;
+  if (!telegram_bot_token || !telegram_chat_id) {
+    return res.status(400).json({ error: 'Missing bot token or chat ID' });
+  }
+  try {
+    const response = await axios.post(`https://api.telegram.org/bot${telegram_bot_token}/sendMessage`, {
+      chat_id: telegram_chat_id,
+      text: '✅ <b>Flussonic Manager</b>\n\nTelegram notifications are working correctly!',
+      parse_mode: 'HTML'
+    });
+    res.json({ success: true, data: response.data });
+  } catch (error: any) {
+    console.error('Failed to send test message from server:', error.response?.data || error.message);
+    const description = error.response?.data?.description || error.message;
+    res.status(error.response?.status || 500).json({ error: description });
+  }
+});
+
 // --- Watchdog & Telegram ---
 const sendTelegramNotification = async (message: string) => {
+  const enabled = db.prepare('SELECT value FROM settings WHERE key = ?').get('telegram_enabled') as any;
+  if (!enabled || enabled.value !== 'true') return;
+
   const token = db.prepare('SELECT value FROM settings WHERE key = ?').get('telegram_bot_token') as any;
   const chatId = db.prepare('SELECT value FROM settings WHERE key = ?').get('telegram_chat_id') as any;
   
@@ -1518,12 +1686,18 @@ const checkStreams = async () => {
       for (const stream of streamsByServer[Number(serverId)]) {
         const remoteStream = remoteStreamMap[stream.name];
         let newStatus = 'offline';
+        let newInputStatus = 'offline';
+        let newSourceType = 'unknown';
+        let newUptime = 0;
         let newPushStatus = '[]';
 
         if (remoteStream) {
           const stats = remoteStream.stats;
           const isAlive = stats && stats.alive;
           newStatus = isAlive ? 'online' : 'offline';
+          newInputStatus = stats?.input_alive ? 'online' : 'offline';
+          newSourceType = stats?.source_type || 'unknown';
+          newUptime = stats?.uptime || 0;
           
           if (remoteStream.pushes && remoteStream.pushes.length > 0) {
             newPushStatus = JSON.stringify(remoteStream.pushes.map((p: any) => ({
@@ -1533,13 +1707,43 @@ const checkStreams = async () => {
           }
         }
 
+        // Notifications
         if (stream.status !== newStatus && stream.status !== 'unknown') {
           const emoji = newStatus === 'online' ? '✅' : '❌';
           await sendTelegramNotification(`${emoji} <b>Stream Status Changed</b>\n\n<b>Stream:</b> ${stream.name}\n<b>Server:</b> ${server.name}\n<b>Status:</b> ${newStatus.toUpperCase()}`);
         }
 
-        const result = db.prepare('UPDATE streams SET status = ?, push_status = ?, last_checked = CURRENT_TIMESTAMP WHERE id = ?').run(newStatus, newPushStatus, stream.id);
-        if (result.changes > 0 && (stream.status !== newStatus || stream.push_status !== newPushStatus)) {
+        if (stream.input_status !== newInputStatus && stream.input_status !== 'unknown' && newStatus === 'online') {
+          const emoji = newInputStatus === 'online' ? '📥' : '⚠️';
+          const msg = newInputStatus === 'online' ? 'Input Stream Restored' : 'Input Stream Dropped';
+          await sendTelegramNotification(`${emoji} <b>${msg}</b>\n\n<b>Stream:</b> ${stream.name}\n<b>Server:</b> ${server.name}\n<b>Input Status:</b> ${newInputStatus.toUpperCase()}`);
+        }
+
+        if (stream.source_type !== newSourceType && stream.source_type !== 'unknown' && newStatus === 'online') {
+          const emoji = newSourceType === 'live' ? '📡' : '📁';
+          const typeLabel = newSourceType === 'live' ? 'LIVE' : 'VOD (Fallback)';
+          await sendTelegramNotification(`${emoji} <b>Source Type Switched</b>\n\n<b>Stream:</b> ${stream.name}\n<b>Server:</b> ${server.name}\n<b>Source:</b> ${typeLabel}`);
+        }
+
+        if (newUptime < stream.uptime && newUptime > 0 && stream.uptime > 0 && newStatus === 'online') {
+          await sendTelegramNotification(`🔄 <b>Stream Restarted</b>\n\n<b>Stream:</b> ${stream.name}\n<b>Server:</b> ${server.name}\n<b>New Uptime:</b> ${newUptime}s`);
+        }
+
+        const result = db.prepare('UPDATE streams SET status = ?, input_status = ?, source_type = ?, uptime = ?, push_status = ?, last_checked = CURRENT_TIMESTAMP WHERE id = ?').run(
+          newStatus, 
+          newInputStatus, 
+          newSourceType, 
+          newUptime, 
+          newPushStatus, 
+          stream.id
+        );
+
+        if (result.changes > 0 && (
+          stream.status !== newStatus || 
+          stream.input_status !== newInputStatus || 
+          stream.source_type !== newSourceType || 
+          stream.push_status !== newPushStatus
+        )) {
           hasUpdates = true;
         }
       }

@@ -1,9 +1,10 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
-import { Plus, Trash2, Radio, CheckCircle2, XCircle, AlertCircle, PlaySquare, Copy, Check, X, RefreshCw, Upload, FileVideo, Edit2 } from 'lucide-react';
+import { Plus, Trash2, Radio, CheckCircle2, XCircle, AlertCircle, PlaySquare, Copy, Check, X, RefreshCw, Upload, FileVideo, Edit2, Search } from 'lucide-react';
 
 export default function Streams() {
   const [streams, setStreams] = useState<any[]>([]);
+  const [searchQuery, setSearchQuery] = useState('');
   const [servers, setServers] = useState<any[]>([]);
   const [isAdding, setIsAdding] = useState(false);
   const [editingStreamId, setEditingStreamId] = useState<number | null>(null);
@@ -24,6 +25,10 @@ export default function Streams() {
   const [isUploading, setIsUploading] = useState(false);
   const [uploadProgress, setUploadProgress] = useState(0);
   const [selectedVodLocationId, setSelectedVodLocationId] = useState<number | null>(null);
+
+  const [notification, setNotification] = useState<{ message: string, type: 'success' | 'error' } | null>(null);
+  const [streamToDeleteId, setStreamToDeleteId] = useState<number | null>(null);
+  const [vodToDeleteFilename, setVodToDeleteFilename] = useState<string | null>(null);
 
   useEffect(() => {
     fetchData();
@@ -69,6 +74,17 @@ export default function Streams() {
       }
     };
   }, []);
+
+  useEffect(() => {
+    if (notification) {
+      const timer = setTimeout(() => setNotification(null), 5000);
+      return () => clearTimeout(timer);
+    }
+  }, [notification]);
+
+  const showNotification = (message: string, type: 'success' | 'error' = 'success') => {
+    setNotification({ message, type });
+  };
 
   const fetchData = async () => {
     try {
@@ -148,51 +164,66 @@ export default function Streams() {
     }
   };
 
+  const [uploadingFiles, setUploadingFiles] = useState<{ name: string, progress: number }[]>([]);
+
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     if (!e.target.files || e.target.files.length === 0 || !selectedStreamId) return;
     
-    const file = e.target.files[0];
-    const formData = new FormData();
-    
+    const files = Array.from(e.target.files) as File[];
     setIsUploading(true);
-    setUploadProgress(0);
+    setUploadingFiles(files.map(f => ({ name: f.name, progress: 0 })));
     
     try {
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i];
+        const formData = new FormData();
+        
+        // Update current file progress state
+        setUploadingFiles(prev => prev.map((f, idx) => idx === i ? { ...f, progress: 0 } : f));
+        setUploadProgress(0);
+
+        if (selectedVodLocationId) {
+          formData.append('file', file);
+          await axios.post(`/api/vods/${selectedVodLocationId}/files`, formData, {
+            headers: { 'Content-Type': 'multipart/form-data' },
+            onUploadProgress: (progressEvent) => {
+              const percentCompleted = Math.round((progressEvent.loaded * 100) / (progressEvent.total || 1));
+              setUploadProgress(percentCompleted);
+              setUploadingFiles(prev => prev.map((f, idx) => idx === i ? { ...f, progress: percentCompleted } : f));
+            }
+          });
+        } else {
+          formData.append('video', file);
+          await axios.post(`/api/streams/${selectedStreamId}/videos`, formData, {
+            headers: { 'Content-Type': 'multipart/form-data' },
+            onUploadProgress: (progressEvent) => {
+              const percentCompleted = Math.round((progressEvent.loaded * 100) / (progressEvent.total || 1));
+              setUploadProgress(percentCompleted);
+              setUploadingFiles(prev => prev.map((f, idx) => idx === i ? { ...f, progress: percentCompleted } : f));
+            }
+          });
+        }
+      }
+
       if (selectedVodLocationId) {
-        formData.append('file', file);
-        await axios.post(`/api/vods/${selectedVodLocationId}/files`, formData, {
-          headers: { 'Content-Type': 'multipart/form-data' },
-          onUploadProgress: (progressEvent) => {
-            const percentCompleted = Math.round((progressEvent.loaded * 100) / (progressEvent.total || 1));
-            setUploadProgress(percentCompleted);
-          }
-        });
         fetchVodFiles(selectedVodLocationId);
       } else {
-        formData.append('video', file);
-        await axios.post(`/api/streams/${selectedStreamId}/videos`, formData, {
-          headers: { 'Content-Type': 'multipart/form-data' },
-          onUploadProgress: (progressEvent) => {
-            const percentCompleted = Math.round((progressEvent.loaded * 100) / (progressEvent.total || 1));
-            setUploadProgress(percentCompleted);
-          }
-        });
         const vodsRes = await axios.get(`/api/streams/${selectedStreamId}/videos`);
         setVods(Array.isArray(vodsRes.data) ? vodsRes.data : []);
       }
+      showNotification('All files uploaded successfully!');
     } catch (error: any) {
       console.error('Upload failed', error);
-      alert(error.response?.data?.error || 'Failed to upload video');
+      showNotification(error.response?.data?.error || 'Failed to upload video', 'error');
     } finally {
       setIsUploading(false);
       setUploadProgress(0);
+      setUploadingFiles([]);
       e.target.value = '';
     }
   };
 
   const handleDeleteVod = async (filename: string) => {
-    if (!confirm(`Are you sure you want to delete ${filename}?`)) return;
-    
     try {
       if (selectedVodLocationId) {
         await axios.delete(`/api/vods/${selectedVodLocationId}/files/${filename}`);
@@ -203,9 +234,11 @@ export default function Streams() {
         const vodsRes = await axios.get(`/api/streams/${selectedStreamId}/videos`);
         setVods(Array.isArray(vodsRes.data) ? vodsRes.data : []);
       }
+      setVodToDeleteFilename(null);
+      showNotification('Video deleted successfully');
     } catch (error: any) {
       console.error('Failed to delete video', error);
-      alert(error.response?.data?.error || 'Failed to delete video');
+      showNotification(error.response?.data?.error || 'Failed to delete video', 'error');
     }
   };
 
@@ -252,7 +285,7 @@ export default function Streams() {
       validInputs.push(fallbackVodUrl);
     }
     if (validInputs.length === 0) {
-      alert('Please provide at least one Input Source URL.');
+      showNotification('Please provide at least one Input Source URL.', 'error');
       return;
     }
     setIsSubmitting(true);
@@ -265,8 +298,10 @@ export default function Streams() {
       
       if (editingStreamId) {
         await axios.put(`/api/streams/${editingStreamId}`, payload);
+        showNotification('Stream updated successfully');
       } else {
         await axios.post('/api/streams', payload);
+        showNotification('Stream added successfully');
       }
       
       setFormData({ ...formData, name: '', inputs: [''], push_urls: [''] });
@@ -277,19 +312,21 @@ export default function Streams() {
       fetchData();
     } catch (error: any) {
       console.error(`Failed to ${editingStreamId ? 'update' : 'add'} stream`, error);
-      alert(error.response?.data?.error || `Failed to ${editingStreamId ? 'update' : 'add'} stream`);
+      showNotification(error.response?.data?.error || `Failed to ${editingStreamId ? 'update' : 'add'} stream`, 'error');
     } finally {
       setIsSubmitting(false);
     }
   };
 
   const handleDelete = async (id: number) => {
-    if (!confirm('Are you sure you want to delete this stream? It will be removed from Flussonic as well.')) return;
     try {
       await axios.delete(`/api/streams/${id}`);
+      setStreamToDeleteId(null);
       fetchStreams();
+      showNotification('Stream deleted successfully');
     } catch (error) {
       console.error('Failed to delete stream', error);
+      showNotification('Failed to delete stream', 'error');
     }
   };
 
@@ -307,24 +344,43 @@ export default function Streams() {
           totalVodsAdded += res.data.vodsAdded;
         }
       }
-      alert(`Sync complete! Added ${totalAdded} new streams and ${totalVodsAdded} new VODs from servers.`);
+      showNotification(`Sync complete! Added ${totalAdded} new streams and ${totalVodsAdded} new VODs from servers.`);
       fetchStreams();
     } catch (error) {
       console.error('Sync failed', error);
-      alert('Failed to sync streams.');
+      showNotification('Failed to sync streams.', 'error');
     } finally {
       setIsSyncing(false);
     }
   };
 
+  const filteredStreams = streams.filter(stream => {
+    const query = searchQuery.toLowerCase();
+    return (
+      stream.name.toLowerCase().includes(query) ||
+      (stream.server_name && stream.server_name.toLowerCase().includes(query)) ||
+      (stream.server_url && stream.server_url.toLowerCase().includes(query))
+    );
+  });
+
   return (
     <div className="space-y-8">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>
           <h1 className="text-3xl font-bold tracking-tight text-white">Streams</h1>
           <p className="text-zinc-400 mt-2">Configure streams with playlist fallbacks.</p>
         </div>
-        <div className="flex items-center gap-3">
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="relative">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500" size={18} />
+            <input
+              type="text"
+              placeholder="Search streams or servers..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className="bg-zinc-900 border border-zinc-800 rounded-xl pl-10 pr-4 py-2 text-sm text-white focus:outline-none focus:border-emerald-500 transition-colors w-64"
+            />
+          </div>
           <button 
             onClick={handleSync}
             disabled={isSyncing || servers.length === 0}
@@ -534,9 +590,9 @@ export default function Streams() {
       )}
 
       <div className="bg-zinc-900 border border-zinc-800 rounded-2xl overflow-hidden">
-        {streams.length === 0 ? (
+        {filteredStreams.length === 0 ? (
           <div className="text-center py-12 text-zinc-500">
-            No streams configured yet.
+            {searchQuery ? 'No streams match your search.' : 'No streams configured yet.'}
           </div>
         ) : (
           <div className="overflow-x-auto">
@@ -553,7 +609,7 @@ export default function Streams() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-zinc-800/50">
-                {streams.map((stream) => (
+                {filteredStreams.map((stream) => (
                   <tr 
                     key={stream.id} 
                     onClick={() => handleRowClick(stream.id)}
@@ -563,7 +619,7 @@ export default function Streams() {
                       <Radio size={18} className="text-purple-400" />
                       {stream.name}
                     </td>
-                    <td className="px-6 py-4 text-zinc-400">{stream.server_name}</td>
+                    <td className="px-6 py-4 text-zinc-400">{stream.server_name || <span className="text-rose-400 italic">Deleted Server</span>}</td>
                     <td className="px-6 py-4">
                       <div className="flex flex-col gap-1 text-xs font-mono">
                         {stream.inputs && stream.inputs.length > 0 ? stream.inputs.map((input: string, i: number) => (
@@ -647,7 +703,7 @@ export default function Streams() {
                       </div>
                     </td>
                     <td className="px-6 py-4">
-                      <div className="flex flex-col gap-1">
+                      <div className="flex flex-col gap-2">
                         <span className={`inline-flex items-center gap-2 px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider w-fit ${
                           stream.status === 'online' ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' :
                           stream.status === 'offline' ? 'bg-rose-500/10 text-rose-500 border border-rose-500/20' :
@@ -667,6 +723,20 @@ export default function Streams() {
                           )}
                           {stream.status}
                         </span>
+                        
+                        {stream.status === 'online' && (
+                          <div className="flex flex-wrap gap-1">
+                            <span className={`px-1.5 py-0.5 rounded text-[9px] font-bold uppercase tracking-tighter border ${
+                              stream.input_status === 'online' ? 'bg-blue-500/10 text-blue-400 border-blue-500/20' : 'bg-amber-500/10 text-amber-500 border-amber-500/20'
+                            }`}>
+                              IN: {stream.input_status}
+                            </span>
+                            <span className="px-1.5 py-0.5 rounded text-[9px] font-bold uppercase tracking-tighter bg-zinc-800 text-zinc-400 border border-zinc-700">
+                              {stream.source_type === 'live' ? '📡 LIVE' : stream.source_type === 'static' ? '📁 VOD' : '❓ UNK'}
+                            </span>
+                          </div>
+                        )}
+
                         {stream.last_checked && (
                           <span className="text-[10px] text-zinc-500">
                             Updated: {new Date(stream.last_checked + 'Z').toLocaleTimeString()}
@@ -684,7 +754,7 @@ export default function Streams() {
                           <Edit2 size={18} />
                         </button>
                         <button 
-                          onClick={(e) => { e.stopPropagation(); handleDelete(stream.id); }}
+                          onClick={(e) => { e.stopPropagation(); setStreamToDeleteId(stream.id); }}
                           className="text-zinc-500 hover:text-rose-400 transition-colors p-2"
                           title="Delete Stream"
                         >
@@ -699,6 +769,68 @@ export default function Streams() {
           </div>
         )}
       </div>
+
+      {streamToDeleteId && (
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+          <div className="bg-zinc-900 border border-zinc-800 rounded-2xl w-full max-w-md p-6 shadow-2xl">
+            <h2 className="text-xl font-bold text-white mb-2">Delete Stream?</h2>
+            <p className="text-zinc-400 mb-6">
+              Are you sure you want to delete this stream? It will be removed from Flussonic as well.
+            </p>
+            <div className="flex gap-3">
+              <button 
+                onClick={() => handleDelete(streamToDeleteId)}
+                className="flex-1 bg-rose-500 hover:bg-rose-600 text-white px-4 py-2 rounded-xl font-medium transition-colors"
+              >
+                Yes, Delete
+              </button>
+              <button 
+                onClick={() => setStreamToDeleteId(null)}
+                className="flex-1 bg-zinc-800 hover:bg-zinc-700 text-white px-4 py-2 rounded-xl font-medium transition-colors"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {vodToDeleteFilename && (
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+          <div className="bg-zinc-900 border border-zinc-800 rounded-2xl w-full max-w-md p-6 shadow-2xl">
+            <h2 className="text-xl font-bold text-white mb-2">Delete Video?</h2>
+            <p className="text-zinc-400 mb-6">
+              Are you sure you want to delete <span className="text-white font-mono">{vodToDeleteFilename}</span>?
+            </p>
+            <div className="flex gap-3">
+              <button 
+                onClick={() => handleDeleteVod(vodToDeleteFilename)}
+                className="flex-1 bg-rose-500 hover:bg-rose-600 text-white px-4 py-2 rounded-xl font-medium transition-colors"
+              >
+                Yes, Delete
+              </button>
+              <button 
+                onClick={() => setVodToDeleteFilename(null)}
+                className="flex-1 bg-zinc-800 hover:bg-zinc-700 text-white px-4 py-2 rounded-xl font-medium transition-colors"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {notification && (
+        <div className={`fixed bottom-6 right-6 px-6 py-3 rounded-xl shadow-2xl z-50 border flex items-center gap-3 animate-in fade-in slide-in-from-bottom-4 duration-300 ${
+          notification.type === 'error' ? 'bg-rose-500/10 border-rose-500/20 text-rose-400' : 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400'
+        }`}>
+          <div className={`w-2 h-2 rounded-full ${notification.type === 'error' ? 'bg-rose-500' : 'bg-emerald-500'}`} />
+          <p className="font-medium">{notification.message}</p>
+          <button onClick={() => setNotification(null)} className="ml-2 hover:text-white transition-colors">
+            <X size={16} />
+          </button>
+        </div>
+      )}
 
       {selectedStreamId && (
         <div className="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 z-50">
@@ -760,16 +892,42 @@ export default function Streams() {
               ) : streamDetails ? (
                 activeTab === 'details' ? (
                   <div className="space-y-6">
-                    {/* Status & Basic Info */}
+                    {/* Status & Detailed Info */}
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
-                      <div className="space-y-4">
+                      <div className="grid grid-cols-2 gap-4">
                         <div className="bg-zinc-950 border border-zinc-800 p-4 rounded-xl">
-                          <p className="text-xs text-zinc-500 uppercase font-bold tracking-wider mb-1">Status</p>
-                          <p className="text-lg font-bold text-white capitalize">{streamDetails.status}</p>
+                          <p className="text-[10px] text-zinc-500 uppercase font-bold tracking-wider mb-1">Overall Status</p>
+                          <div className="flex items-center gap-2">
+                            <div className={`w-2 h-2 rounded-full ${streamDetails.status === 'online' ? 'bg-emerald-500 animate-pulse' : 'bg-rose-500'}`} />
+                            <p className={`text-lg font-bold ${streamDetails.status === 'online' ? 'text-emerald-400' : 'text-rose-500'} capitalize`}>
+                              {streamDetails.status}
+                            </p>
+                          </div>
                         </div>
                         <div className="bg-zinc-950 border border-zinc-800 p-4 rounded-xl">
-                          <p className="text-xs text-zinc-500 uppercase font-bold tracking-wider mb-1">Server</p>
-                          <p className="text-lg font-bold text-white">{streamDetails.server_name}</p>
+                          <p className="text-[10px] text-zinc-500 uppercase font-bold tracking-wider mb-1">Input Status</p>
+                          <div className="flex items-center gap-2">
+                            <div className={`w-2 h-2 rounded-full ${streamDetails.input_status === 'online' ? 'bg-blue-500' : 'bg-amber-500'}`} />
+                            <p className={`text-lg font-bold ${streamDetails.input_status === 'online' ? 'text-blue-400' : 'text-amber-400'} capitalize`}>
+                              {streamDetails.input_status}
+                            </p>
+                          </div>
+                        </div>
+                        <div className="bg-zinc-950 border border-zinc-800 p-4 rounded-xl">
+                          <p className="text-[10px] text-zinc-500 uppercase font-bold tracking-wider mb-1">Source Type</p>
+                          <p className="text-lg font-bold text-white uppercase">
+                            {streamDetails.source_type === 'live' ? '📡 LIVE' : streamDetails.source_type === 'static' ? '📁 VOD' : '❓ UNKNOWN'}
+                          </p>
+                        </div>
+                        <div className="bg-zinc-950 border border-zinc-800 p-4 rounded-xl">
+                          <p className="text-[10px] text-zinc-500 uppercase font-bold tracking-wider mb-1">Uptime</p>
+                          <p className="text-lg font-bold text-white">
+                            {streamDetails.uptime ? `${Math.floor(streamDetails.uptime / 3600)}h ${Math.floor((streamDetails.uptime % 3600) / 60)}m` : '0m'}
+                          </p>
+                        </div>
+                        <div className="bg-zinc-950 border border-zinc-800 p-4 rounded-xl col-span-2">
+                          <p className="text-[10px] text-zinc-500 uppercase font-bold tracking-wider mb-1">Server</p>
+                          <p className="text-lg font-bold text-white">{streamDetails.server_name || <span className="text-rose-400 italic">Deleted Server</span>}</p>
                         </div>
                       </div>
                       
@@ -899,6 +1057,7 @@ export default function Streams() {
                           accept="video/*"
                           onChange={handleFileUpload}
                           disabled={isUploading}
+                          multiple
                           className="absolute inset-0 w-full h-full opacity-0 cursor-pointer disabled:cursor-not-allowed"
                         />
                         <button 
@@ -906,23 +1065,27 @@ export default function Streams() {
                           className="bg-emerald-500 hover:bg-emerald-600 disabled:opacity-50 disabled:cursor-not-allowed text-white px-4 py-2 rounded-xl font-medium flex items-center gap-2 transition-colors"
                         >
                           <Upload size={18} />
-                          {isUploading ? 'Uploading...' : 'Upload Video'}
+                          {isUploading ? 'Uploading...' : 'Upload Videos'}
                         </button>
                       </div>
                     </div>
 
                     {isUploading && (
-                      <div className="bg-zinc-950 border border-zinc-800 rounded-xl p-4">
-                        <div className="flex justify-between text-sm mb-2">
-                          <span className="text-zinc-400">Uploading video...</span>
-                          <span className="text-emerald-400 font-medium">{uploadProgress}%</span>
-                        </div>
-                        <div className="w-full bg-zinc-800 rounded-full h-2">
-                          <div 
-                            className="bg-emerald-500 h-2 rounded-full transition-all duration-300" 
-                            style={{ width: `${uploadProgress}%` }}
-                          ></div>
-                        </div>
+                      <div className="mt-4 space-y-3">
+                        {uploadingFiles.map((f, idx) => (
+                          <div key={idx} className="bg-zinc-950 border border-zinc-800 rounded-xl p-4 animate-in fade-in slide-in-from-top-1">
+                            <div className="flex justify-between text-xs mb-2">
+                              <span className="text-zinc-400 truncate max-w-[200px]">{f.name}</span>
+                              <span className="text-emerald-400 font-medium">{f.progress}%</span>
+                            </div>
+                            <div className="w-full bg-zinc-800 rounded-full h-1.5">
+                              <div 
+                                className="bg-emerald-500 h-1.5 rounded-full transition-all duration-300" 
+                                style={{ width: `${f.progress}%` }}
+                              ></div>
+                            </div>
+                          </div>
+                        ))}
                       </div>
                     )}
 
@@ -983,7 +1146,7 @@ export default function Streams() {
                                 </td>
                                 <td className="px-6 py-4 text-right">
                                   <button 
-                                    onClick={() => handleDeleteVod(vod.name)}
+                                    onClick={() => setVodToDeleteFilename(vod.name)}
                                     className="text-zinc-500 hover:text-rose-400 transition-colors p-2"
                                     title="Delete Video"
                                   >

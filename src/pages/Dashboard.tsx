@@ -126,7 +126,7 @@ export default function Dashboard() {
                   {recentStreams.map((stream) => (
                     <tr key={stream.id} className="text-zinc-300">
                       <td className="py-4 font-medium">{stream.name}</td>
-                      <td className="py-4 text-zinc-400">{stream.server_name}</td>
+                      <td className="py-4 text-zinc-400">{stream.server_name || <span className="text-rose-400 italic text-xs">Deleted Server</span>}</td>
                       <td className="py-4">
                         <span className={`inline-flex items-center gap-2 px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider ${
                           stream.status === 'online' ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' :

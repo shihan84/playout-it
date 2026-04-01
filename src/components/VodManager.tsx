@@ -19,6 +19,14 @@ export default function VodManager() {
   const [playlistContent, setPlaylistContent] = useState<string | null>(null);
   const [showPlaylistContent, setShowPlaylistContent] = useState(false);
   const [isLoadingPlaylist, setIsLoadingPlaylist] = useState(false);
+  const [notification, setNotification] = useState<{ message: string, type: 'success' | 'error' | 'info' } | null>(null);
+  const [deleteConfirmId, setDeleteConfirmId] = useState<number | null>(null);
+  const [fileToDeleteFilename, setFileToDeleteFilename] = useState<string | null>(null);
+
+  const showNotification = (message: string, type: 'success' | 'error' | 'info' = 'info') => {
+    setNotification({ message, type });
+    setTimeout(() => setNotification(null), 5000);
+  };
 
   useEffect(() => {
     fetchData();
@@ -92,19 +100,22 @@ export default function VodManager() {
       fetchData();
     } catch (error: any) {
       console.error('Failed to save VOD', error);
-      alert(error.response?.data?.error || 'Failed to save VOD');
+      showNotification(error.response?.data?.error || 'Failed to save VOD', 'error');
     } finally {
       setIsSubmitting(false);
     }
   };
 
   const handleDelete = async (id: number) => {
-    if (!confirm('Are you sure you want to delete this VOD location? It will be removed from Flussonic as well.')) return;
     try {
       await axios.delete(`/api/vods/${id}`);
+      showNotification('VOD location deleted successfully', 'success');
       fetchData();
     } catch (error) {
       console.error('Failed to delete VOD', error);
+      showNotification('Failed to delete VOD location', 'error');
+    } finally {
+      setDeleteConfirmId(null);
     }
   };
 
@@ -137,7 +148,7 @@ export default function VodManager() {
       fetchVodFiles(managingFilesFor.id);
     } catch (error: any) {
       console.error('Failed to sync VOD files', error);
-      alert(error.response?.data?.error || 'Failed to sync VOD files');
+      showNotification(error.response?.data?.error || 'Failed to sync VOD files', 'error');
     } finally {
       setIsUploading(false);
     }
@@ -148,14 +159,14 @@ export default function VodManager() {
     setIsUploading(true);
     try {
       await axios.post(`/api/vods/${managingFilesFor.id}/playlist/update`);
-      alert('Playlist updated successfully!');
+      showNotification('Playlist updated successfully!', 'success');
       // Refresh content if it's currently shown
       if (showPlaylistContent) {
         fetchPlaylistContent();
       }
     } catch (error: any) {
       console.error('Failed to update playlist', error);
-      alert(error.response?.data?.error || 'Failed to update playlist');
+      showNotification(error.response?.data?.error || 'Failed to update playlist', 'error');
     } finally {
       setIsUploading(false);
     }
@@ -170,147 +181,136 @@ export default function VodManager() {
       setShowPlaylistContent(true);
     } catch (error: any) {
       console.error('Failed to fetch playlist content', error);
-      alert(error.response?.data?.error || 'Failed to fetch playlist content');
+      showNotification(error.response?.data?.error || 'Failed to fetch playlist content', 'error');
     } finally {
       setIsLoadingPlaylist(false);
     }
   };
 
+  const [uploadingFiles, setUploadingFiles] = useState<{ name: string, progress: number }[]>([]);
+
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     if (!e.target.files || e.target.files.length === 0 || !managingFilesFor) return;
     
-    const file = e.target.files[0];
+    const files = Array.from(e.target.files) as File[];
     setIsUploading(true);
-    setUploadProgress(0);
+    setUploadingFiles(files.map(f => ({ name: f.name, progress: 0 })));
 
     try {
       // 1. Get upload info from our backend
       const infoRes = await axios.get(`/api/vods/${managingFilesFor.id}/upload-info`);
       const { serverUrl, vodName, authHeader, altAuthHeader } = infoRes.data;
-
-      // Ensure serverUrl doesn't have a trailing slash for consistency
       const cleanServerUrl = serverUrl.replace(/\/$/, '');
-      const uploadUrl = `${cleanServerUrl}/flussonic/api/v3/vods/${encodeURIComponent(vodName)}/storages/0/files/${file.name}`;
-      
-      // Check for mixed content
-      if (window.location.protocol === 'https:' && cleanServerUrl.startsWith('http:')) {
-        console.warn('Mixed content detected: App is HTTPS but Flussonic is HTTP. Direct upload will likely fail.');
-      }
 
-      const performDirectUpload = async (header: string) => {
-        return await axios.put(uploadUrl, file, {
-          headers: { 
-            'Authorization': header,
-            'Content-Type': file.type || 'application/octet-stream'
-          },
-          onUploadProgress: (progressEvent) => {
-            const percentCompleted = Math.round((progressEvent.loaded * 100) / (progressEvent.total || 1));
-            setUploadProgress(percentCompleted);
-          }
-        });
-      };
-
-      try {
-        try {
-          await performDirectUpload(authHeader);
-        } catch (firstError: any) {
-          // If 403 and we have an alternate header, try it
-          if (firstError.response?.status === 403 && altAuthHeader) {
-            console.log('Direct upload failed with 403, trying alternate auth header...');
-            await performDirectUpload(altAuthHeader);
-          } else {
-            throw firstError;
-          }
-        }
-
-        // 3. Confirm upload with our backend
-        await axios.post(`/api/vods/${managingFilesFor.id}/files/confirm-upload`, {
-          filename: file.name,
-          size: file.size
-        });
-
-        fetchVodFiles(managingFilesFor.id);
-      } catch (directError: any) {
-        console.error('Direct upload failed', directError);
+      for (let i = 0; i < files.length; i++) {
+        const file = files[i];
         
-        let errorMsg = 'Direct upload to Flussonic failed. ';
-        if (window.location.protocol === 'https:' && cleanServerUrl.startsWith('http:')) {
-          errorMsg += 'This is likely due to "Mixed Content" (App is HTTPS, Flussonic is HTTP). Please use HTTPS for your Flussonic server URL or access the app via HTTP.';
-        } else if (directError.code === 'ERR_NETWORK') {
-          errorMsg += 'Network error. Please ensure the Flussonic server URL is accessible from your browser and CORS is enabled.';
-        } else {
-          errorMsg += directError.message || 'Unknown error';
-        }
+        // Update current file progress state
+        setUploadingFiles(prev => prev.map((f, idx) => idx === i ? { ...f, progress: 0 } : f));
+        setUploadProgress(0);
+
+        const uploadUrl = `${cleanServerUrl}/flussonic/api/v3/vods/${encodeURIComponent(vodName)}/storages/0/files/${file.name}`;
         
-        // Fallback to chunked upload if direct upload fails
-        console.log('Falling back to chunked upload...');
-        
-        try {
-          const CHUNK_SIZE = 5 * 1024 * 1024; // 5MB chunks
-          const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
-          
-          // 1. Init chunked upload
-          const initRes = await axios.post(`/api/vods/${managingFilesFor.id}/files/init-chunked`, {
-            filename: file.name,
-            totalChunks
+        const performDirectUpload = async (header: string) => {
+          return await axios.put(uploadUrl, file, {
+            headers: { 
+              'Authorization': header,
+              'Content-Type': file.type || 'application/octet-stream'
+            },
+            onUploadProgress: (progressEvent) => {
+              const percentCompleted = Math.round((progressEvent.loaded * 100) / (progressEvent.total || 1));
+              setUploadProgress(percentCompleted);
+              setUploadingFiles(prev => prev.map((f, idx) => idx === i ? { ...f, progress: percentCompleted } : f));
+            }
           });
-          const { uploadId } = initRes.data;
+        };
 
-          // 2. Upload chunks
-          for (let i = 0; i < totalChunks; i++) {
-            const start = i * CHUNK_SIZE;
-            const end = Math.min(start + CHUNK_SIZE, file.size);
-            const chunk = file.slice(start, end);
-            
-            const chunkFormData = new FormData();
-            chunkFormData.append('chunk', chunk);
-            chunkFormData.append('uploadId', uploadId);
-            chunkFormData.append('chunkIndex', i.toString());
-            
-            await axios.post(`/api/vods/${managingFilesFor.id}/files/chunk`, chunkFormData, {
-              onUploadProgress: (progressEvent) => {
-                const chunkProgress = Math.round((progressEvent.loaded * 100) / (progressEvent.total || 1));
-                const overallProgress = Math.round(((i * 100) + chunkProgress) / totalChunks);
-                setUploadProgress(overallProgress);
-              }
-            });
+        try {
+          try {
+            await performDirectUpload(authHeader);
+          } catch (firstError: any) {
+            if (firstError.response?.status === 403 && altAuthHeader) {
+              await performDirectUpload(altAuthHeader);
+            } else {
+              throw firstError;
+            }
           }
 
-          // 3. Complete chunked upload
-          await axios.post(`/api/vods/${managingFilesFor.id}/files/complete-chunked`, {
-            uploadId,
+          await axios.post(`/api/vods/${managingFilesFor.id}/files/confirm-upload`, {
             filename: file.name,
-            totalChunks,
             size: file.size
           });
+        } catch (directError: any) {
+          console.error(`Direct upload failed for ${file.name}, falling back to chunked`, directError);
+          
+          try {
+            const CHUNK_SIZE = 5 * 1024 * 1024; // 5MB chunks
+            const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
+            
+            const initRes = await axios.post(`/api/vods/${managingFilesFor.id}/files/init-chunked`, {
+              filename: file.name,
+              totalChunks
+            });
+            const { uploadId } = initRes.data;
 
-          fetchVodFiles(managingFilesFor.id);
-        } catch (chunkError: any) {
-          console.error('Chunked upload fallback failed', chunkError);
-          const finalError = chunkError.response?.data?.error || chunkError.message || 'Failed to upload file';
-          alert(`${errorMsg}\n\nFallback also failed: ${finalError}`);
+            for (let j = 0; j < totalChunks; j++) {
+              const start = j * CHUNK_SIZE;
+              const end = Math.min(start + CHUNK_SIZE, file.size);
+              const chunk = file.slice(start, end);
+              
+              const chunkFormData = new FormData();
+              chunkFormData.append('chunk', chunk);
+              chunkFormData.append('uploadId', uploadId);
+              chunkFormData.append('chunkIndex', j.toString());
+              
+              await axios.post(`/api/vods/${managingFilesFor.id}/files/chunk`, chunkFormData, {
+                onUploadProgress: (progressEvent) => {
+                  const chunkProgress = Math.round((progressEvent.loaded * 100) / (progressEvent.total || 1));
+                  const overallProgress = Math.round(((j * 100) + chunkProgress) / totalChunks);
+                  setUploadProgress(overallProgress);
+                  setUploadingFiles(prev => prev.map((f, idx) => idx === i ? { ...f, progress: overallProgress } : f));
+                }
+              });
+            }
+
+            await axios.post(`/api/vods/${managingFilesFor.id}/files/complete-chunked`, {
+              uploadId,
+              filename: file.name,
+              totalChunks,
+              size: file.size
+            });
+          } catch (chunkError: any) {
+            console.error(`Chunked upload fallback failed for ${file.name}`, chunkError);
+            alert(`Failed to upload ${file.name}. Fallback also failed.`);
+          }
         }
       }
+
+      fetchVodFiles(managingFilesFor.id);
+      showNotification('All files uploaded successfully!', 'success');
     } catch (error: any) {
-      console.error('Failed to upload file', error);
-      const errorMsg = error.response?.data?.error || error.message || 'Failed to upload file';
-      alert(errorMsg);
+      console.error('Failed to upload files', error);
+      showNotification(error.response?.data?.error || error.message || 'Failed to upload files', 'error');
     } finally {
       setIsUploading(false);
       setUploadProgress(0);
+      setUploadingFiles([]);
       if (e.target) e.target.value = '';
     }
   };
 
   const handleDeleteFile = async (filename: string) => {
-    if (!managingFilesFor || !confirm(`Are you sure you want to delete ${filename}?`)) return;
+    if (!managingFilesFor) return;
     
     try {
       await axios.delete(`/api/vods/${managingFilesFor.id}/files/${encodeURIComponent(filename)}`);
+      showNotification(`File ${filename} deleted`, 'success');
       fetchVodFiles(managingFilesFor.id);
     } catch (error: any) {
       console.error('Failed to delete file', error);
-      alert(error.response?.data?.error || 'Failed to delete file');
+      showNotification(error.response?.data?.error || 'Failed to delete file', 'error');
+    } finally {
+      setFileToDeleteFilename(null);
     }
   };
 
@@ -319,12 +319,14 @@ export default function VodManager() {
     try {
       const res = await axios.post(`/api/vods/${id}/sync`);
       if (res.data.deleted) {
-        alert('VOD no longer exists on Flussonic and has been removed locally.');
+        showNotification('VOD no longer exists on Flussonic and has been removed locally.', 'info');
+      } else {
+        showNotification('VOD synced successfully', 'success');
       }
       fetchData();
     } catch (error) {
       console.error('Failed to sync VOD', error);
-      alert('Failed to sync VOD with Flussonic.');
+      showNotification('Failed to sync VOD with Flussonic.', 'error');
     } finally {
       setSyncingId(null);
     }
@@ -340,11 +342,11 @@ export default function VodManager() {
         if (res.data.vodsAdded) totalAdded += res.data.vodsAdded;
         if (res.data.vodsRemoved) totalRemoved += res.data.vodsRemoved;
       }
-      alert(`Sync complete! Added ${totalAdded} and removed ${totalRemoved} VODs from servers.`);
+      showNotification(`Sync complete! Added ${totalAdded} and removed ${totalRemoved} VODs from servers.`, 'success');
       fetchData();
     } catch (error) {
       console.error('Sync failed', error);
-      alert('Failed to sync VODs.');
+      showNotification('Failed to sync VODs.', 'error');
     } finally {
       setIsSubmitting(false);
     }
@@ -385,21 +387,26 @@ export default function VodManager() {
                     accept="video/*"
                     onChange={handleFileUpload}
                     disabled={isUploading}
+                    multiple
                   />
                 </label>
                 
                 {isUploading && (
-                  <div className="mt-4">
-                    <div className="flex justify-between text-sm mb-1">
-                      <span className="text-zinc-400">Uploading...</span>
-                      <span className="text-emerald-400 font-medium">{uploadProgress}%</span>
-                    </div>
-                    <div className="w-full bg-zinc-800 rounded-full h-2 overflow-hidden">
-                      <div 
-                        className="bg-emerald-500 h-2 rounded-full transition-all duration-300" 
-                        style={{ width: `${uploadProgress}%` }}
-                      ></div>
-                    </div>
+                  <div className="mt-4 space-y-3">
+                    {uploadingFiles.map((f, idx) => (
+                      <div key={idx} className="animate-in fade-in slide-in-from-top-1">
+                        <div className="flex justify-between text-xs mb-1">
+                          <span className="text-zinc-400 truncate max-w-[200px]">{f.name}</span>
+                          <span className="text-emerald-400 font-medium">{f.progress}%</span>
+                        </div>
+                        <div className="w-full bg-zinc-800 rounded-full h-1.5 overflow-hidden">
+                          <div 
+                            className="bg-emerald-500 h-1.5 rounded-full transition-all duration-300" 
+                            style={{ width: `${f.progress}%` }}
+                          ></div>
+                        </div>
+                      </div>
+                    ))}
                   </div>
                 )}
               </div>
@@ -437,7 +444,7 @@ export default function VodManager() {
                         onClick={() => {
                           const url = `playlist:///${managingFilesFor.name}/playlist.txt`;
                           navigator.clipboard.writeText(url);
-                          alert('Copied to clipboard!');
+                          showNotification('Copied to clipboard!', 'success');
                         }}
                         className="text-xs text-zinc-500 hover:text-white transition-colors"
                       >
@@ -500,7 +507,7 @@ export default function VodManager() {
                           </span>
                         </div>
                         <button
-                          onClick={() => handleDeleteFile(file.filename)}
+                          onClick={() => setFileToDeleteFilename(file.filename)}
                           className="text-zinc-500 hover:text-rose-400 p-1.5 hover:bg-zinc-900 rounded-lg transition-colors flex-shrink-0"
                           title="Delete file"
                         >
@@ -646,7 +653,7 @@ export default function VodManager() {
                       <Folder size={18} className="text-amber-400" />
                       {vod.name}
                     </td>
-                    <td className="px-6 py-4 text-zinc-400">{vod.server_name}</td>
+                    <td className="px-6 py-4 text-zinc-400">{vod.server_name || <span className="text-rose-400 italic">Deleted Server</span>}</td>
                     <td className="px-6 py-4">
                       <div className="flex flex-col gap-1 text-xs font-mono">
                         {vod.paths && vod.paths.map((path: string, i: number) => (
@@ -659,7 +666,7 @@ export default function VodManager() {
                     <td className="px-6 py-4 text-right">
                       <div className="flex items-center justify-end gap-2">
                         <button 
-                          onClick={() => handleSync(vod.id)}
+                           onClick={() => handleSync(vod.id)}
                           disabled={syncingId === vod.id}
                           className="text-zinc-500 hover:text-emerald-400 transition-colors px-3 py-1.5 rounded-lg border border-zinc-800 hover:border-emerald-500/50 flex items-center gap-2 text-xs font-medium disabled:opacity-50"
                           title="Sync with Flussonic"
@@ -689,7 +696,7 @@ export default function VodManager() {
                           <Edit2 size={18} />
                         </button>
                         <button 
-                          onClick={() => handleDelete(vod.id)}
+                          onClick={() => setDeleteConfirmId(vod.id)}
                           className="text-zinc-500 hover:text-rose-400 transition-colors p-2"
                           title="Delete VOD"
                         >
@@ -704,6 +711,76 @@ export default function VodManager() {
           </div>
         )}
       </div>
+
+      {/* Notification Toast */}
+      {notification && (
+        <div className={`fixed bottom-4 right-4 px-6 py-3 rounded-xl shadow-2xl z-[60] flex items-center gap-3 animate-in slide-in-from-right-full duration-300 ${
+          notification.type === 'success' ? 'bg-emerald-500 text-white' : 
+          notification.type === 'error' ? 'bg-rose-500 text-white' : 
+          'bg-blue-500 text-white'
+        }`}>
+          {notification.type === 'success' ? <Check size={20} /> : <AlertCircle size={20} />}
+          <span className="font-medium">{notification.message}</span>
+        </div>
+      )}
+
+      {/* VOD Deletion Confirmation Modal */}
+      {deleteConfirmId && (
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[70] flex items-center justify-center p-4">
+          <div className="bg-zinc-900 border border-zinc-800 rounded-2xl max-w-md w-full p-6 shadow-2xl">
+            <div className="flex items-center gap-3 text-rose-400 mb-4">
+              <AlertCircle size={24} />
+              <h3 className="text-xl font-bold">Delete VOD Location?</h3>
+            </div>
+            <p className="text-zinc-400 mb-6">
+              Are you sure you want to delete this VOD location? This will remove the configuration from Flussonic as well.
+            </p>
+            <div className="flex gap-3">
+              <button
+                onClick={() => handleDelete(deleteConfirmId)}
+                className="flex-1 bg-rose-500 hover:bg-rose-600 text-white font-bold py-2 rounded-xl transition-colors"
+              >
+                Yes, Delete
+              </button>
+              <button
+                onClick={() => setDeleteConfirmId(null)}
+                className="flex-1 bg-zinc-800 hover:bg-zinc-700 text-white font-bold py-2 rounded-xl transition-colors"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* File Deletion Confirmation Modal */}
+      {fileToDeleteFilename && (
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm z-[70] flex items-center justify-center p-4">
+          <div className="bg-zinc-900 border border-zinc-800 rounded-2xl max-w-md w-full p-6 shadow-2xl">
+            <div className="flex items-center gap-3 text-rose-400 mb-4">
+              <AlertCircle size={24} />
+              <h3 className="text-xl font-bold">Delete File?</h3>
+            </div>
+            <p className="text-zinc-400 mb-6">
+              Are you sure you want to delete <span className="text-white font-mono">{fileToDeleteFilename}</span>?
+            </p>
+            <div className="flex gap-3">
+              <button
+                onClick={() => handleDeleteFile(fileToDeleteFilename)}
+                className="flex-1 bg-rose-500 hover:bg-rose-600 text-white font-bold py-2 rounded-xl transition-colors"
+              >
+                Yes, Delete
+              </button>
+              <button
+                onClick={() => setFileToDeleteFilename(null)}
+                className="flex-1 bg-zinc-800 hover:bg-zinc-700 text-white font-bold py-2 rounded-xl transition-colors"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

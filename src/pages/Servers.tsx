@@ -1,15 +1,19 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
-import { Plus, Trash2, Server as ServerIcon, Activity, X, RefreshCw } from 'lucide-react';
+import { Plus, Trash2, Server as ServerIcon, Activity, X, RefreshCw, Search } from 'lucide-react';
 
 export default function Servers() {
   const [servers, setServers] = useState<any[]>([]);
+  const [searchQuery, setSearchQuery] = useState('');
   const [isAdding, setIsAdding] = useState(false);
   const [formData, setFormData] = useState({ name: '', url: '', api_key: '' });
   
   const [metricsServer, setMetricsServer] = useState<any>(null);
   const [metricsData, setMetricsData] = useState<any>(null);
   const [isLoadingMetrics, setIsLoadingMetrics] = useState(false);
+  
+  const [deleteConfirmId, setDeleteConfirmId] = useState<number | null>(null);
+  const [notification, setNotification] = useState<{ message: string, type: 'success' | 'error' } | null>(null);
   
   const [autoSyncEnabled, setAutoSyncEnabled] = useState(false);
   const [isSyncingAll, setIsSyncingAll] = useState(false);
@@ -67,6 +71,17 @@ export default function Servers() {
     };
   }, []);
 
+  useEffect(() => {
+    if (notification) {
+      const timer = setTimeout(() => setNotification(null), 5000);
+      return () => clearTimeout(timer);
+    }
+  }, [notification]);
+
+  const showNotification = (message: string, type: 'success' | 'error' = 'success') => {
+    setNotification({ message, type });
+  };
+
   const fetchServers = async () => {
     try {
       const res = await axios.get('/api/servers');
@@ -94,7 +109,7 @@ export default function Servers() {
       setAutoSyncEnabled(newValue);
     } catch (error) {
       console.error('Failed to toggle auto sync', error);
-      alert('Failed to update setting');
+      showNotification('Failed to update setting', 'error');
     }
   };
 
@@ -102,11 +117,11 @@ export default function Servers() {
     setIsSyncingAll(true);
     try {
       const res = await axios.post('/api/servers/sync-all');
-      alert(`Sync complete! Added ${res.data.added} new streams, removed ${res.data.removed} deleted streams.`);
+      showNotification(`Sync complete! Added ${res.data.added} new streams, removed ${res.data.removed} deleted streams.`);
       fetchServers();
     } catch (error) {
       console.error('Failed to sync all servers', error);
-      alert('Failed to sync servers');
+      showNotification('Failed to sync servers', 'error');
     } finally {
       setIsSyncingAll(false);
     }
@@ -119,19 +134,22 @@ export default function Servers() {
       setFormData({ name: '', url: '', api_key: '' });
       setIsAdding(false);
       fetchServers();
+      showNotification('Server added successfully');
     } catch (error) {
       console.error('Failed to add server', error);
-      alert('Failed to add server');
+      showNotification('Failed to add server', 'error');
     }
   };
 
   const handleDelete = async (id: number) => {
-    if (!confirm('Are you sure? This will also delete all streams associated with this server.')) return;
     try {
       await axios.delete(`/api/servers/${id}`);
+      setDeleteConfirmId(null);
       fetchServers();
-    } catch (error) {
+      showNotification('Server removed successfully');
+    } catch (error: any) {
       console.error('Failed to delete server', error);
+      showNotification(`Failed to delete server: ${error.response?.data?.error || error.message}`, 'error');
     }
   };
 
@@ -150,14 +168,32 @@ export default function Servers() {
     }
   };
 
+  const filteredServers = servers.filter(server => {
+    const query = searchQuery.toLowerCase();
+    return (
+      server.name.toLowerCase().includes(query) ||
+      server.url.toLowerCase().includes(query)
+    );
+  });
+
   return (
     <div className="space-y-8">
-      <div className="flex items-center justify-between">
+      <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>
           <h1 className="text-3xl font-bold tracking-tight text-white">Servers</h1>
           <p className="text-zinc-400 mt-2">Manage your Flussonic Media Server instances.</p>
         </div>
-        <div className="flex items-center gap-4">
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="relative">
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500" size={18} />
+            <input
+              type="text"
+              placeholder="Search servers or IPs..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              className="bg-zinc-900 border border-zinc-800 rounded-xl pl-10 pr-4 py-2 text-sm text-white focus:outline-none focus:border-emerald-500 transition-colors w-64"
+            />
+          </div>
           <div className="flex items-center gap-2 bg-zinc-900 border border-zinc-800 px-4 py-2 rounded-xl">
             <span className="text-sm font-medium text-zinc-300">Auto-Sync Streams</span>
             <button 
@@ -237,7 +273,7 @@ export default function Servers() {
       )}
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-        {servers.map(server => (
+        {filteredServers.map(server => (
           <div key={server.id} className="bg-zinc-900 border border-zinc-800 rounded-2xl p-6 flex flex-col">
             <div className="flex items-start justify-between mb-4">
               <div className="p-3 rounded-xl bg-blue-500/10 text-blue-400">
@@ -248,11 +284,11 @@ export default function Servers() {
                   onClick={async () => {
                     try {
                       const res = await axios.post(`/api/servers/${server.id}/sync`);
-                      alert(`Sync complete! Added ${res.data.added} new streams, removed ${res.data.removed} deleted streams.`);
+                      showNotification(`Sync complete! Added ${res.data.added} new streams, removed ${res.data.removed} deleted streams.`);
                       fetchServers();
                     } catch (error) {
                       console.error('Failed to sync server', error);
-                      alert('Failed to sync server');
+                      showNotification('Failed to sync server', 'error');
                     }
                   }}
                   className="text-zinc-500 hover:text-blue-400 transition-colors p-2"
@@ -268,7 +304,7 @@ export default function Servers() {
                   <Activity size={18} />
                 </button>
                 <button 
-                  onClick={() => handleDelete(server.id)}
+                  onClick={() => setDeleteConfirmId(server.id)}
                   className="text-zinc-500 hover:text-rose-400 transition-colors p-2"
                   title="Delete Server"
                 >
@@ -291,9 +327,9 @@ export default function Servers() {
             </div>
           </div>
         ))}
-        {servers.length === 0 && !isAdding && (
+        {filteredServers.length === 0 && !isAdding && (
           <div className="col-span-full text-center py-12 text-zinc-500 bg-zinc-900/50 border border-zinc-800 border-dashed rounded-2xl">
-            No servers added yet. Click "Add Server" to get started.
+            {searchQuery ? 'No servers match your search.' : 'No servers added yet. Click "Add Server" to get started.'}
           </div>
         )}
       </div>
@@ -366,6 +402,43 @@ export default function Servers() {
               ) : null}
             </div>
           </div>
+        </div>
+      )}
+
+      {deleteConfirmId && (
+        <div className="fixed inset-0 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4 z-50">
+          <div className="bg-zinc-900 border border-zinc-800 rounded-2xl w-full max-w-md p-6 shadow-2xl">
+            <h2 className="text-xl font-bold text-white mb-2">Remove Server?</h2>
+            <p className="text-zinc-400 mb-6">
+              Are you sure you want to remove this server? Associated streams and VODs will be preserved but marked as orphaned.
+            </p>
+            <div className="flex gap-3">
+              <button 
+                onClick={() => handleDelete(deleteConfirmId)}
+                className="flex-1 bg-rose-500 hover:bg-rose-600 text-white px-4 py-2 rounded-xl font-medium transition-colors"
+              >
+                Yes, Remove
+              </button>
+              <button 
+                onClick={() => setDeleteConfirmId(null)}
+                className="flex-1 bg-zinc-800 hover:bg-zinc-700 text-white px-4 py-2 rounded-xl font-medium transition-colors"
+              >
+                Cancel
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {notification && (
+        <div className={`fixed bottom-6 right-6 px-6 py-3 rounded-xl shadow-2xl z-50 border flex items-center gap-3 animate-in fade-in slide-in-from-bottom-4 duration-300 ${
+          notification.type === 'error' ? 'bg-rose-500/10 border-rose-500/20 text-rose-400' : 'bg-emerald-500/10 border-emerald-500/20 text-emerald-400'
+        }`}>
+          <div className={`w-2 h-2 rounded-full ${notification.type === 'error' ? 'bg-rose-500' : 'bg-emerald-500'}`} />
+          <p className="font-medium">{notification.message}</p>
+          <button onClick={() => setNotification(null)} className="ml-2 hover:text-white transition-colors">
+            <X size={16} />
+          </button>
         </div>
       )}
     </div>
