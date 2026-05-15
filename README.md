@@ -1,20 +1,45 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://github.com/user-attachments/assets/0aa67016-6eaf-458a-adb2-6e31a0763ed6" />
-</div>
+# Flussonic Manager
 
-# Run and deploy your AI Studio app
+A management dashboard for Flussonic Media Server with VOD playlist fallback and Telegram watchdog notifications.
 
-This contains everything you need to run your app locally.
+## Deployment to Hostinger
 
-View your app in AI Studio: https://ai.studio/apps/eaff9979-a110-42b7-8e46-969b0878320e
+### Method 1: VPS (Recommended)
+1. **Clone the repository** to your VPS.
+2. **Install dependencies**:
+   ```bash
+   npm install
+   ```
+3. **Build the application**:
+   ```bash
+   npm run build
+   ```
+4. **Start the application** using PM2 (for persistence):
+   ```bash
+   pm2 start dist/server.cjs --name flussonic-manager
+   ```
 
-## Run Locally
+### Method 2: Hostinger Shared Hosting (Node.js)
+1. **Upload your code** to the server (you can use Git or FTP).
+2. Go to the **Node.js** section in your Hostinger Panel.
+3. Select the folder where you uploaded the code.
+4. Set the **Application Entry Point** to `dist/server.cjs`.
+5. Run the **Build** command via the Hostinger UI (if available) or via SSH:
+   ```bash
+   npm install
+   ```
+6. The `package.json` includes a `build` script that prepares both the frontend and the backend bundle.
 
-**Prerequisites:**  Node.js
+## Environment Variables
+Create a `.env` file in the root directory:
+```env
+PORT=3000
+DATABASE_PATH=flussonic.db
+NODE_ENV=production
+```
 
-
-1. Install dependencies:
-   `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
-3. Run the app:
-   `npm run dev`
+## GitHub Integration
+To commit this code to GitHub:
+1. Open the **Settings** menu in AI Studio.
+2. Select **Connect to GitHub** or **Export to GitHub**.
+3. Follow the authentication flow to push your project to a new or existing repository.
