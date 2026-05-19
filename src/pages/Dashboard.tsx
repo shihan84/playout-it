@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import axios from 'axios';
 import { Server, Radio, Activity, CheckCircle2, XCircle, AlertCircle } from 'lucide-react';
-import VodManager from '../components/VodManager';
+import VodSummary from '../components/VodSummary';
 
 export default function Dashboard() {
   const [stats, setStats] = useState({
@@ -157,7 +157,7 @@ export default function Dashboard() {
         </div>
 
         <div className="bg-zinc-900 border border-zinc-800 rounded-2xl p-6">
-          <VodManager />
+          <VodSummary />
         </div>
       </div>
     </div>
