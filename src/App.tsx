@@ -1,14 +1,19 @@
-import React from 'react';
-import { BrowserRouter, Routes, Route, Link, useLocation } from 'react-router-dom';
-import { LayoutDashboard, Server, Radio, Settings, Folder } from 'lucide-react';
+import React, { useState, useEffect } from 'react';
+import { BrowserRouter, Routes, Route, Link, useLocation, useNavigate, Navigate } from 'react-router-dom';
+import { LayoutDashboard, Server, Radio, Settings, Folder, Users, LogOut, Shield, Bell } from 'lucide-react';
 import { clsx } from 'clsx';
 import { twMerge } from 'tailwind-merge';
+import axios from 'axios';
 
 import Dashboard from './pages/Dashboard';
 import Servers from './pages/Servers';
 import Streams from './pages/Streams';
 import Vods from './pages/Vods';
 import AppSettings from './pages/Settings';
+import Login from './pages/Login';
+import UserManagement from './pages/UserManagement';
+import IpManagement from './pages/IpManagement';
+import TelegramAlerts from './pages/TelegramAlerts';
 
 function cn(...inputs: (string | undefined | null | false)[]) {
   return twMerge(clsx(inputs));
@@ -16,25 +21,53 @@ function cn(...inputs: (string | undefined | null | false)[]) {
 
 function Sidebar() {
   const location = useLocation();
-  
+  const navigate = useNavigate();
+  const [user, setUser] = useState<any>(null);
+
+  useEffect(() => {
+    const token = localStorage.getItem('token');
+    const userData = localStorage.getItem('user');
+    if (token && userData) {
+      setUser(JSON.parse(userData));
+    }
+  }, []);
+
+  const handleLogout = async () => {
+    try {
+      await axios.post('/api/auth/logout');
+    } catch (error) {
+      console.error('Logout error:', error);
+    }
+    localStorage.removeItem('token');
+    localStorage.removeItem('user');
+    navigate('/login');
+  };
+
   const links = [
     { name: 'Dashboard', path: '/', icon: LayoutDashboard },
-    { name: 'Servers', path: '/servers', icon: Server },
+    { name: 'Servers', path: '/servers', icon: Server, adminOnly: true },
     { name: 'Streams', path: '/streams', icon: Radio },
-    { name: 'VODs', path: '/vods', icon: Folder },
-    { name: 'Settings', path: '/settings', icon: Settings },
+    { name: 'VODs', path: '/vods', icon: Folder, adminOnly: true },
+    { name: 'Users', path: '/users', icon: Users, adminOnly: true },
+    { name: 'IP Management', path: '/ip-management', icon: Shield },
+    { name: 'Telegram Alerts', path: '/telegram-alerts', icon: Bell },
+    { name: 'Settings', path: '/settings', icon: Settings, adminOnly: true },
   ];
+
+  const filteredLinks = user?.role === 'admin' 
+    ? links 
+    : links.filter(link => !link.adminOnly);
 
   return (
     <div className="w-64 bg-zinc-900 text-zinc-300 flex flex-col h-screen border-r border-zinc-800">
       <div className="p-6">
         <h1 className="text-xl font-bold text-white flex items-center gap-2">
           <Radio className="text-emerald-500" />
-          Flussonic Manager
+          IBS Manager
         </h1>
       </div>
       <nav className="flex-1 px-4 space-y-2">
-        {links.map((link) => {
+        {filteredLinks.map((link) => {
           const Icon = link.icon;
           const isActive = location.pathname === link.path;
           return (
@@ -54,6 +87,24 @@ function Sidebar() {
           );
         })}
       </nav>
+      <div className="p-4 border-t border-zinc-800">
+        <div className="flex items-center gap-3 mb-4 px-2">
+          <div className="w-8 h-8 bg-emerald-500/20 rounded-full flex items-center justify-center">
+            <Users size={16} className="text-emerald-400" />
+          </div>
+          <div className="flex-1 min-w-0">
+            <p className="text-sm font-medium text-white truncate">{user?.username || 'User'}</p>
+            <p className="text-xs text-zinc-500 capitalize">{user?.role || 'client'}</p>
+          </div>
+        </div>
+        <button
+          onClick={handleLogout}
+          className="w-full flex items-center gap-2 px-4 py-2 text-zinc-400 hover:text-white hover:bg-zinc-800 rounded-xl transition-colors text-sm"
+        >
+          <LogOut size={16} />
+          Logout
+        </button>
+      </div>
     </div>
   );
 }
@@ -74,18 +125,79 @@ function Layout({ children }: { children: React.ReactNode }) {
   );
 }
 
+function ProtectedRoutes() {
+  const navigate = useNavigate();
+  const token = localStorage.getItem('token');
+
+  useEffect(() => {
+    if (!token) {
+      navigate('/login', { replace: true });
+    }
+  }, [token, navigate]);
+
+  if (!token) return null;
+
+  const userStr = localStorage.getItem('user');
+  const currentUser = userStr ? JSON.parse(userStr) : null;
+  const isAdmin = currentUser?.role === 'admin';
+
+  return (
+    <Layout>
+      <Routes>
+        <Route path="/" element={<Dashboard />} />
+        <Route path="/servers" element={isAdmin ? <Servers /> : <Navigate to="/" replace />} />
+        <Route path="/streams" element={<Streams />} />
+        <Route path="/vods" element={isAdmin ? <Vods /> : <Navigate to="/" replace />} />
+        <Route path="/users" element={isAdmin ? <UserManagement /> : <Navigate to="/" replace />} />
+        <Route path="/ip-management" element={<IpManagement />} />
+        <Route path="/telegram-alerts" element={<TelegramAlerts />} />
+        <Route path="/settings" element={isAdmin ? <AppSettings /> : <Navigate to="/" replace />} />
+      </Routes>
+    </Layout>
+  );
+}
+
 export default function App() {
+  useEffect(() => {
+    // Add axios interceptor to include token in requests
+    const interceptor = axios.interceptors.request.use(
+      (config) => {
+        const token = localStorage.getItem('token');
+        if (token) {
+          config.headers.Authorization = `Bearer ${token}`;
+        }
+        return config;
+      },
+      (error) => Promise.reject(error)
+    );
+
+    // Add axios interceptor to handle 401 errors only (not 403)
+    const responseInterceptor = axios.interceptors.response.use(
+      (response) => response,
+      (error) => {
+        console.error('Axios error:', error.response?.status, error.config?.url);
+        if (error.response?.status === 401) {
+          console.log('401 error, redirecting to login');
+          localStorage.removeItem('token');
+          localStorage.removeItem('user');
+          window.location.href = '/login';
+        }
+        return Promise.reject(error);
+      }
+    );
+
+    return () => {
+      axios.interceptors.request.eject(interceptor);
+      axios.interceptors.response.eject(responseInterceptor);
+    };
+  }, []);
+
   return (
     <BrowserRouter>
-      <Layout>
-        <Routes>
-          <Route path="/" element={<Dashboard />} />
-          <Route path="/servers" element={<Servers />} />
-          <Route path="/streams" element={<Streams />} />
-          <Route path="/vods" element={<Vods />} />
-          <Route path="/settings" element={<AppSettings />} />
-        </Routes>
-      </Layout>
+      <Routes>
+        <Route path="/login" element={<Login />} />
+        <Route path="/*" element={<ProtectedRoutes />} />
+      </Routes>
     </BrowserRouter>
   );
 }

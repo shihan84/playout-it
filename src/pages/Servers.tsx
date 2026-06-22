@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
-import { Plus, Trash2, Server as ServerIcon, Activity, X, RefreshCw, Search } from 'lucide-react';
+import { Plus, Trash2, Server as ServerIcon, Activity, X, RefreshCw, Search, CheckCircle, XCircle, Clock } from 'lucide-react';
 
 export default function Servers() {
   const [servers, setServers] = useState<any[]>([]);
@@ -58,8 +58,8 @@ export default function Servers() {
 
     connectWs();
 
-    // Fallback polling
-    const interval = setInterval(fetchServers, 10000);
+    // Fallback polling for servers (includes status check)
+    const interval = setInterval(fetchServers, 30000);
     
     return () => {
       clearInterval(interval);
@@ -89,6 +89,19 @@ export default function Servers() {
     } catch (error) {
       console.error('Failed to fetch servers', error);
       setServers([]);
+    }
+  };
+
+  const refreshServerStatus = async (serverId: number) => {
+    try {
+      const res = await axios.get(`/api/servers/${serverId}/status`);
+      setServers(prevServers => prevServers.map(server => 
+        server.id === serverId 
+          ? { ...server, status: res.data.status, last_checked: res.data.last_checked }
+          : server
+      ));
+    } catch (error) {
+      console.error('Failed to refresh server status', error);
     }
   };
 
@@ -281,6 +294,13 @@ export default function Servers() {
               </div>
               <div className="flex items-center gap-2">
                 <button 
+                  onClick={() => refreshServerStatus(server.id)}
+                  className="text-zinc-500 hover:text-blue-400 transition-colors p-2"
+                  title="Check Status"
+                >
+                  <RefreshCw size={18} />
+                </button>
+                <button 
                   onClick={async () => {
                     try {
                       const res = await axios.post(`/api/servers/${server.id}/sync`);
@@ -312,8 +332,27 @@ export default function Servers() {
                 </button>
               </div>
             </div>
+            <div className="flex items-center gap-2 mb-2">
+              {server.status === 'online' ? (
+                <CheckCircle className="text-emerald-400" size={16} />
+              ) : server.status === 'offline' ? (
+                <XCircle className="text-rose-400" size={16} />
+              ) : (
+                <Clock className="text-zinc-500" size={16} />
+              )}
+              <span className={`text-sm font-medium ${server.status === 'online' ? 'text-emerald-400' : server.status === 'offline' ? 'text-rose-400' : 'text-zinc-500'}`}>
+                {server.status ? server.status.toUpperCase() : 'UNKNOWN'}
+              </span>
+            </div>
             <h3 className="text-lg font-bold text-white mb-1">{server.name}</h3>
             <p className="text-sm text-zinc-400 font-mono break-all mb-4">{server.url}</p>
+            
+            {server.last_checked && (
+              <p className="text-xs text-zinc-500 mb-4 flex items-center gap-1">
+                <Clock size={12} />
+                Last checked: {new Date(server.last_checked).toLocaleString()}
+              </p>
+            )}
             
             <div className="mt-auto pt-4 border-t border-zinc-800 grid grid-cols-2 gap-4">
               <div>

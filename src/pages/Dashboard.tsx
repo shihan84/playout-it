@@ -11,17 +11,35 @@ export default function Dashboard() {
     offline: 0
   });
   const [recentStreams, setRecentStreams] = useState<any[]>([]);
+  const [user, setUser] = useState<any>(null);
+
+  useEffect(() => {
+    const userStr = localStorage.getItem('user');
+    if (userStr) {
+      setUser(JSON.parse(userStr));
+    }
+  }, []);
 
   useEffect(() => {
     const fetchData = async () => {
       try {
-        const [serversRes, streamsRes] = await Promise.all([
-          axios.get('/api/servers'),
-          axios.get('/api/streams')
-        ]);
-        
-        const servers = Array.isArray(serversRes.data) ? serversRes.data : [];
+        console.log('Dashboard: Fetching /api/my-streams');
+        const streamsRes = await axios.get('/api/my-streams');
         const streams = Array.isArray(streamsRes.data) ? streamsRes.data : [];
+        console.log('Dashboard: Got streams:', streams.length);
+        
+        // Only fetch servers if user is admin
+        let servers = [];
+        if (user?.role === 'admin') {
+          try {
+            console.log('Dashboard: Fetching /api/servers');
+            const serversRes = await axios.get('/api/servers');
+            servers = Array.isArray(serversRes.data) ? serversRes.data : [];
+            console.log('Dashboard: Got servers:', servers.length);
+          } catch (error) {
+            console.error("Failed to fetch servers", error);
+          }
+        }
         
         setStats({
           servers: servers.length,
@@ -85,7 +103,7 @@ export default function Dashboard() {
         ws.close();
       }
     };
-  }, []);
+  }, [user]);
 
   return (
     <div className="space-y-8">

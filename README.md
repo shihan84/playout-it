@@ -1,4 +1,4 @@
-# Flussonic Manager
+# IBS Manager
 
 A management dashboard for Flussonic Media Server with VOD playlist fallback and Telegram watchdog notifications.
 
@@ -29,6 +29,54 @@ A management dashboard for Flussonic Media Server with VOD playlist fallback and
    npm install
    ```
 6. The `package.json` includes a `build` script that prepares both the frontend and the backend bundle.
+
+## Deployment to Raspberry Pi 3 B+ (Raspbian OS)
+
+These scripts are optimized for the Raspberry Pi 3 B+ running 32-bit or 64-bit Raspbian OS.
+
+### 1. Initial system setup (run once on the Pi)
+
+```bash
+# Copy project to the Pi, then:
+cd /opt/flussonic-manager
+chmod +x scripts/*.sh
+./scripts/setup-raspbian.sh
+```
+
+This script will:
+- Update the system
+- Configure a 2 GB swap file (required for compiling native modules on 1 GB RAM)
+- Install Node.js 20.x, build tools, PM2, and git
+- Create `/opt/flussonic-manager`
+
+### 2. Deploy / update the application
+
+```bash
+cd /opt/flussonic-manager
+./scripts/deploy-raspbian.sh
+```
+
+This script will:
+- Install npm dependencies with low memory settings
+- Rebuild native modules (`better-sqlite3`, `bcrypt`) from source for ARM
+- Build the frontend and backend bundle
+- Start the app via PM2 with a 512 MB memory limit
+
+### 3. Alternative: systemd service (lighter than PM2)
+
+```bash
+sudo cp scripts/flussonic-manager.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable flussonic-manager
+sudo systemctl start flussonic-manager
+sudo systemctl status flussonic-manager
+```
+
+### Performance notes for RPi 3 B+
+- Keep the number of concurrent dashboard users low (1–3).
+- Use an external USB drive or SSD for the VOD storage path; SD cards are too slow for reliable streaming.
+- Avoid enabling VOD sync on very large folders; sync is memory intensive.
+- If the build runs out of memory, increase swap to 4 GB in `/etc/dphys-swapfile`.
 
 ## Environment Variables
 Create a `.env` file in the root directory:

@@ -3,7 +3,7 @@ import axios from 'axios';
 import { 
   Plus, Trash2, Folder, AlertCircle, RefreshCw, 
   Edit2, FileVideo, X, Copy, Check, Search, 
-  Database, Server, MoreHorizontal, Settings2, Trash
+  Database, Server, MoreHorizontal, Settings2, Trash, HardDrive
 } from 'lucide-react';
 import VodFileManager from './VodFileManager';
 
@@ -28,6 +28,9 @@ export default function VodManager() {
   };
 
   useEffect(() => {
+    const userStr = localStorage.getItem('user');
+    const user = userStr ? JSON.parse(userStr) : null;
+    if (user?.role !== 'admin') return;
     fetchData();
   }, []);
 
@@ -164,6 +167,10 @@ export default function VodManager() {
     } finally {
       setIsSubmitting(false);
     }
+  };
+
+  const handleManageFiles = (vod: any) => {
+    setManagingFilesFor(vod);
   };
 
   const filteredVods = vods.filter(vod => {

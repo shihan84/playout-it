@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
-import { Save, Bell, Clock, Check, AlertCircle } from 'lucide-react';
+import { Save, Bell, Clock, Check, AlertCircle, Lock, RefreshCw, Globe } from 'lucide-react';
 
 export default function Settings() {
   const [settings, setSettings] = useState({
@@ -9,11 +9,16 @@ export default function Settings() {
     telegram_chat_id: '',
     watchdog_interval: '5',
     auto_sync_enabled: false,
-    auto_sync_interval: '60'
+    auto_sync_interval: '60',
+    ssl_enabled: false,
+    ssl_domain: '',
+    ssl_email: ''
   });
   const [isSaving, setIsSaving] = useState(false);
   const [saveMessage, setSaveMessage] = useState('');
   const [notification, setNotification] = useState<{ message: string, type: 'success' | 'error' | 'info' } | null>(null);
+  const [sslStatus, setSslStatus] = useState<{ enabled: boolean, domain: string, expiry: string | null, status: string } | null>(null);
+  const [isInstallingSsl, setIsInstallingSsl] = useState(false);
 
   const showNotification = (message: string, type: 'success' | 'error' | 'info' = 'info') => {
     setNotification({ message, type });
@@ -30,14 +35,27 @@ export default function Settings() {
           telegram_chat_id: res.data.telegram_chat_id || '',
           watchdog_interval: res.data.watchdog_interval || '5',
           auto_sync_enabled: res.data.auto_sync_enabled === 'true',
-          auto_sync_interval: res.data.auto_sync_interval || '60'
+          auto_sync_interval: res.data.auto_sync_interval || '60',
+          ssl_enabled: res.data.ssl_enabled === 'true',
+          ssl_domain: res.data.ssl_domain || '',
+          ssl_email: res.data.ssl_email || ''
         });
       } catch (error) {
         console.error('Failed to fetch settings', error);
       }
     };
     fetchSettings();
+    fetchSslStatus();
   }, []);
+
+  const fetchSslStatus = async () => {
+    try {
+      const res = await axios.get('/api/ssl/status');
+      setSslStatus(res.data);
+    } catch (error) {
+      console.error('Failed to fetch SSL status', error);
+    }
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -71,6 +89,44 @@ export default function Settings() {
       console.error('Failed to send test message', error);
       const description = error.response?.data?.error || error.message;
       showNotification(`Failed to send test message: ${description}`, 'error');
+    }
+  };
+
+  const handleInstallSsl = async () => {
+    if (!settings.ssl_domain || !settings.ssl_email) {
+      showNotification('Please enter domain and email for SSL certificate.', 'error');
+      return;
+    }
+    setIsInstallingSsl(true);
+    try {
+      await axios.post('/api/ssl/install', {
+        domain: settings.ssl_domain,
+        email: settings.ssl_email
+      });
+      showNotification('SSL certificate installed successfully!', 'success');
+      await fetchSslStatus();
+      setSettings({ ...settings, ssl_enabled: true });
+    } catch (error: any) {
+      console.error('Failed to install SSL certificate', error);
+      const description = error.response?.data?.error || error.message;
+      showNotification(`Failed to install SSL: ${description}`, 'error');
+    } finally {
+      setIsInstallingSsl(false);
+    }
+  };
+
+  const handleRenewSsl = async () => {
+    setIsInstallingSsl(true);
+    try {
+      await axios.post('/api/ssl/renew');
+      showNotification('SSL certificate renewed successfully!', 'success');
+      await fetchSslStatus();
+    } catch (error: any) {
+      console.error('Failed to renew SSL certificate', error);
+      const description = error.response?.data?.error || error.message;
+      showNotification(`Failed to renew SSL: ${description}`, 'error');
+    } finally {
+      setIsInstallingSsl(false);
     }
   };
 
@@ -180,6 +236,96 @@ export default function Settings() {
                 </div>
               )}
             </div>
+          </div>
+        </div>
+
+        <div className="bg-zinc-900 border border-zinc-800 rounded-2xl p-6 space-y-6">
+          <div className="flex items-center justify-between border-b border-zinc-800 pb-4">
+            <div className="flex items-center gap-3">
+              <Lock className="text-emerald-400" />
+              <h2 className="text-xl font-semibold text-white">SSL/HTTPS Configuration</h2>
+            </div>
+            {sslStatus?.enabled && (
+              <div className="flex items-center gap-2">
+                <span className="text-xs px-2 py-1 bg-emerald-500/20 text-emerald-400 rounded-full">Active</span>
+              </div>
+            )}
+          </div>
+          
+          <div className="space-y-6">
+            {sslStatus?.enabled ? (
+              <div className="space-y-4">
+                <div className="bg-zinc-950 rounded-xl p-4 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm text-zinc-400">Domain</span>
+                    <span className="text-sm text-white font-medium">{sslStatus.domain}</span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-sm text-zinc-400">Status</span>
+                    <span className="text-sm text-emerald-400 font-medium">{sslStatus.status}</span>
+                  </div>
+                  {sslStatus.expiry && (
+                    <div className="flex items-center justify-between">
+                      <span className="text-sm text-zinc-400">Expires</span>
+                      <span className="text-sm text-white font-medium">{new Date(sslStatus.expiry).toLocaleDateString()}</span>
+                    </div>
+                  )}
+                </div>
+                
+                <button 
+                  type="button"
+                  onClick={handleRenewSsl}
+                  disabled={isInstallingSsl}
+                  className="w-full bg-zinc-800 hover:bg-zinc-700 disabled:opacity-50 text-white px-4 py-2.5 rounded-xl font-medium flex items-center justify-center gap-2 transition-colors"
+                >
+                  <RefreshCw size={18} className={isInstallingSsl ? 'animate-spin' : ''} />
+                  {isInstallingSsl ? 'Renewing...' : 'Renew Certificate'}
+                </button>
+              </div>
+            ) : (
+              <div className="space-y-4">
+                <div>
+                  <label className="block text-sm font-medium text-zinc-400 mb-1">Domain Name</label>
+                  <div className="relative">
+                    <Globe className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500" size={18} />
+                    <input 
+                      type="text" 
+                      value={settings.ssl_domain}
+                      onChange={e => setSettings({...settings, ssl_domain: e.target.value})}
+                      className="w-full bg-zinc-950 border border-zinc-800 rounded-xl pl-10 pr-4 py-2.5 text-white focus:outline-none focus:border-emerald-500 transition-colors"
+                      placeholder="example.com"
+                    />
+                  </div>
+                  <p className="text-xs text-zinc-500 mt-1">Your domain must point to this server's IP address.</p>
+                </div>
+                
+                <div>
+                  <label className="block text-sm font-medium text-zinc-400 mb-1">Email Address</label>
+                  <input 
+                    type="email" 
+                    value={settings.ssl_email}
+                    onChange={e => setSettings({...settings, ssl_email: e.target.value})}
+                    className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-2.5 text-white focus:outline-none focus:border-emerald-500 transition-colors"
+                    placeholder="admin@example.com"
+                  />
+                  <p className="text-xs text-zinc-500 mt-1">Used for Let's Encrypt notifications and recovery.</p>
+                </div>
+
+                <button 
+                  type="button"
+                  onClick={handleInstallSsl}
+                  disabled={isInstallingSsl}
+                  className="w-full bg-emerald-500 hover:bg-emerald-600 disabled:opacity-50 text-white px-4 py-2.5 rounded-xl font-medium flex items-center justify-center gap-2 transition-colors"
+                >
+                  <Lock size={18} />
+                  {isInstallingSsl ? 'Installing...' : 'Install SSL Certificate'}
+                </button>
+                
+                <p className="text-xs text-zinc-500 text-center">
+                  Uses Let's Encrypt for free SSL certificates. Requires domain DNS configuration.
+                </p>
+              </div>
+            )}
           </div>
         </div>
 

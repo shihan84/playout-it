@@ -25,6 +25,15 @@ export default function VodFileManager({ vod, onClose, showNotification }: VodFi
 
   useEffect(() => {
     fetchFiles();
+    
+    // Auto-sync files every 30 seconds
+    const syncInterval = setInterval(() => {
+      if (!isUploading) {
+        fetchFiles();
+      }
+    }, 30000);
+    
+    return () => clearInterval(syncInterval);
   }, [vod.id]);
 
   const fetchFiles = async () => {

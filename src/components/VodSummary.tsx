@@ -6,8 +6,14 @@ import { Link } from 'react-router-dom';
 export default function VodSummary() {
   const [vods, setVods] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
+  const userStr = localStorage.getItem('user');
+  const user = userStr ? JSON.parse(userStr) : null;
 
   useEffect(() => {
+    if (user?.role !== 'admin') {
+      setLoading(false);
+      return;
+    }
     const fetchVods = async () => {
       try {
         const res = await axios.get('/api/vods');

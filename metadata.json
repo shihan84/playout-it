@@ -1,5 +1,5 @@
 {
-  "name": "Flussonic Manager",
+  "name": "IBS Manager",
   "description": "Flussonic Media Server management dashboard with VOD playlist fallback and Telegram watchdog notifications.",
   "requestFramePermissions": [],
   "majorCapabilities": [

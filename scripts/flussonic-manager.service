@@ -1,0 +1,19 @@
+[Unit]
+Description=IBS Flussonic Manager
+After=network.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/opt/flussonic-manager
+ExecStart=/usr/bin/node dist/server.cjs
+Restart=on-failure
+RestartSec=5
+Environment=NODE_ENV=production
+Environment=PORT=3000
+Environment=DATABASE_PATH=/opt/flussonic-manager/flussonic.db
+# Limit memory use on RPi 3B+ (1GB RAM)
+MemoryMax=512M
+
+[Install]
+WantedBy=multi-user.target

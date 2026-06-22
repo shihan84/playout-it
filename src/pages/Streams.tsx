@@ -1,6 +1,8 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 import { Plus, Trash2, Radio, CheckCircle2, XCircle, AlertCircle, PlaySquare, Copy, Check, X, RefreshCw, Upload, FileVideo, Edit2, Search } from 'lucide-react';
+import StreamPlayer from '../components/StreamPlayer';
+import BroadcastPlaylist from '../components/BroadcastPlaylist';
 
 export default function Streams() {
   const [streams, setStreams] = useState<any[]>([]);
@@ -88,26 +90,37 @@ export default function Streams() {
   };
 
   const fetchData = async () => {
+    const userStr = localStorage.getItem('user');
+    const currentUser = userStr ? JSON.parse(userStr) : null;
+    const isAdmin = currentUser?.role === 'admin';
+
     try {
-      const [streamsRes, serversRes, vodsRes] = await Promise.all([
-        axios.get('/api/streams'),
-        axios.get('/api/servers'),
-        axios.get('/api/vods')
-      ]);
+      const streamsRes = await axios.get('/api/my-streams');
       setStreams(Array.isArray(streamsRes.data) ? streamsRes.data : []);
-      setServers(Array.isArray(serversRes.data) ? serversRes.data : []);
-      setAvailableVods(Array.isArray(vodsRes.data) ? vodsRes.data : []);
-      if (Array.isArray(serversRes.data) && serversRes.data.length > 0 && !formData.server_id) {
-        setFormData(prev => ({ ...prev, server_id: serversRes.data[0].id.toString() }));
-      }
     } catch (error) {
-      console.error('Failed to fetch data', error);
+      console.error('Failed to fetch streams', error);
+    }
+
+    if (isAdmin) {
+      try {
+        const [serversRes, vodsRes] = await Promise.all([
+          axios.get('/api/servers'),
+          axios.get('/api/vods')
+        ]);
+        setServers(Array.isArray(serversRes.data) ? serversRes.data : []);
+        setAvailableVods(Array.isArray(vodsRes.data) ? vodsRes.data : []);
+        if (Array.isArray(serversRes.data) && serversRes.data.length > 0 && !formData.server_id) {
+          setFormData(prev => ({ ...prev, server_id: serversRes.data[0].id.toString() }));
+        }
+      } catch (error) {
+        console.error('Failed to fetch admin data', error);
+      }
     }
   };
 
   const fetchStreams = async () => {
     try {
-      const res = await axios.get('/api/streams');
+      const res = await axios.get('/api/my-streams');
       setStreams(Array.isArray(res.data) ? res.data : []);
     } catch (error) {
       console.error('Failed to fetch streams', error);
@@ -918,7 +931,8 @@ export default function Streams() {
                           <p className="text-[10px] text-zinc-500 uppercase font-bold tracking-wider mb-1">Source Type</p>
                           <p className="text-lg font-bold text-white uppercase">
                             {streamDetails.source_type === 'live' ? '📡 LIVE' : 
-                             streamDetails.source_type === 'playlist' ? '📁 PLAYLIST' :
+                             streamDetails.source_type === 'publish' ? '📤 PUBLISH' :
+                             streamDetails.source_type === 'playlist' ? '📋 PLAYLIST' :
                              streamDetails.source_type === 'static' ? '📁 VOD' : 
                              `❓ ${streamDetails.source_type || 'UNKNOWN'}`}
                           </p>
@@ -929,46 +943,59 @@ export default function Streams() {
                             {streamDetails.uptime ? `${Math.floor(streamDetails.uptime / 3600)}h ${Math.floor((streamDetails.uptime % 3600) / 60)}m` : '0m'}
                           </p>
                         </div>
+                        <div className="bg-zinc-950 border border-zinc-800 p-4 rounded-xl">
+                          <p className="text-[10px] text-zinc-500 uppercase font-bold tracking-wider mb-1">Bitrate</p>
+                          <p className="text-lg font-bold text-white">{streamDetails.bitrate ? `${streamDetails.bitrate} kbps` : '—'}</p>
+                        </div>
+                        <div className="bg-zinc-950 border border-zinc-800 p-4 rounded-xl">
+                          <p className="text-[10px] text-zinc-500 uppercase font-bold tracking-wider mb-1">Viewers</p>
+                          <p className="text-lg font-bold text-white">{streamDetails.client_count ?? '—'}</p>
+                        </div>
                         <div className="bg-zinc-950 border border-zinc-800 p-4 rounded-xl col-span-2">
                           <p className="text-[10px] text-zinc-500 uppercase font-bold tracking-wider mb-1">Server</p>
                           <p className="text-lg font-bold text-white">{streamDetails.server_name || <span className="text-rose-400 italic">Deleted Server</span>}</p>
                         </div>
+                        {streamDetails.published_via && (
+                          <div className="bg-zinc-950 border border-zinc-800 p-4 rounded-xl">
+                            <p className="text-[10px] text-zinc-500 uppercase font-bold tracking-wider mb-1">Published Via</p>
+                            <p className="text-sm font-bold text-amber-400 uppercase">{streamDetails.published_via}</p>
+                          </div>
+                        )}
+                        {streamDetails.published_from && (
+                          <div className="bg-zinc-950 border border-zinc-800 p-4 rounded-xl">
+                            <p className="text-[10px] text-zinc-500 uppercase font-bold tracking-wider mb-1">Published From</p>
+                            <p className="text-sm font-mono text-zinc-300">{streamDetails.published_from}</p>
+                          </div>
+                        )}
                       </div>
                       
                       {/* Stream Player */}
                       <div className="bg-zinc-950 border border-zinc-800 rounded-xl overflow-hidden flex flex-col p-4">
-                        <div className="w-full aspect-video bg-zinc-900 rounded-lg overflow-hidden border border-zinc-800 relative">
-                          {streamDetails.status === 'online' ? (
-                            <iframe 
-                              src={`${streamDetails.server_url.replace(/\/$/, '')}/${encodeURIComponent(streamDetails.name)}/embed.html?autoplay=true&mute=true${streamDetails.source_type === 'live' ? '&realtime=true' : ''}`}
-                              width="100%" 
-                              height="100%" 
-                              frameBorder="0" 
-                              allowFullScreen
-                              allow="autoplay; fullscreen"
-                              className="absolute inset-0"
-                            ></iframe>
-                          ) : (
-                            <div className="absolute inset-0 flex flex-col items-center justify-center text-zinc-500 text-center px-4">
-                              <AlertCircle size={48} className="mb-3 opacity-30" />
-                              <p className="text-lg font-semibold">Stream Offline</p>
-                              <p className="text-sm text-zinc-600 mt-1">The Flussonic player will be active once the stream status changes to online.</p>
-                            </div>
-                          )}
-                        </div>
-                        <div className="mt-4 flex items-center justify-between">
+                        {streamDetails.server_url ? (
+                          <StreamPlayer
+                            serverUrl={streamDetails.server_url}
+                            streamName={streamDetails.name}
+                            sourceType={streamDetails.source_type}
+                            status={streamDetails.status}
+                          />
+                        ) : (
+                          <div className="w-full aspect-video flex flex-col items-center justify-center bg-zinc-900 rounded-lg text-zinc-500 text-center px-4">
+                            <AlertCircle size={40} className="mb-3 opacity-30" />
+                            <p className="font-semibold">Server Not Found</p>
+                            <p className="text-sm text-zinc-600 mt-1">Server was deleted. Preview unavailable.</p>
+                          </div>
+                        )}
+                        <div className="mt-3 flex items-center justify-between">
                           <div className="flex items-center gap-2">
                             <div className={`w-2 h-2 rounded-full ${streamDetails.status === 'online' ? 'bg-emerald-500 animate-pulse' : 'bg-rose-500'}`} />
-                            <span className="text-xs font-bold uppercase tracking-wider text-zinc-400">
-                              {streamDetails.status}
-                            </span>
+                            <span className="text-xs font-bold uppercase tracking-wider text-zinc-400">{streamDetails.status}</span>
                           </div>
-                          <button 
-                            onClick={() => handleCopy(`<iframe src="${streamDetails.server_url}/${streamDetails.name}/embed.html?realtime=true" width="640" height="360" frameborder="0" allowfullscreen></iframe>`)}
+                          <button
+                            onClick={() => handleCopy(`${streamDetails.server_url?.replace(/\/$/, '')}/${streamDetails.name}/index.m3u8`)}
                             className="text-xs text-emerald-400 hover:text-emerald-300 flex items-center gap-1 transition-colors"
                           >
-                            {copiedUrl?.includes('iframe') ? <Check size={14} /> : <Copy size={14} />}
-                            Copy Embed Code
+                            {copiedUrl?.includes('index.m3u8') ? <Check size={14} /> : <Copy size={14} />}
+                            Copy HLS URL
                           </button>
                         </div>
                       </div>
@@ -978,24 +1005,22 @@ export default function Streams() {
                     <div>
                       <h3 className="text-sm font-bold text-zinc-400 uppercase tracking-wider mb-3">Sources</h3>
                       <div className="bg-zinc-950 border border-zinc-800 rounded-xl p-4 space-y-3">
-                        {streamDetails.inputs && streamDetails.inputs.length > 0 ? streamDetails.inputs.map((input: string, i: number) => (
+                        {streamDetails.flussonic_inputs && streamDetails.flussonic_inputs.length > 0 ? streamDetails.flussonic_inputs.map((input: any, i: number) => (
                           <div key={i}>
                             <p className="text-xs text-zinc-500 mb-1">Input {i + 1} {i === 0 ? '(Primary)' : '(Fallback)'}</p>
-                            <p className={`text-sm font-mono break-all ${i === 0 ? 'text-emerald-400' : 'text-amber-400'}`}>{input}</p>
-                          </div>
-                        )) : (
-                          <>
-                            <div>
-                              <p className="text-xs text-zinc-500 mb-1">Primary Live Source</p>
-                              <p className="text-sm text-emerald-400 font-mono break-all">{streamDetails.live_url}</p>
-                            </div>
-                            {streamDetails.playlist_url && (
-                              <div>
-                                <p className="text-xs text-zinc-500 mb-1">Fallback Playlist</p>
-                                <p className="text-sm text-amber-400 font-mono break-all">{streamDetails.playlist_url}</p>
+                            <p className={`text-sm font-mono break-all ${i === 0 ? 'text-emerald-400' : 'text-amber-400'}`}>{input.url}</p>
+                            {input.stats?.media_info?.tracks && (
+                              <div className="flex flex-wrap gap-2 mt-1">
+                                {input.stats.media_info.tracks.map((t: any, ti: number) => (
+                                  <span key={ti} className="text-[10px] bg-zinc-800 text-zinc-400 px-2 py-0.5 rounded">
+                                    {t.content === 'video' ? `${t.codec?.toUpperCase()} ${t.width}x${t.height} ${t.fps}fps` : `${t.codec?.toUpperCase()} ${t.sample_rate}Hz`}
+                                  </span>
+                                ))}
                               </div>
                             )}
-                          </>
+                          </div>
+                        )) : (
+                          <p className="text-sm text-zinc-500 italic">No input info available from Flussonic.</p>
                         )}
                       </div>
                     </div>
@@ -1003,19 +1028,17 @@ export default function Streams() {
                     {/* Push Targets */}
                     <div>
                       <h3 className="text-sm font-bold text-zinc-400 uppercase tracking-wider mb-3">Push Targets</h3>
-                      {streamDetails.push_urls && streamDetails.push_urls.length > 0 ? (
+                      {streamDetails.flussonic_pushes && streamDetails.flussonic_pushes.length > 0 ? (
                         <div className="space-y-2">
-                          {streamDetails.push_urls.map((url: string, idx: number) => {
-                            const pushStat = streamDetails.flussonic_pushes?.find((p: any) => p.url === url) || 
-                                             streamDetails.flussonic_stats?.pushes?.find((p: any) => p.url === url) ||
-                                             streamDetails.push_status?.find((p: any) => p.url === url);
-                            
-                            const pushStatus = pushStat?.status || 'unknown';
+                          {streamDetails.flussonic_pushes.map((push: any, idx: number) => {
+                            const url = push.url;
+                            const pushStatus = push.stats?.status || 'unknown';
                             
                             return (
                               <div key={idx} className="bg-zinc-950 border border-zinc-800 rounded-xl p-4 flex items-center justify-between gap-4">
                                 <div className="flex-1 min-w-0">
                                   <p className="text-sm text-blue-400 font-mono break-all">{url}</p>
+                                  {push.stats?.bytes && <p className="text-[10px] text-zinc-500 mt-1">{(push.stats.bytes / (1024*1024*1024)).toFixed(2)} GB sent</p>}
                                 </div>
                                 <div className="flex-shrink-0">
                                   <span className={`inline-flex items-center px-2 py-1 rounded text-[10px] font-bold uppercase tracking-wider ${
@@ -1049,162 +1072,35 @@ export default function Streams() {
                     )}
                   </div>
                 ) : (
-                  <div className="space-y-6">
-                    <div className="flex items-center justify-between">
-                      <div>
-                        <h3 className="text-lg font-bold text-white">VOD Playlist</h3>
-                        <p className="text-sm text-zinc-400">Manage videos for the fallback playlist.</p>
-                      </div>
-                      <div className="relative">
-                        <input
-                          type="file"
-                          accept="video/*"
-                          onChange={handleFileUpload}
-                          disabled={isUploading}
-                          multiple
-                          className="absolute inset-0 w-full h-full opacity-0 cursor-pointer disabled:cursor-not-allowed"
+                  <div className="space-y-4">
+                    {/* VOD Preview */}
+                    {streamDetails.server_url && (
+                      <div className="bg-zinc-950 border border-zinc-800 rounded-xl overflow-hidden p-4">
+                        <p className="text-xs font-bold text-zinc-400 uppercase tracking-wider mb-3">VOD Preview</p>
+                        <StreamPlayer
+                          serverUrl={streamDetails.server_url}
+                          streamName={selectedVodLocationId
+                            ? (availableVods.find(v => v.id === selectedVodLocationId)?.name || streamDetails.name)
+                            : streamDetails.name}
+                          sourceType="static"
                         />
-                        <button 
-                          disabled={isUploading}
-                          className="bg-emerald-500 hover:bg-emerald-600 disabled:opacity-50 disabled:cursor-not-allowed text-white px-4 py-2 rounded-xl font-medium flex items-center gap-2 transition-colors"
-                        >
-                          <Upload size={18} />
-                          {isUploading ? 'Uploading...' : 'Upload Videos'}
-                        </button>
-                      </div>
-                    </div>
-
-                    {isUploading && (
-                      <div className="mt-4 space-y-3">
-                        {uploadingFiles.map((f, idx) => (
-                          <div key={idx} className="bg-zinc-950 border border-zinc-800 rounded-xl p-4 animate-in fade-in slide-in-from-top-1">
-                            <div className="flex justify-between text-xs mb-2">
-                              <span className="text-zinc-400 truncate max-w-[200px]">{f.name}</span>
-                              <span className="text-emerald-400 font-medium">{f.progress}%</span>
-                            </div>
-                            <div className="w-full bg-zinc-800 rounded-full h-1.5">
-                              <div 
-                                className="bg-emerald-500 h-1.5 rounded-full transition-all duration-300" 
-                                style={{ width: `${f.progress}%` }}
-                              ></div>
-                            </div>
-                          </div>
-                        ))}
                       </div>
                     )}
-
-                    <div className="bg-zinc-950 border border-zinc-800 rounded-xl p-4 mb-6">
-                      <div className="flex flex-col md:flex-row gap-4">
-                        <div className="flex-1">
-                          <label className="block text-sm font-medium text-zinc-400 mb-2">Select VOD Location to Manage</label>
-                          <select
-                            value={selectedVodLocationId || ''}
-                            onChange={(e) => {
-                              const val = e.target.value;
-                              setSelectedVodLocationId(val ? Number(val) : null);
-                              if (val) {
-                                fetchVodFiles(Number(val));
-                              } else {
-                                // Fetch stream's default VOD files
-                                axios.get(`/api/streams/${selectedStreamId}/videos`).then(res => {
-                                  setVods(Array.isArray(res.data) ? res.data : []);
-                                });
-                              }
-                            }}
-                            className="w-full bg-zinc-900 border border-zinc-700 rounded-xl px-4 py-2 text-white focus:outline-none focus:border-emerald-500 transition-colors"
-                          >
-                            <option value="">{streamDetails.name} (Stream's Default VOD)</option>
-                            {availableVods.filter(v => v.name !== streamDetails.name).map(v => (
-                              <option key={v.id} value={v.id}>{v.name}</option>
-                            ))}
-                          </select>
-                        </div>
-                        <div className="flex-1">
-                          <label className="block text-sm font-medium text-zinc-400 mb-2">Search Videos</label>
-                          <div className="relative">
-                            <Search className="absolute left-3 top-1/2 -translate-y-1/2 text-zinc-500" size={18} />
-                            <input
-                              type="text"
-                              placeholder="Filter by filename..."
-                              value={vodSearchQuery}
-                              onChange={(e) => setVodSearchQuery(e.target.value)}
-                              className="w-full bg-zinc-900 border border-zinc-700 rounded-xl pl-10 pr-4 py-2 text-white focus:outline-none focus:border-emerald-500 transition-colors"
-                            />
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-
-                    <div className="bg-zinc-950 border border-zinc-800 rounded-xl overflow-hidden">
-                      {(() => {
-                        const filteredVods = vods.filter(v => 
-                          v.name.toLowerCase().includes(vodSearchQuery.toLowerCase())
-                        );
-                        
-                        if (filteredVods.length === 0) {
-                          return (
-                            <div className="text-center py-12 text-zinc-500">
-                              <FileVideo size={48} className="mx-auto mb-4 opacity-20" />
-                              <p>{vodSearchQuery ? 'No videos match your search.' : 'No videos uploaded yet.'}</p>
-                              {!vodSearchQuery && <p className="text-sm mt-1">Upload videos to use them as a fallback playlist.</p>}
-                            </div>
-                          );
-                        }
-
-                        return (
-                          <table className="w-full text-left border-collapse">
-                            <thead>
-                              <tr className="bg-zinc-900 border-b border-zinc-800 text-zinc-400 text-sm">
-                                <th className="px-6 py-4 font-medium">Filename</th>
-                                <th className="px-6 py-4 font-medium">Size</th>
-                                <th className="px-6 py-4 font-medium">Uploaded</th>
-                                <th className="px-6 py-4 font-medium text-right">Actions</th>
-                              </tr>
-                            </thead>
-                            <tbody className="divide-y divide-zinc-800/50">
-                              {filteredVods.map((vod, idx) => (
-                                <tr key={idx} className="text-zinc-300 hover:bg-zinc-800/20 transition-colors">
-                                  <td className="px-6 py-4 font-medium flex items-center gap-3">
-                                    <FileVideo size={18} className="text-emerald-400" />
-                                    {vod.name}
-                                  </td>
-                                  <td className="px-6 py-4 text-zinc-400">
-                                    {(vod.size / (1024 * 1024)).toFixed(2)} MB
-                                  </td>
-                                  <td className="px-6 py-4 text-zinc-400">
-                                    {new Date(vod.created_at).toLocaleDateString()}
-                                  </td>
-                                  <td className="px-6 py-4 text-right">
-                                    <button 
-                                      onClick={() => setVodToDeleteFilename(vod.name)}
-                                      className="text-zinc-500 hover:text-rose-400 transition-colors p-2"
-                                      title="Delete Video"
-                                    >
-                                      <Trash2 size={18} />
-                                    </button>
-                                  </td>
-                                </tr>
-                              ))}
-                            </tbody>
-                          </table>
-                        );
-                      })()}
-                    </div>
-                    
-                    <div className="bg-zinc-950 border border-zinc-800 rounded-xl p-4">
-                      <p className="text-sm text-zinc-400 mb-2">Playlist URL for Flussonic:</p>
-                      <div className="flex items-center gap-2">
-                        <code className="flex-1 bg-zinc-900 border border-zinc-800 px-3 py-2 rounded text-emerald-400 font-mono text-sm break-all">
-                          {selectedVodLocationId 
-                            ? `playlist://${availableVods.find(v => v.id === selectedVodLocationId)?.name}/playlist.txt`
-                            : `${window.location.origin}/api/streams/${selectedStreamId}/playlist.txt`
-                          }
-                        </code>
-                      </div>
-                      <p className="text-xs text-zinc-500 mt-2">
-                        Use this URL as the fallback playlist in your Flussonic stream configuration.
-                      </p>
-                    </div>
+                    <BroadcastPlaylist
+                      streamId={selectedStreamId!}
+                      streamName={streamDetails.name}
+                      serverUrl={streamDetails.server_url}
+                      availableVods={availableVods}
+                      selectedVodLocationId={selectedVodLocationId}
+                      onVodLocationChange={(id) => {
+                        setSelectedVodLocationId(id);
+                        if (id) fetchVodFiles(id);
+                      }}
+                      notification={(msg, type) => {
+                        setNotification({ message: msg, type: type || 'success' });
+                        setTimeout(() => setNotification(null), 4000);
+                      }}
+                    />
                   </div>
                 )
               ) : (
