@@ -419,3 +419,18 @@ User requested consecutive development phases with Devin staging verification af
 **Gate:** lint clean · **37/37 tests pass** (23 integration + 5 migration + 3 WS + 6 regression) · build 134.0 kB · audit = 2 non-critical.
 
 **Status:** PR #2 stays draft. No merge, deploy, or production changes. Phase 2 on hold.
+
+## Devin status — PR #2 final staging gate — 2026-10-14
+
+**Commit:** `401ff6c` on `feature/phase-1b-multiserver` (draft PR #2 head)
+
+**Independent gate rerun:** lint clean · **37/37 tests pass** · build 134.0 kB · audit = 2 non-critical.
+
+**Staging acceptance (mocks + disposable DBs):**
+- WS revocation verified — identity-less/deleted/stale-role sockets receive nothing
+- Names-only stream sync — metadata preserved, new entries insert
+- Prune auth — 401/403/400 matrix + confirmed-only verified deletion + child protection
+- Backup/restore — live script drill: verified backup → wiped rows → `--restore` refused without `--confirm` → restored cleanly, integrity ok
+- Sync safety matrix (malformed/empty/partial/cursor confinement/redirect) — all covered
+
+**Unresolved security or data-loss findings: none.** PR #2 remains draft; no merge/deploy/production changes; Phase 2 on hold.
