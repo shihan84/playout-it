@@ -3,9 +3,15 @@
 
 $ErrorActionPreference = "Stop"
 
-$PI_HOST = "192.168.1.106"
-$PI_USER = "ubuntu"
-$PI_PASSWORD = "Saad321safa"
+$PI_HOST = $env:PI_HOST
+$PI_USER = $env:PI_USER
+$PI_PASSWORD = $env:PI_PASSWORD
+
+if (-not $PI_HOST -or -not $PI_USER -or -not $PI_PASSWORD) {
+    Write-Host "Set PI_HOST, PI_USER, and PI_PASSWORD environment variables before running." -ForegroundColor Red
+    Write-Host 'Example: $env:PI_HOST="192.168.x.x"; $env:PI_USER="ubuntu"; $env:PI_PASSWORD="your-password"' -ForegroundColor Yellow
+    exit 1
+}
 $LOCAL_DIR = $PSScriptRoot
 $REMOTE_DIR = "/tmp/flussonic-manager"
 
