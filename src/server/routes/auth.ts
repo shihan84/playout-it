@@ -10,24 +10,18 @@ const router = Router();
 router.post('/login', (req, res) => {
   const { username, password } = req.body;
 
-  console.log('Login attempt for username:', username);
 
   if (!username || !password) {
     return res.status(400).json({ error: 'Username and password are required' });
   }
 
   const user = db.prepare('SELECT * FROM users WHERE username = ?').get(username);
-  console.log('User found:', !!user);
-  if (user) {
-    console.log('User role:', user.role);
-  }
 
   if (!user) {
     return res.status(401).json({ error: 'Invalid credentials' });
   }
 
   const passwordMatch = bcrypt.compareSync(password, user.password_hash);
-  console.log('Password match:', passwordMatch);
 
   if (!passwordMatch) {
     return res.status(401).json({ error: 'Invalid credentials' });
@@ -42,6 +36,7 @@ router.post('/login', (req, res) => {
   res.cookie('token', token, {
     httpOnly: true,
     secure: process.env.NODE_ENV === 'production',
+    sameSite: 'lax',
     maxAge: 24 * 60 * 60 * 1000 // 24 hours
   });
 
