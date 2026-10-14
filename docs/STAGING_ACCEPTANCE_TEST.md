@@ -2,7 +2,7 @@
 
 Run against an **isolated staging** deployment (not production). Requires: a
 staging Flussonic server with credentials, a fresh app install, and this
-branch's build (`feature/phase-1b-multiserver` @ `b3d3807`).
+branch's build (`feature/phase-1b-multiserver` @ `1399b93`).
 
 ## 0. Setup
 

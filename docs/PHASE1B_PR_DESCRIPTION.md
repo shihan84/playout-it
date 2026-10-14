@@ -1,7 +1,8 @@
 # Phase 1B — Multi-Flussonic Server Management
 
-Branch: `feature/phase-1b-multiserver` (head: `b3d3807`)
+Branch: `feature/phase-1b-multiserver` (head: `1399b93`)
 Base: `feature/broadcast-security-foundation` (`0591516` — merge-base verified)
+PR: https://github.com/shihan84/playout-it/pull/2 (draft)
 
 ## Summary
 

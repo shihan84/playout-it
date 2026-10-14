@@ -403,3 +403,19 @@ User requested consecutive development phases with Devin staging verification af
 5. Deployment prerequisites: `docs/DEPLOYMENT_CHECKLIST.md` (JWT_SECRET ≥32, admin provisioning, HTTPS, backup cron, rollback).
 
 **Status:** Phase 1B ready for PR review + staging acceptance. No merge, deploy, production changes, or Phase 2 code.
+
+## Devin status — PR #2 review fixes — 2026-10-14
+
+**Commit:** `1399b93` on `feature/phase-1b-multiserver`. PR #2 (draft) exists: https://github.com/shihan84/playout-it/pull/2 — earlier `createPullRequest` permission blocker is moot (PR was created outside this automation).
+
+**Reviewer findings (Saad123safa) — all addressed:**
+
+1. **WS missing-identity exposure (fixed):** `broadcastStreamsUpdate` was fail-open — `!user || role==='admin'` sent the full stream list to sockets without identity. Now fail-closed: no verified user → nothing sent; role re-validated against `users` table per broadcast so stale JWT claims/deleted users lose access immediately. Unit tests: `tests/websocket.test.ts` (3 tests).
+2. **Names-only stream metadata overwrite (fixed):** string records previously drove `UPDATE streams SET live_url='', inputs='[]', push_urls='[]'`. Now fields merge only when present in the remote record; new names-only entries still insert. Integration test added.
+3. **Backup verification race (fixed):** `backup-db.ts` compared dest counts to a single live read — false failures on busy DBs. Now `PRAGMA integrity_check` on the backup + counts bounded by a before/after snapshot window. Concurrent-write regression test added.
+4. **Docs updated:** head SHA references bumped to `1399b93`; PR-blocker notes superseded (PR #2 exists as draft).
+5. Staging acceptance + deployment checklist already delivered (`docs/STAGING_ACCEPTANCE_TEST.md`, `docs/DEPLOYMENT_CHECKLIST.md`) — flagged in review reply.
+
+**Gate:** lint clean · **37/37 tests pass** (23 integration + 5 migration + 3 WS + 6 regression) · build 134.0 kB · audit = 2 non-critical.
+
+**Status:** PR #2 stays draft. No merge, deploy, or production changes. Phase 2 on hold.
