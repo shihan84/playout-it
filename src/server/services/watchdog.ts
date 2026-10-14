@@ -1,12 +1,13 @@
-import axios from 'axios';
 import { db } from '../db';
 import { config } from '../config';
-import { flussonicRequest } from './flussonic';
+import { flussonicRequest, serverInBackoff } from './flussonic';
 import { syncServerStreams, syncServerVods } from './sync';
-import { sendTelegramNotification } from './telegram';
+import { sendTelegramNotification, dispatchStreamAlerts } from './telegram';
 import { broadcastStreamsUpdate } from '../websocket';
+import { mapLimit } from '../utils/concurrency';
 
 let isChecking = false;
+let isSyncing = false;
 let watchdogTimer: NodeJS.Timeout;
 let autoSyncTimer: NodeJS.Timeout;
 
@@ -29,9 +30,14 @@ const checkStreams = async () => {
 
     let hasUpdates = false;
 
-    for (const serverId of Object.keys(streamsByServer)) {
+    // Check servers with bounded concurrency so one hung/slow server cannot
+    // stall the whole watchdog cycle.
+    await mapLimit(Object.keys(streamsByServer), 4, async (serverId) => {
       const server = serverMap[Number(serverId)];
-      if (!server) continue;
+      if (!server) return;
+
+      // Circuit breaker: skip servers in failure backoff
+      if (serverInBackoff(server)) return;
 
       try {
         const flussonicUrl = `${server.url}/flussonic/api/v3/streams`;
@@ -79,11 +85,7 @@ const checkStreams = async () => {
                   `<b>Time:</b> ${new Date().toLocaleString()}\n\n` +
                   `Your stream has stopped streaming. Please check your source.`;
 
-                await axios.post(`http://localhost:${config.port}/api/telegram-alerts/send`, {
-                  stream_id: stream.id,
-                  alert_type: 'stream_offline',
-                  message: message
-                });
+                await dispatchStreamAlerts(stream.id, 'stream_offline', message);
               } catch (error: any) {
                 console.error('Failed to send Telegram alert:', error.message);
               }
@@ -144,7 +146,7 @@ const checkStreams = async () => {
           }
         }
       }
-    }
+    });
 
     if (hasUpdates) {
       broadcastStreamsUpdate();
@@ -171,25 +173,39 @@ export const startWatchdog = () => {
     const syncIntervalSecs = parseInt(syncIntervalSetting?.value || '60', 10);
 
     autoSyncTimer = setInterval(async () => {
-      console.log('Running auto-sync for all servers...');
-      const servers = db.prepare('SELECT * FROM servers').all() as any[];
-      let totalAdded = 0;
-      let totalRemoved = 0;
-
-      for (const server of servers) {
-        try {
-          const { addedCount, removedCount } = await syncServerStreams(server);
-          const vodSync = await syncServerVods(server);
-          totalAdded += addedCount + vodSync.addedCount;
-          totalRemoved += removedCount + vodSync.removedCount;
-        } catch (err: any) {
-          console.error(`Auto-sync failed for server ${server.name}:`, err.message);
-        }
+      if (isSyncing) {
+        console.warn('Auto-sync skipped — previous sync cycle still running');
+        return;
       }
+      isSyncing = true;
+      try {
+        console.log('Running auto-sync for all servers...');
+        const servers = db.prepare('SELECT * FROM servers').all() as any[];
+        let totalAdded = 0;
+        let totalRemoved = 0;
 
-      if (totalAdded > 0 || totalRemoved > 0) {
-        console.log(`Auto-sync complete: ${totalAdded} added, ${totalRemoved} removed.`);
-        broadcastStreamsUpdate();
+        // Bounded parallelism + per-server circuit breaker
+        await mapLimit(servers, 4, async (server) => {
+          if (serverInBackoff(server)) {
+            console.log(`Auto-sync skipping ${server.name} (in failure backoff)`);
+            return;
+          }
+          try {
+            const { addedCount, removedCount } = await syncServerStreams(server);
+            const vodSync = await syncServerVods(server);
+            totalAdded += addedCount + vodSync.addedCount;
+            totalRemoved += removedCount + vodSync.removedCount;
+          } catch (err: any) {
+            console.error(`Auto-sync failed for server ${server.name}:`, err.message);
+          }
+        });
+
+        if (totalAdded > 0 || totalRemoved > 0) {
+          console.log(`Auto-sync complete: ${totalAdded} added, ${totalRemoved} removed.`);
+          broadcastStreamsUpdate();
+        }
+      } finally {
+        isSyncing = false;
       }
     }, syncIntervalSecs * 1000);
     console.log(`Auto-sync started with interval ${syncIntervalSecs}s`);

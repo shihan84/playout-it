@@ -2,65 +2,95 @@ import { db } from '../db';
 import { flussonicRequest } from './flussonic';
 import { updateVodPlaylistFile } from './playlist';
 
+// Parse the supported /streams payload shapes. Throws on anything
+// unrecognized so a malformed response can NEVER reach reconciliation
+// and wipe local data.
+// Keys that indicate an error/pagination envelope rather than an
+// object-map of resources — never treat these as resource names.
+const ENVELOPE_KEYS = new Set([
+  'error', 'message', 'detail', 'errors', 'stats', 'next', 'prev',
+  'estimated_count', 'timing', 'streams', 'vods', 'config', 'session'
+]);
+
+function parseObjectMap(data: any): any[] {
+  const keys = Object.keys(data);
+  if (keys.length === 0) return [];
+  if (keys.some(k => ENVELOPE_KEYS.has(k))) {
+    throw new Error('Response looks like an error/pagination envelope, not a resource map');
+  }
+  return keys.map(key => {
+    const val = data[key];
+    return (typeof val === 'object' && val !== null) ? { name: key, ...val } : { name: key };
+  });
+}
+
+function parseStreamsPayload(data: any): any[] {
+  if (Array.isArray(data)) return data;
+  if (data && Array.isArray(data.streams)) return data.streams;
+  if (data && typeof data === 'object') return parseObjectMap(data);
+  throw new Error('Unrecognized Flussonic /streams response format');
+}
+
 export async function syncServerStreams(server: any) {
   const baseUrl = server.url.replace(/\/$/, '');
   const flussonicUrl = `${baseUrl}/flussonic/api/v3/streams`;
   const response = await flussonicRequest('GET', flussonicUrl, server);
 
-  let streams: any[] = [];
-  if (Array.isArray(response.data)) {
-    streams = response.data;
-  } else if (response.data && Array.isArray(response.data.streams)) {
-    streams = response.data.streams;
-  } else if (response.data && typeof response.data === 'object') {
-    streams = Object.keys(response.data).map(key => {
-      const val = response.data[key];
-      if (typeof val === 'object' && val !== null) {
-        return { name: key, ...val };
-      }
-      return { name: key };
-    });
-  }
+  const streams = parseStreamsPayload(response.data);
 
   let addedCount = 0;
   let removedCount = 0;
 
-  const insertStmt = db.prepare('INSERT INTO streams (server_id, name, live_url, playlist_url, push_urls, status) VALUES (?, ?, ?, ?, ?, ?)');
+  const insertStmt = db.prepare('INSERT INTO streams (server_id, name, live_url, playlist_url, push_urls, inputs, status) VALUES (?, ?, ?, ?, ?, ?, ?)');
+  const updateStmt = db.prepare('UPDATE streams SET live_url = ?, playlist_url = ?, push_urls = ?, inputs = ? WHERE id = ?');
   const deleteStmt = db.prepare('DELETE FROM streams WHERE id = ?');
 
   // Get all existing streams for this server
   const existingStreams = db.prepare('SELECT id, name FROM streams WHERE server_id = ?').all(server.id) as any[];
-  const existingStreamNames = new Set(existingStreams.map(s => s.name));
+  const existingByName = new Map(existingStreams.map(s => [s.name, s.id]));
   const remoteStreamNames = new Set(streams.map((s: any) => typeof s === 'string' ? s : s.name).filter(Boolean));
 
-  // Add new streams
   for (const s of streams) {
-    let name = typeof s === 'string' ? s : s.name;
+    const name = typeof s === 'string' ? s : s.name;
     if (!name) continue;
 
-    if (!existingStreamNames.has(name)) {
-      let live_url = '';
-      let playlist_url = '';
-      let push_urls: string[] = [];
-      let status = 'offline';
+    let live_url = '';
+    let playlist_url = '';
+    let push_urls: string[] = [];
+    let status = 'offline';
+    let inputs: string[] = [];
 
-      if (typeof s !== 'string') {
-        if (s.inputs && s.inputs.length > 0) {
-          live_url = s.inputs[0].url || '';
-          if (s.inputs.length > 1) {
-            playlist_url = s.inputs[1].url || '';
-          }
-        }
-        push_urls = s.pushes ? s.pushes.map((p: any) => p.url) : [];
-        status = (s.stats && s.stats.alive) ? 'online' : 'offline';
+    if (typeof s !== 'string') {
+      if (s.inputs && s.inputs.length > 0) {
+        inputs = s.inputs.map((i: any) => i.url).filter(Boolean);
+        live_url = inputs[0] || '';
+        playlist_url = inputs[1] || '';
       }
+      push_urls = s.pushes ? s.pushes.map((p: any) => p.url) : [];
+      status = (s.stats && s.stats.alive) ? 'online' : 'offline';
+    }
 
-      insertStmt.run(server.id, name, live_url, playlist_url, JSON.stringify(push_urls), status);
+    const existingId = existingByName.get(name);
+    if (existingId) {
+      // Upsert: refresh metadata in place so the stream id — and all
+      // assignments/videos/alerts keyed by it — is preserved.
+      updateStmt.run(live_url, playlist_url, JSON.stringify(push_urls), JSON.stringify(inputs), existingId);
+    } else {
+      insertStmt.run(server.id, name, live_url, playlist_url, JSON.stringify(push_urls), JSON.stringify(inputs), status);
       addedCount++;
     }
   }
 
-  // Remove deleted streams
+  // Remove deleted streams only when the remote list is trustworthy.
+  // Malformed payloads never reach this point (parse throws first), and an
+  // empty remote list with non-empty local state is treated as suspicious
+  // (partial response, auth regression) — deletions are skipped rather than
+  // wiping streams, assignments, videos and alerts.
+  if (streams.length === 0 && existingStreams.length > 0) {
+    console.warn(`[syncServerStreams] ${server.name}: remote returned 0 streams but ${existingStreams.length} local rows exist — skipping deletions (possible incomplete response)`);
+    return { addedCount, removedCount: 0, skippedDeletions: true };
+  }
+
   for (const existing of existingStreams) {
     if (!remoteStreamNames.has(existing.name)) {
       deleteStmt.run(existing.id);
@@ -101,24 +131,20 @@ export async function syncServerVods(server: any) {
     } else if (response.data && Array.isArray(response.data.vods)) {
       vodsList = response.data.vods;
     } else if (response.data && typeof response.data === 'object') {
-      // Handle case where Flussonic returns an object with VOD names as keys
-      vodsList = Object.keys(response.data).map(key => {
-        const val = response.data[key];
-        if (typeof val === 'object' && val !== null) {
-          return { name: key, ...val };
-        }
-        return { name: key };
-      });
+      // Legacy config-shaped response: VOD names as keys
+      vodsList = parseObjectMap(response.data);
     }
 
     let addedCount = 0;
     let removedCount = 0;
 
     const insertStmt = db.prepare('INSERT INTO vods (server_id, name, paths) VALUES (?, ?, ?)');
+    const updateStmt = db.prepare('UPDATE vods SET paths = ? WHERE id = ?');
     const deleteStmt = db.prepare('DELETE FROM vods WHERE id = ?');
 
     const existingVods = db.prepare('SELECT id, name FROM vods WHERE server_id = ?').all(server.id) as any[];
     const existingVodNames = new Set(existingVods.map(v => v.name));
+    const existingVodByName = new Map(existingVods.map(v => [v.name, v.id]));
 
     const remoteVodNames = new Set();
 
@@ -152,10 +178,20 @@ export async function syncServerVods(server: any) {
       if (!name) continue;
       remoteVodNames.add(name);
 
-      if (!existingVodNames.has(name)) {
+      const existingId = existingVodByName.get(name);
+      if (existingId) {
+        updateStmt.run(JSON.stringify(paths), existingId);
+      } else {
         insertStmt.run(server.id, name, JSON.stringify(paths));
         addedCount++;
       }
+    }
+
+    // Same safety rule as streams: never reconcile an empty remote list
+    // against non-empty local state.
+    if (vodsList.length === 0 && existingVods.length > 0) {
+      console.warn(`[syncServerVods] ${server.name}: remote returned 0 VODs but ${existingVods.length} local rows exist — skipping deletions`);
+      return { addedCount, removedCount: 0, skippedDeletions: true };
     }
 
     // Remove deleted VODs

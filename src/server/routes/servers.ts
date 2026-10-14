@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { db } from '../db';
-import { flussonicRequest } from '../services/flussonic';
+import { flussonicRequest, serverInBackoff } from '../services/flussonic';
+import { mapLimit } from '../utils/concurrency';
 import { syncServerStreams, syncServerVods } from '../services/sync';
 import { broadcastStreamsUpdate } from '../websocket';
 import { authenticateToken, requireAdmin } from '../middleware/auth';
@@ -189,8 +190,14 @@ router.post('/sync-all', authenticateToken, requireAdmin, async (req, res) => {
     let totalRemoved = 0;
     let totalVodsAdded = 0;
     let totalVodsRemoved = 0;
+    const skipped: string[] = [];
 
-    for (const server of servers) {
+    // Bounded parallelism so one hung server can't stall the whole sync
+    await mapLimit(servers, 4, async (server) => {
+      if (serverInBackoff(server)) {
+        skipped.push(server.name);
+        return;
+      }
       try {
         const { addedCount, removedCount } = await syncServerStreams(server);
         const vodSync = await syncServerVods(server);
@@ -202,7 +209,7 @@ router.post('/sync-all', authenticateToken, requireAdmin, async (req, res) => {
       } catch (err: any) {
         console.error(`Failed to sync server ${server.name}:`, err.message);
       }
-    }
+    });
 
     if (totalAdded > 0 || totalRemoved > 0) {
       broadcastStreamsUpdate();
@@ -213,7 +220,8 @@ router.post('/sync-all', authenticateToken, requireAdmin, async (req, res) => {
       added: totalAdded,
       removed: totalRemoved,
       vodsAdded: totalVodsAdded,
-      vodsRemoved: totalVodsRemoved
+      vodsRemoved: totalVodsRemoved,
+      skipped
     });
   } catch (error: any) {
     console.error('Sync all error:', error.message);

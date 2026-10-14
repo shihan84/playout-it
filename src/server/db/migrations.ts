@@ -91,6 +91,27 @@ export function runMigrations(db: any) {
     db.prepare('INSERT INTO settings (key, value) VALUES (?, ?)').run('auto_sync_interval', '60');
   }
 
+  // Per-server health tracking (Phase 1B)
+  for (const col of [
+    'ALTER TABLE servers ADD COLUMN last_seen_at DATETIME',
+    'ALTER TABLE servers ADD COLUMN last_attempt_at DATETIME',
+    'ALTER TABLE servers ADD COLUMN last_error TEXT',
+    'ALTER TABLE servers ADD COLUMN consecutive_failures INTEGER DEFAULT 0',
+    'ALTER TABLE servers ADD COLUMN latency_ms INTEGER',
+  ]) {
+    try { db.exec(col); } catch (e) { /* column exists */ }
+  }
+
+  // Dedupe before creating unique indexes (keep earliest row per server+name)
+  try {
+    db.exec('DELETE FROM streams WHERE id NOT IN (SELECT MIN(id) FROM streams GROUP BY server_id, name)');
+    db.exec('DELETE FROM vods WHERE id NOT IN (SELECT MIN(id) FROM vods GROUP BY server_id, name)');
+    db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_streams_server_name ON streams(server_id, name)');
+    db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_vods_server_name ON vods(server_id, name)');
+  } catch (e) {
+    console.warn('Could not create unique indexes on streams/vods:', (e as any)?.message);
+  }
+
   // Explicitly provision the initial administrator using deployment tooling.
   // Never create a known default password on startup.
 

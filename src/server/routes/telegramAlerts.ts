@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { db } from '../db';
-import { sendTelegramMessage } from '../services/telegram';
+import { sendTelegramMessage, dispatchStreamAlerts } from '../services/telegram';
 import { authenticateToken, AuthRequest } from '../middleware/auth';
 
 const router = Router();
@@ -146,60 +146,17 @@ router.get('/:id/history', authenticateToken, (req: AuthRequest, res) => {
 });
 
 // Send alert (internal API, called by monitoring system)
-router.post('/send', async (req, res) => {
+router.post('/send', authenticateToken, async (req, res) => {
   const { stream_id, alert_type, message } = req.body;
 
   if (!stream_id || !alert_type || !message) {
     return res.status(400).json({ error: 'stream_id, alert_type, and message are required' });
   }
 
-  // Get all enabled alerts for this stream
-  const alerts = db.prepare(`
-    SELECT ta.*, s.name as stream_name
-    FROM telegram_alerts ta
-    JOIN streams s ON ta.stream_id = s.id
-    WHERE ta.stream_id = ? AND ta.alert_enabled = 1
-  `).all(stream_id) as any[];
-
-  if (alerts.length === 0) {
+  const results = await dispatchStreamAlerts(stream_id, alert_type, message);
+  if (results.length === 0) {
     return res.json({ success: true, message: 'No alerts configured for this stream' });
   }
-
-  const results = [];
-
-  for (const alert of alerts) {
-    // Check rate limiting (don't send if last alert was sent within threshold)
-    if (alert.last_alert_sent) {
-      const lastAlert = new Date(alert.last_alert_sent);
-      const now = new Date();
-      const diffMinutes = (now.getTime() - lastAlert.getTime()) / (1000 * 60);
-
-      if (diffMinutes < alert.downtime_threshold) {
-        console.log(`Skipping alert for chat ${alert.telegram_chat_id} - last alert sent ${diffMinutes.toFixed(1)} minutes ago`);
-        continue;
-      }
-    }
-
-    // Send message
-    const success = await sendTelegramMessage(alert.telegram_chat_id, message);
-
-    // Log to history
-    db.prepare(`
-      INSERT INTO telegram_alert_history (telegram_alert_id, alert_type, message, success, error_message)
-      VALUES (?, ?, ?, ?, ?)
-    `).run(alert.id, alert_type, message, success ? 1 : 0, success ? null : 'Failed to send');
-
-    // Update last_alert_sent if successful
-    if (success) {
-      db.prepare('UPDATE telegram_alerts SET last_alert_sent = CURRENT_TIMESTAMP WHERE id = ?').run(alert.id);
-    }
-
-    results.push({
-      telegram_chat_id: alert.telegram_chat_id,
-      success
-    });
-  }
-
   res.json({ success: true, results });
 });
 

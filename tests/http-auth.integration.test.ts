@@ -18,9 +18,12 @@ let mockServer: any;
 const remoteDeletes: string[] = [];
 const remoteRequests: string[] = [];
 const remotePort = 36198;
+// Test-controlled mock behavior: override GET /streams payload and add latency
+const mockBehavior = { streamsPayload: null as any, delayMs: 0 };
 
 let appProcess: any;
 let tmpDir: string;
+let dbPath: string;
 
 async function waitForServer(timeout = 30000) {
   const start = Date.now();
@@ -51,14 +54,20 @@ async function login(username: string, password: string) {
 
 test.before(async () => {
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'playout-it-test-'));
-  const dbPath = path.join(tmpDir, 'test.db');
+  dbPath = path.join(tmpDir, 'test.db');
 
   // Mock Flussonic server
   mockServer = createServer((req, res) => {
     if (req.method === 'DELETE') remoteDeletes.push(req.url || '');
     remoteRequests.push(`${req.method} ${req.url}`);
-    res.setHeader('Content-Type', 'application/json');
-    // Companion-VOD fixtures:
+    const respond = () => {
+      res.setHeader('Content-Type', 'application/json');
+      // Test-controlled GET /streams payload override (sync tests)
+      if (req.method === 'GET' && mockBehavior.streamsPayload !== null && /\/streams$/.test(req.url || '')) {
+        res.end(JSON.stringify(mockBehavior.streamsPayload));
+        return;
+      }
+      // Companion-VOD fixtures:
     //  - legacy-stream: VOD exists only under the stream's own name (pre-upgrade
     //    convention); `legacy-stream_vod` 404s
     //  - new-stream: VOD exists only under `new-stream_vod` (current convention)
@@ -81,11 +90,14 @@ test.before(async () => {
       res.end(JSON.stringify({ stats: { total_clients: 0, uptime: 1 } }));
     } else if (req.url?.includes('/streams')) {
       res.end(JSON.stringify([]));
-    } else if (req.url?.includes('/vods')) {
-      res.end(JSON.stringify([]));
-    } else {
-      res.end('{}');
-    }
+      } else if (req.url?.includes('/vods')) {
+        res.end(JSON.stringify([]));
+      } else {
+        res.end('{}');
+      }
+    };
+    if (mockBehavior.delayMs) setTimeout(respond, mockBehavior.delayMs);
+    else respond();
   });
   await new Promise(r => mockServer.listen(remotePort, '127.0.0.1', r));
 
@@ -333,4 +345,87 @@ test('companion VOD resolves both _vod and legacy same-name conventions', async 
     !remoteRequests.some(u => u.startsWith('GET /flussonic/api/v3/vods/new-stream/')),
     'modern convention should not probe legacy name after _vod hit'
   );
+});
+
+test('sync never wipes local data and preserves stream ids + assignments', async () => {
+  const { res: loginRes } = await login('itadmin', 'it-admin-pass-12345');
+  const { token } = await loginRes.json();
+  const headers = { authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+
+  // Remote reports one stream
+  mockBehavior.streamsPayload = [{ name: 'persist-stream', inputs: [{ url: 'rtsp://a' }], stats: { alive: true } }];
+  const mk = await fetch(`${BASE}/api/servers`, {
+    method: 'POST', headers,
+    body: JSON.stringify({ name: 'mock-sync', url: `http://127.0.0.1:${remotePort}`, username: 'u', password: 'p123456' })
+  });
+  const server = await mk.json();
+
+  let list = await (await fetch(`${BASE}/api/streams`, { headers })).json();
+  const stream = list.find((s: any) => s.name === 'persist-stream');
+  assert.ok(stream, 'synced stream missing');
+  const originalId = stream.id;
+
+  // Assign it to the client user — assignments must survive re-sync
+  const idb = new Database(dbPath);
+  const client = idb.prepare("SELECT id FROM users WHERE username = 'itclient'").get() as any;
+  idb.prepare('INSERT INTO user_stream_assignments (user_id, stream_id) VALUES (?, ?)').run(client.id, originalId);
+  idb.close();
+
+  // Re-sync with updated metadata → same id, updated live_url, assignment intact
+  mockBehavior.streamsPayload = [{ name: 'persist-stream', inputs: [{ url: 'rtsp://b' }], stats: { alive: true } }];
+  await fetch(`${BASE}/api/servers/${server.id}/sync`, { method: 'POST', headers });
+  list = await (await fetch(`${BASE}/api/streams`, { headers })).json();
+  const resynced = list.find((s: any) => s.name === 'persist-stream');
+  assert.equal(resynced.id, originalId, 'stream id must survive sync (upsert, not delete+insert)');
+  assert.equal(resynced.live_url, 'rtsp://b', 'stream metadata should refresh on sync');
+
+  // Malformed/empty remote → no deletions
+  for (const bad of [{}, { error: 'upstream' }, 'garbage']) {
+    mockBehavior.streamsPayload = bad;
+    const sync = await fetch(`${BASE}/api/servers/${server.id}/sync`, { method: 'POST', headers });
+    await sync.json();
+    list = await (await fetch(`${BASE}/api/streams`, { headers })).json();
+    assert.ok(
+      list.some((s: any) => s.id === originalId),
+      `malformed payload ${JSON.stringify(bad)} must not delete local streams`
+    );
+  }
+
+  // Assignment survived all of the above
+  const idb2 = new Database(dbPath);
+  const assign = idb2.prepare('SELECT 1 FROM user_stream_assignments WHERE stream_id = ?').get(originalId);
+  assert.ok(assign, 'user_stream_assignments row must survive sync');
+  idb2.close();
+
+  mockBehavior.streamsPayload = null;
+});
+
+test('sync-all uses bounded concurrency and records per-server health', async (t) => {
+  const { res: loginRes } = await login('itadmin', 'it-admin-pass-12345');
+  const { token } = await loginRes.json();
+  const headers = { authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+
+  // Seed 50 mock servers directly in the test DB
+  const idb = new Database(dbPath);
+  const ins = idb.prepare('INSERT INTO servers (name, url, api_key, username, password) VALUES (?, ?, ?, ?, ?)');
+  for (let i = 0; i < 50; i++) {
+    ins.run(`scale-${i}`, `http://127.0.0.1:${remotePort}`, 'u:p', 'u', 'p');
+  }
+  idb.close();
+
+  // Slow every mock response by 120ms. Serial sync of 50 servers would take
+  // ~12s+ (50 × ≥2 requests × 120ms); bounded parallelism should be far less.
+  mockBehavior.delayMs = 120;
+  const start = Date.now();
+  const res = await fetch(`${BASE}/api/servers/sync-all`, { method: 'POST', headers });
+  const elapsed = Date.now() - start;
+  mockBehavior.delayMs = 0;
+  assert.equal(res.status, 200);
+  assert.ok(elapsed < 12000, `sync-all over 50 slow servers took ${elapsed}ms — expected bounded concurrency`);
+
+  // Health columns recorded on the server rows
+  const idb2 = new Database(dbPath);
+  const healthy = idb2.prepare("SELECT COUNT(*) as n FROM servers WHERE name LIKE 'scale-%' AND last_seen_at IS NOT NULL AND consecutive_failures = 0").get() as any;
+  assert.ok(healthy.n >= 48, `expected health recorded for seeded servers, got ${healthy.n}`);
+  idb2.close();
 });
