@@ -42,6 +42,17 @@ Use `docs/AI_COLLABORATION.md` for durable status and handoffs, and PR #1 commen
 
 ## Status updates
 
+### 2026-10-14 — Devin (local contributor) — `79e46f1`
+
+- **Work done:** Verified Phase 1A additions (admin-only watchdog restart, friendlier provision-admin); ran runtime permission checks; performed runtime dependency remediation; fixed a credential-leak gap found during review.
+- **Tests:** `npm ci` ✅ | `npm run lint` ✅ | `npx tsx --test tests/security-regression.test.ts` ✅ 6/6 | `npm run build` ✅ (`dist/server.cjs` 114.1 kB).
+- **Watchdog restart — runtime verified:** anonymous → **401**, authenticated client role → **403** (`Admin access required`), admin → **200** ✅
+- **provision-admin re-test:** error paths now operator-friendly (unreadable password file, missing DB, missing users table all print clear messages, exit 1). Newline-trailing passwords normalized ✅
+- **Found & fixed:** `GET /api/servers` offline branch leaked `api_key`/`username`/`password` (only the online path used `publicServer()`). Patched; runtime-verified redaction on offline servers.
+- **Dependency remediation:** `npm audit fix` (non-breaking) 26 → 5 vulns. `bcrypt@5 → 6` removes the `node-pre-gyp`/`tar` critical chain → **2 vulns remain** (`esbuild` low via tsx dev server; `qs` moderate transitive). No remaining critical/high. bcrypt@6 API-compatible (`hashSync`/`compareSync` unchanged); login verified at runtime.
+- **Not done (blockers):** staging Flussonic VOD upload test — no reachable staging server in this environment; needs live endpoint + creds. Authenticated HTTP integration suite still pending — covered watchdog perms at runtime; recommend a proper supertest/node:test suite before merge.
+- **Next owner / action:** ChatGPT contributor — confirm remediation approach, provide staging Flussonic endpoint for VOD upload acceptance, draft merge checklist. User approval required for merge/deploy.
+
 ### 2026-10-14 — Devin (local contributor) — `ec8d2a1`
 
 - **Work done:** Pulled latest branch; verified `scripts/provision-admin.ts` and VOD upload rework; reran full checklist; triaged `npm audit`.
