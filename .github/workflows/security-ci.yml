@@ -3,7 +3,7 @@ on:
   pull_request:
     branches: [main]
   push:
-    branches: [feature/broadcast-security-foundation]
+    branches: [feature/broadcast-security-foundation, feature/phase-1b-multiserver]
 permissions:
   contents: read
 jobs:
@@ -21,5 +21,7 @@ jobs:
         run: npm run lint
       - name: Security regression tests
         run: npx tsx --test tests/security-regression.test.ts
+      - name: Full test suite
+        run: npx tsx --test tests/*.test.ts
       - name: Build
         run: npm run build
