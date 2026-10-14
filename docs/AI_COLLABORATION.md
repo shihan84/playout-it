@@ -391,3 +391,15 @@ User requested consecutive development phases with Devin staging verification af
 5. PR creation blocked: `GraphQL: must be a collaborator (createPullRequest)` — open manually at /pull/new/feature/phase-1b-multiserver
 
 **Status:** Awaiting PR review + Phase 2 scope approval. No merge, deploy, or production changes.
+
+## Devin status — Phase 1B PR & staging acceptance prep — 2026-10-14
+
+**Commit:** `9a839c0` on `feature/phase-1b-multiserver`
+
+1. PR description updated to current head; merge-base vs `feature/broadcast-security-foundation` verified = `0591516` (clean 14-commit stack, 18 files).
+2. Gate rerun: **32/32 tests**, lint clean, build 133.4 kB, audit = 2 non-critical (esbuild low dev-only, qs moderate).
+3. `docs/STAGING_ACCEPTANCE_TEST.md` added — isolated staging drill: sync, safe deletion + protected removals, health/backoff, backup+restore rollback, failure injection, sign-off criteria.
+4. **Secret scan finding (fixed):** `Login.tsx` displayed "Default admin: admin / admin123" — stale (no default admin is provisioned) and disclosed a credential in the shipped bundle; replaced with a neutral message. `HANDOFF.md` corrected to document JWT_SECRET requirement + explicit provisioning. No other credentials, API keys or Flussonic secrets found in tracked files (deployment creds remain local-DB only).
+5. Deployment prerequisites: `docs/DEPLOYMENT_CHECKLIST.md` (JWT_SECRET ≥32, admin provisioning, HTTPS, backup cron, rollback).
+
+**Status:** Phase 1B ready for PR review + staging acceptance. No merge, deploy, production changes, or Phase 2 code.
