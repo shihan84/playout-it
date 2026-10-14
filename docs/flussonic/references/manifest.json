@@ -1,0 +1,50 @@
+{
+  "apis": {
+    "authorization": {
+      "file": "authorization.openapi.json",
+      "openapi": "3.1.0",
+      "paths": 2,
+      "sha256": "b6ee0697067d0ab3b62b41e1e583bb61ab4244aacc1af52ee80672005148514c",
+      "source": "https://flussonic.com/doc/api/authorization.json",
+      "status": "verified",
+      "version": "21.12.1"
+    },
+    "central": {
+      "file": "central.openapi.json",
+      "openapi": "3.1.0",
+      "paths": 52,
+      "sha256": "613ad99f22cfdb165ae6061bf936bfdd5a3d4324a60ebbd1ad0ffdcfd60badab",
+      "source": "https://flussonic.com/doc/api/central.json",
+      "status": "verified",
+      "version": "26.03-604"
+    },
+    "config-external": {
+      "file": "config-external.openapi.json",
+      "openapi": "3.1.0",
+      "paths": 6,
+      "sha256": "cd558e76fc0a9567a03ea0658fedc63ce2578103d9d88566f884a0cc407f6554",
+      "source": "https://flussonic.com/doc/api/config-external.json",
+      "status": "verified",
+      "version": "22.12.1"
+    },
+    "media-server": {
+      "file": "media-server.openapi.json",
+      "openapi": "3.1.0",
+      "paths": 74,
+      "sha256": "0397c317fe3386bed697c83830e10d1563e42630ac834bee2a7699a7ff69a20d",
+      "source": "https://flussonic.com/doc/api/reference.json",
+      "status": "verified",
+      "version": "26.03-604"
+    },
+    "streaming": {
+      "file": "streaming.openapi.json",
+      "openapi": "3.1.0",
+      "paths": 53,
+      "sha256": "4a1fb0af0606b05c812208b44af277d9f75b322578fd90f29c8401a4dbe88549",
+      "source": "https://flussonic.com/doc/api/streaming.json",
+      "status": "verified",
+      "version": "26.03-604"
+    }
+  },
+  "schema_version": 1
+}

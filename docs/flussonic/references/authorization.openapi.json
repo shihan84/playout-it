@@ -1,0 +1,705 @@
+{
+  "components": {
+    "schemas": {
+      "auth_response_v1": {
+        "properties": {
+          "ad_inject": {
+            "description": "Configuration of injecting advertising video clips into played stream.",
+            "properties": {
+              "midroll": {
+                "description": "The paths to the mid-roll advertising files in a VOD location.\n\nYou may choose the mid-roll mode using the `midroll_insert_by` parameter.\n\nThe order of mid-roll playback is defined by the order of values in the array.\n",
+                "example": [
+                  "ad_vod/midroll1.mp4",
+                  "ad_vod/midroll2.mp4"
+                ],
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "midroll_insert_by": {
+                "default": "interval",
+                "description": "When to perform midrolls.\n",
+                "oneOf": [
+                  {
+                    "const": "interval",
+                    "description": "All ad files are played in the specified order once every `midroll_interval`.\n",
+                    "title": "Interval"
+                  },
+                  {
+                    "const": "splicing",
+                    "description": "You can use this option if your stream has SCTE-35 or SCTE-104 markers.\n\nThe ad files are played in the specified order (looped, from the beginning of the array) \nuntil a marker for switching to the main stream is received,\nor until the end of the advertisement slot (whichever comes first).\n",
+                    "title": "Splicing"
+                  }
+                ],
+                "type": "string"
+              },
+              "midroll_interval": {
+                "description": "The interval between showing mid-roll advertisement files. \nUse with `midroll_insert_by=interval` only.\n",
+                "example": 180,
+                "type": "integer"
+              },
+              "midroll_program_id": {
+                "description": "You can use this option to choose SCTE-35 or SCTE-104 markers having this program_id only for this mid-roll.\nUse with `midroll_insert_by=splicing` only.\n",
+                "example": 1,
+                "type": "integer"
+              },
+              "preroll": {
+                "description": "The paths to the pre-roll advertising files in a VOD location.\n\nAll the pre-roll files are played before switching to the main stream:\n\n* live main stream is *replaced* by the pre-roll so the content may be overlapped by the ads.\n* VOD main stream is entirely played after the pre-roll without overlapping like in a playlist.\n\nThe order of pre-roll playback is defined by the order of values in the array.\n",
+                "example": [
+                  "ad_vod/preroll1.mp4"
+                ],
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              "v": {
+                "default": 2,
+                "description": "The version of ad insertion mechanism used by Flussonic: \n\n* `v=1` is an extension of the authorization system, it works with HLS and DASH protocols only. \nThe ad is inserted to the manifest (playlist), so plugins such as AdBlock can detect and block the advertisement.\n\n* `v=2` (default) provides more resistance to ad blockers. \nThe ad replaces the stream segments within the play session so that it is impossible to distinguish \nwhether it is a main stream segment or an ad segment. \nIt also allows you to customize the advertisements for a particular user. \nBesides, it works with a single-period as well as a multi-period DASH.\n",
+                "example": 2,
+                "type": "integer"
+              }
+            },
+            "type": "object"
+          },
+          "allowed_dvr_ranges": {
+            "description": "Permitted DVR intervals.\nBy default when no allowed_dvr_ranges defined all archive is available for requests.\nEmpty list means no access.\n",
+            "items": {
+              "description": "'opened_at' or 'closed_at' can be omitted (not both), which means open interval.\n",
+              "properties": {
+                "closed_at": {
+                  "description": "End of the interval, exclusive.\n",
+                  "example": 1710020000,
+                  "format": "utc",
+                  "maximum": 10000000000,
+                  "minimum": 1000000000,
+                  "type": "integer",
+                  "x-format-description": "Unix timestamp in seconds"
+                },
+                "opened_at": {
+                  "description": "Start of the interval, inclusive.\n",
+                  "example": 1710010000,
+                  "format": "utc",
+                  "maximum": 10000000000,
+                  "minimum": 1000000000,
+                  "type": "integer",
+                  "x-format-description": "Unix timestamp in seconds"
+                }
+              },
+              "type": "object"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      },
+      "error": {
+        "properties": {
+          "code": {
+            "description": "an application-specific error code, expressed as a string value\n",
+            "type": "string"
+          },
+          "id": {
+            "description": "a unique identifier for this particular occurrence of the problem\n",
+            "type": "string"
+          },
+          "meta": {
+            "additionalProperties": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "integer"
+                }
+              ]
+            },
+            "description": "a meta object containing non-standard meta-information about the error.\n",
+            "type": "object"
+          },
+          "source": {
+            "description": "an object containing references to the source of the error\n",
+            "properties": {
+              "parameter": {
+                "description": "a string indicating which URI query parameter caused the error.",
+                "type": "string"
+              },
+              "pointer": {
+                "description": "a JSON Pointer [RFC6901] to the associated entity in the request document\n[e.g. `\"/data\"` for a primary data object, or `\"/data/attributes/title\"` for a specific attribute].\n",
+                "type": "string"
+              }
+            },
+            "type": "object"
+          },
+          "status": {
+            "description": "the HTTP status code applicable to this problem, expressed as a string value\n",
+            "type": "string"
+          },
+          "title": {
+            "description": "a short, human-readable summary of the problem that SHOULD NOT change from\noccurrence to occurrence of the problem, except for purposes of localization\n",
+            "type": "string"
+          }
+        },
+        "type": "object"
+      },
+      "error_response": {
+        "properties": {
+          "errors": {
+            "description": "List of structured errors",
+            "items": {
+              "$ref": "#/components/schemas/error"
+            },
+            "type": "array"
+          }
+        },
+        "type": "object"
+      }
+    },
+    "securitySchemes": {
+      "bearerAuth": {
+        "bearerFormat": "JWT",
+        "scheme": "bearer",
+        "type": "http"
+      }
+    }
+  },
+  "info": {
+    "contact": {
+      "email": "support@flussonic.com",
+      "name": "Support team",
+      "url": "https://flussonic.com/"
+    },
+    "description": "This API describes how Flussonic streaming server connects to an external authorization backend \nto check if the user is allowed to access a stream or a VOD file.\n\nPermanent [download link](https://flussonic.com/doc/api/authorization.json) to JSON schema file.\n\nThis specification does not have any external dependencies and is designed to be as minimal,\nas possible for reducing needs of maintaining unneeded backward compatibility.\n\nThis API is designed to be implementable by third parties.\n",
+    "title": "Flussonic Authorization Backend API",
+    "version": "21.12.1"
+  },
+  "openapi": "3.1.0",
+  "paths": {
+    "/play": {
+      "get": {
+        "description": "This method describes what Flussonic sends to an authorization backend for playing session and what it awaits as a response.\n",
+        "operationId": "auth_request",
+        "parameters": [
+          {
+            "description": "Stream or VOD file name for this session.\n",
+            "example": "fake",
+            "in": "query",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "style": "form"
+          },
+          {
+            "description": "Protocol for this session.\n",
+            "example": "hls",
+            "in": "query",
+            "name": "proto",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "style": "form"
+          },
+          {
+            "description": "IP address of the media client who initiated this session.\n",
+            "example": "10.77.0.150",
+            "in": "query",
+            "name": "ip",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "style": "form"
+          },
+          {
+            "description": "Is it a request for a new session or an update request.\n\nThe value `new_session` is used for a start of a new session and `update_session` - for an existing session.\n",
+            "example": "new_session",
+            "in": "query",
+            "name": "request_type",
+            "required": true,
+            "schema": {
+              "enum": [
+                "new_session",
+                "update_session"
+              ],
+              "type": "string"
+            },
+            "style": "form"
+          },
+          {
+            "description": "Counter of auth requests for this session, starting from 0.\n",
+            "example": 1,
+            "in": "query",
+            "name": "request_number",
+            "required": true,
+            "schema": {
+              "format": "bytes",
+              "type": "integer",
+              "x-format-description": "bytes"
+            },
+            "style": "form"
+          },
+          {
+            "description": "Unique session id. It will be the same for one session.\n",
+            "example": "6217fd62-16da-4206-9da9-0173d7552a14",
+            "in": "query",
+            "name": "session_id",
+            "required": true,
+            "schema": {
+              "format": "uuid",
+              "type": "string",
+              "x-format-description": "uuid"
+            },
+            "style": "form"
+          },
+          {
+            "description": "How many clients are currently watching this stream or VOD file.\n",
+            "example": 1,
+            "in": "query",
+            "name": "stream_clients",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            },
+            "style": "form"
+          },
+          {
+            "description": "How many clients are currently watching from this server.\n",
+            "example": 2,
+            "in": "query",
+            "name": "total_clients",
+            "required": true,
+            "schema": {
+              "type": "integer"
+            },
+            "style": "form"
+          },
+          {
+            "description": "User provided authorization token.\n\nThe token is generated automatically or received from a website.\n",
+            "example": "60334b207baa",
+            "in": "query",
+            "name": "token",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "style": "form"
+          },
+          {
+            "description": "If it is an update request, then it will be the duration of this session in seconds.\n",
+            "example": 2,
+            "in": "query",
+            "name": "duration",
+            "required": false,
+            "schema": {
+              "format": "seconds",
+              "type": "integer",
+              "x-format-description": "seconds"
+            },
+            "style": "form"
+          },
+          {
+            "description": "How many bytes have been passed in this session.\n",
+            "example": 12345,
+            "in": "query",
+            "name": "bytes",
+            "required": false,
+            "schema": {
+              "format": "bytes",
+              "type": "integer",
+              "x-format-description": "bytes"
+            },
+            "style": "form"
+          },
+          {
+            "description": "Here may go initial query string that was passed by client.\nUse it for additional authorization.\n",
+            "example": "token=60334b207baa",
+            "in": "query",
+            "name": "qs",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "style": "form"
+          },
+          {
+            "description": "Is it a session for playing DVR archive.\n",
+            "example": true,
+            "in": "query",
+            "name": "dvr",
+            "required": false,
+            "schema": {
+              "type": "boolean"
+            },
+            "style": "form"
+          },
+          {
+            "description": "Many protocols can signal a user agent. It will be provided in this field.\n",
+            "example": "curl%2F7.68.0",
+            "in": "query",
+            "name": "user_agent",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "style": "form"
+          },
+          {
+            "description": "Referer HTTP header that identifies the address of the web page from which the request was made.\n",
+            "example": "hey.com",
+            "in": "query",
+            "name": "referer",
+            "required": false,
+            "schema": {
+              "type": "string"
+            },
+            "style": "form"
+          },
+          {
+            "description": "A value of Host HTTP Header.\n",
+            "explode": false,
+            "in": "query",
+            "name": "host",
+            "required": false,
+            "schema": {
+              "example": "streamer03.my.cdn",
+              "type": "string"
+            },
+            "style": "form"
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/auth_response_v1"
+                },
+                "x-scope": [
+                  "flussonic"
+                ]
+              }
+            },
+            "description": "Access granted. Here you can pass additional session settings (like advertising).",
+            "headers": {
+              "X-AuthDuration": {
+                "description": "During this amount of seconds this session will be considered alive\nand no additional requests will be made.\n\nIf a session has been banned,\nany attempt to reopen it within the period of `X-AuthDuration` will be rejected by Flussonic Media Server.\n",
+                "example": 3600,
+                "schema": {
+                  "format": "seconds",
+                  "type": "integer",
+                  "x-format-description": "seconds"
+                }
+              },
+              "X-Max-Sessions": {
+                "description": "How many opened sessions are allowed with this user id.\n\nFor example, if it is set to 2 and a user tries to view 3 streams simultaneously, one of them will be interrupted.\n",
+                "example": 2,
+                "schema": {
+                  "type": "integer"
+                }
+              },
+              "X-Unique": {
+                "deprecated": true,
+                "description": "Only one opened session is allowed with this user id. Analog for `X-Max-Sessions: 1`\n",
+                "schema": {
+                  "type": "boolean"
+                },
+                "x-delete-at": 23.09,
+                "x-scope": [
+                  "flussonic"
+                ]
+              },
+              "X-UserId": {
+                "description": "Authorization backend can supply user id of this session.\nIt can be used for reporting statistics and for limiting simultaneous amount of\nopened sessions.\n",
+                "example": "some-user-id",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "302": {
+            "content": {
+              "text/plain": {
+                "schema": {
+                  "type": "string"
+                }
+              }
+            },
+            "description": "Redirect client to a different URL. e.g. a new stream path or backup clip.",
+            "headers": {
+              "Location": {
+                "schema": {
+                  "description": "The URL that the Player will open for playback.",
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/error_response"
+                }
+              }
+            },
+            "description": "Permission denied"
+          }
+        },
+        "summary": "Play session authorization",
+        "tags": [
+          "auth"
+        ]
+      }
+    },
+    "/publish": {
+      "post": {
+        "description": "This method describes what Flussonic sends to an authorization backend for publishing session authorization and what it awaits as a response.\n",
+        "operationId": "publish_request",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "properties": {
+                  "bytes": {
+                    "deprecated": true,
+                    "description": "How many bytes have been passed in this session.\n",
+                    "example": 12345,
+                    "schema": {
+                      "format": "bytes",
+                      "type": "integer",
+                      "x-format-description": "bytes"
+                    },
+                    "style": "form",
+                    "x-delete-at": 25.08
+                  },
+                  "duration": {
+                    "deprecated": true,
+                    "description": "If it is an update request, then it will be the duration of this session in seconds.\n",
+                    "example": 2,
+                    "schema": {
+                      "format": "seconds",
+                      "type": "integer",
+                      "x-format-description": "seconds"
+                    },
+                    "style": "form",
+                    "x-delete-at": 25.08
+                  },
+                  "host": {
+                    "description": "A value of Host HTTP Header.\n",
+                    "explode": false,
+                    "in": "query",
+                    "schema": {
+                      "example": "streamer03.my.cdn",
+                      "type": "string"
+                    },
+                    "style": "form"
+                  },
+                  "ip": {
+                    "description": "IP address of the media client who initiated this session. \n",
+                    "example": "10.77.0.150",
+                    "schema": {
+                      "type": "string"
+                    },
+                    "style": "form"
+                  },
+                  "name": {
+                    "description": "Stream name for this session.\n",
+                    "example": "fake",
+                    "schema": {
+                      "type": "string"
+                    },
+                    "style": "form"
+                  },
+                  "proto": {
+                    "description": "Protocol for this session.\n",
+                    "example": "hls",
+                    "schema": {
+                      "type": "string"
+                    },
+                    "style": "form"
+                  },
+                  "qs": {
+                    "description": "Here may go initial query string that was passed by client.\nUse it for additional authorization.\n",
+                    "example": "token=60334b207baa",
+                    "schema": {
+                      "type": "string"
+                    },
+                    "style": "form"
+                  },
+                  "referer": {
+                    "description": "Referer HTTP header that identifies the address of the web page from which the request was made.\n",
+                    "example": "hey.com",
+                    "schema": {
+                      "type": "string"
+                    },
+                    "style": "form"
+                  },
+                  "request_number": {
+                    "deprecated": true,
+                    "description": "Counter of auth requests for this session, starting from 0.\n",
+                    "example": 1,
+                    "schema": {
+                      "format": "bytes",
+                      "type": "integer",
+                      "x-format-description": "bytes"
+                    },
+                    "style": "form",
+                    "x-delete-at": 25.08
+                  },
+                  "request_type": {
+                    "deprecated": true,
+                    "description": "Is it a request for a new session or an update request.\n\nThe value `new_session` is used for a start of a new session and `update_session` - for an existing session.\n",
+                    "example": "new_session",
+                    "schema": {
+                      "enum": [
+                        "new_session",
+                        "update_session"
+                      ],
+                      "type": "string"
+                    },
+                    "style": "form",
+                    "x-delete-at": 25.08
+                  },
+                  "session_id": {
+                    "deprecated": true,
+                    "description": "Unique session id. It will be the same for one session.\n",
+                    "example": "6217fd62-16da-4206-9da9-0173d7552a14",
+                    "schema": {
+                      "format": "uuid",
+                      "type": "string",
+                      "x-format-description": "uuid"
+                    },
+                    "style": "form",
+                    "x-delete-at": 25.08
+                  },
+                  "stream_clients": {
+                    "deprecated": true,
+                    "description": "How many clients are currently watching this stream.\n",
+                    "example": 1,
+                    "schema": {
+                      "type": "integer"
+                    },
+                    "style": "form",
+                    "x-delete-at": 25.08
+                  },
+                  "token": {
+                    "description": "User provided authorization token.\n\nThe token is generated automatically or received from a website.\n",
+                    "example": "60334b207baa",
+                    "schema": {
+                      "type": "string"
+                    },
+                    "style": "form"
+                  },
+                  "total_clients": {
+                    "deprecated": true,
+                    "description": "How many clients are currently watching from this server.\n",
+                    "example": 2,
+                    "schema": {
+                      "type": "integer"
+                    },
+                    "style": "form",
+                    "x-delete-at": 25.08
+                  },
+                  "user_agent": {
+                    "description": "Many protocols can signal a user agent. It will be provided in this field.\n",
+                    "example": "curl%2F7.68.0",
+                    "schema": {
+                      "type": "string"
+                    },
+                    "style": "form"
+                  }
+                },
+                "required": [
+                  "name",
+                  "proto",
+                  "ip",
+                  "request_type",
+                  "request_number",
+                  "session_id",
+                  "stream_clients",
+                  "total_clients"
+                ],
+                "type": "object"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/auth_response_v1"
+                },
+                "x-scope": [
+                  "flussonic"
+                ]
+              }
+            },
+            "description": "Access granted. Here you can pass additional session settings (like advertising).",
+            "headers": {
+              "X-AuthDuration": {
+                "description": "During this amount of seconds this session will be considered alive\nand no additional requests will be made.\n\nIf a session has been banned,\nany attempt to reopen it within the period of `X-AuthDuration` will be rejected by Flussonic Media Server.\n",
+                "example": 3600,
+                "schema": {
+                  "format": "seconds",
+                  "type": "integer",
+                  "x-format-description": "seconds"
+                }
+              },
+              "X-Max-Sessions": {
+                "description": "How many opened sessions are allowed with this user id.\n\nFor example, if it is set to 2 and a user tries to publish 3 streams simultaneously, one of them will be interrupted.\n",
+                "example": 2,
+                "schema": {
+                  "type": "integer"
+                }
+              },
+              "X-UserId": {
+                "description": "Authorization backend can supply user id of this session.\nIt can be used for reporting statistics and for limiting simultaneous amount of\nopened sessions.\n",
+                "example": "some-user-id",
+                "schema": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/error_response"
+                }
+              }
+            },
+            "description": "Permission denied"
+          }
+        },
+        "summary": "Publish session authorization",
+        "tags": [
+          "auth"
+        ]
+      }
+    }
+  },
+  "security": [
+    {
+      "bearerAuth": []
+    }
+  ],
+  "servers": [
+    {
+      "description": "Your local installation.",
+      "url": "http://localhost:8080/streamer/api/v3"
+    }
+  ],
+  "tags": [
+    {
+      "name": "auth"
+    }
+  ]
+}
