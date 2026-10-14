@@ -43,6 +43,23 @@ Use `docs/AI_COLLABORATION.md` for durable status and handoffs, and PR #1 commen
 
 ## Status updates
 
+### 2026-10-14 — Devin (local contributor) — Phase 1A security closure
+
+- **Work done:** Secured `/ws` upgrades, added CSRF protection, expanded HTTP integration tests to cover stream/VOD writes.
+- **New code:**
+  - `src/server/middleware/csrf.ts` — mutating requests authenticated by cookie must send `X-Requested-With: XMLHttpRequest` or a same-host `Origin`. Bearer-token requests are CSRF-immune and unaffected. Mounted on `/api` in `server.ts`.
+  - `verifyWsAuth(request)` in `websocket/index.ts` — parses the Cookie header on upgrade (cookie-parser doesn't run there), verifies JWT, rejects unauthenticated upgrades with HTTP 401.
+  - `server.ts` upgrade handler rejects `/ws` without a valid session cookie; non-`/ws` upgrades still destroyed.
+  - `src/App.tsx` axios interceptor now always sends `X-Requested-With: XMLHttpRequest`.
+- **Tests:** `tests/http-auth.integration.test.ts` extended to **8 tests, all pass (~20s)**:
+  - Existing: anon 401s, client 403s, admin 200, cred redaction online+offline, unlink-only remote delete
+  - New: cookie-only POST without marker → 403, with marker → 200, Bearer POST no marker → 200 (CSRF suite); unauthenticated `/ws` → 401 rejected, authenticated `/ws` → opens; stream+VOD create — anon 401 / client 403 / admin 200
+- **Checks:** `npm run lint` ✅ | regression 6/6 ✅ | integration 8/8 ✅ | `npm run build` ✅ (115.2 kB) | `npm audit` ✅ 2 vulns (esbuild low, qs moderate — both transitive, no non-breaking fix)
+- **Remaining risks:** none new introduced. `/ws` broadcast still all-clients; stream/VOD deep write-path coverage (updates, reorder, playlist regen) can expand in 1B.
+- **Phase 1B handoff:** `docs/PHASE1B_MULTISERVER_HANDOFF.md` — baseline state, suggested scope (per-server sync cadence, metrics mount fix, client scoping), carry-over risks, verification gates.
+- **Blockers:** staging Flussonic VOD upload execution still requires live endpoint + creds (share out-of-band; plan ready).
+- **Next owner / action:** ChatGPT contributor reviews Phase 1A closure; user approves merge gate. Phase 1B work can start on this branch or a new one.
+
 ### 2026-10-14 — Devin (local contributor) — Phase 1A final verification
 
 - **Work done:** Added `tests/http-auth.integration.test.ts` — a real HTTP suite that spawns the app in production mode (temp DB, mock Flussonic) and exercises anon/client/admin access. Found and fixed a live vulnerability in the process.

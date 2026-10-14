@@ -7,6 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import Database from 'better-sqlite3';
 import bcrypt from 'bcrypt';
+import WebSocket from 'ws';
 
 const PORT = 36199;
 const BASE = `http://localhost:${PORT}`;
@@ -136,20 +137,23 @@ test('client role is authenticated but forbidden from admin routes', async () =>
 });
 
 test('admin can restart watchdog and manage servers', async () => {
-  const { res: loginRes, cookie } = await login('itadmin', 'it-admin-pass-12345');
+  const { res: loginRes } = await login('itadmin', 'it-admin-pass-12345');
   assert.equal(loginRes.status, 200, 'admin login failed');
+  const { token } = await loginRes.json();
 
-  const restart = await fetch(`${BASE}/api/watchdog/restart`, { method: 'POST', headers: { cookie } });
+  const restart = await fetch(`${BASE}/api/watchdog/restart`, { method: 'POST', headers: { authorization: `Bearer ${token}` } });
   assert.equal(restart.status, 200);
 });
 
 test('server credentials are redacted in both online and offline responses', async () => {
-  const { cookie } = await login('itadmin', 'it-admin-pass-12345');
+  const { res: loginRes } = await login('itadmin', 'it-admin-pass-12345');
+  const { token } = await loginRes.json();
+  const headers = { authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
 
   // Online server (mock responds to /flussonic/api/v3/config)
   const mk = await fetch(`${BASE}/api/servers`, {
     method: 'POST',
-    headers: { cookie, 'Content-Type': 'application/json' },
+    headers,
     body: JSON.stringify({ name: 'mock-online', url: `http://127.0.0.1:${remotePort}`, username: 'ituser', password: 'itpass123456' })
   });
   assert.equal(mk.status, 200);
@@ -159,11 +163,11 @@ test('server credentials are redacted in both online and offline responses', asy
   // Offline server (nothing listens on port 1)
   await fetch(`${BASE}/api/servers`, {
     method: 'POST',
-    headers: { cookie, 'Content-Type': 'application/json' },
+    headers,
     body: JSON.stringify({ name: 'mock-offline', url: 'http://127.0.0.1:1', username: 'ituser2', password: 'itpass123456' })
   });
 
-  const list = await (await fetch(`${BASE}/api/servers`, { headers: { cookie } })).json();
+  const list = await (await fetch(`${BASE}/api/servers`, { headers })).json();
   for (const s of list) {
     assert.ok(!('api_key' in s), `server ${s.name} leaks api_key`);
     assert.ok(!('username' in s), `server ${s.name} leaks username`);
@@ -174,14 +178,90 @@ test('server credentials are redacted in both online and offline responses', asy
 });
 
 test('deleting a server never calls DELETE on the remote Flussonic API', async () => {
-  const { cookie } = await login('itadmin', 'it-admin-pass-12345');
-  const list = await (await fetch(`${BASE}/api/servers`, { headers: { cookie } })).json();
+  const { res: loginRes } = await login('itadmin', 'it-admin-pass-12345');
+  const { token } = await loginRes.json();
+  const headers = { authorization: `Bearer ${token}` };
+  const list = await (await fetch(`${BASE}/api/servers`, { headers })).json();
   const online = list.find((s: any) => s.name === 'mock-online');
   assert.ok(online, 'mock-online server missing');
 
   remoteDeletes.length = 0;
-  const del = await fetch(`${BASE}/api/servers/${online.id}`, { method: 'DELETE', headers: { cookie } });
+  const del = await fetch(`${BASE}/api/servers/${online.id}`, { method: 'DELETE', headers });
   assert.equal(del.status, 200);
   await new Promise(r => setTimeout(r, 500)); // allow any async remote calls to land
   assert.equal(remoteDeletes.length, 0, `remote DELETE calls observed: ${remoteDeletes.join(', ')}`);
+});
+
+test('cookie-authenticated mutations require a CSRF marker', async () => {
+  const { res: loginRes } = await login('itadmin', 'it-admin-pass-12345');
+  const body = await loginRes.json();
+  const cookie = `token=${body.token}`;
+
+  // Cookie-only POST without CSRF marker → 403
+  const noMarker = await fetch(`${BASE}/api/watchdog/restart`, { method: 'POST', headers: { cookie } });
+  assert.equal(noMarker.status, 403, 'cookie-only POST without CSRF marker should be 403');
+
+  // Cookie + X-Requested-With → 200
+  const withMarker = await fetch(`${BASE}/api/watchdog/restart`, { method: 'POST', headers: { cookie, 'x-requested-with': 'XMLHttpRequest' } });
+  assert.equal(withMarker.status, 200);
+
+  // Bearer token (no cookie) → CSRF-immune, no marker needed
+  const bearer = await fetch(`${BASE}/api/watchdog/restart`, { method: 'POST', headers: { authorization: `Bearer ${body.token}` } });
+  assert.equal(bearer.status, 200);
+});
+
+test('WebSocket /ws upgrades require an authenticated session', async () => {
+  const { res: loginRes } = await login('itadmin', 'it-admin-pass-12345');
+  const { token } = await loginRes.json();
+
+  const unauth = new Promise((resolve) => {
+    const ws = new WebSocket(`ws://localhost:${PORT}/ws`);
+    ws.on('open', () => { ws.close(); resolve('opened'); });
+    ws.on('unexpected-response', (req, res) => resolve(`rejected-${res.statusCode}`));
+    ws.on('error', () => resolve('error'));
+  });
+  const unauthResult = await Promise.race([unauth, new Promise(r => setTimeout(() => r('timeout'), 5000))]);
+  assert.equal(unauthResult, 'rejected-401', `unauthenticated /ws should be rejected, got ${unauthResult}`);
+
+  const authed = new Promise((resolve) => {
+    const ws = new WebSocket(`ws://localhost:${PORT}/ws`, { headers: { cookie: `token=${token}` } });
+    ws.on('open', () => { ws.close(); resolve('opened'); });
+    ws.on('unexpected-response', (req, res) => resolve(`rejected-${res.statusCode}`));
+    ws.on('error', () => resolve('error'));
+  });
+  const authedResult = await Promise.race([authed, new Promise(r => setTimeout(() => r('timeout'), 5000))]);
+  assert.equal(authedResult, 'opened', `authenticated /ws should open, got ${authedResult}`);
+});
+
+test('stream and VOD write operations enforce auth and roles', async () => {
+  const { res: adminLogin } = await login('itadmin', 'it-admin-pass-12345');
+  const { token } = await adminLogin.json();
+  const adminHeaders = { authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+  const { res: clientLogin } = await login('itclient', 'it-client-pass-12345');
+  const { token: clientToken } = await clientLogin.json();
+  const clientHeaders = { authorization: `Bearer ${clientToken}`, 'Content-Type': 'application/json' };
+
+  // Dedicated server row (mock-online was deleted by an earlier test)
+  const mk = await fetch(`${BASE}/api/servers`, {
+    method: 'POST',
+    headers: adminHeaders,
+    body: JSON.stringify({ name: 'mock-write', url: `http://127.0.0.1:${remotePort}`, username: 'ituser', password: 'itpass123456' })
+  });
+  const server = await mk.json();
+
+  // Stream create: anon 401, client 403, admin 200
+  const streamBody = JSON.stringify({ server_id: server.id, name: 'it-stream', inputs: ['rtsp://x/y'] });
+  assert.equal((await fetch(`${BASE}/api/streams`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: streamBody })).status, 401);
+  assert.equal((await fetch(`${BASE}/api/streams`, { method: 'POST', headers: clientHeaders, body: streamBody })).status, 403);
+  const streamRes = await fetch(`${BASE}/api/streams`, { method: 'POST', headers: adminHeaders, body: streamBody });
+  assert.equal(streamRes.status, 200, `admin stream create failed: ${await streamRes.clone().text()}`);
+  const stream = await streamRes.json();
+  assert.ok(stream.id, 'stream id missing');
+
+  // VOD create: anon 401, client 403, admin path
+  const vodBody = JSON.stringify({ server_id: server.id, name: 'it-vod', paths: ['/storage/it-vod'] });
+  assert.equal((await fetch(`${BASE}/api/vods`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: vodBody })).status, 401);
+  assert.equal((await fetch(`${BASE}/api/vods`, { method: 'POST', headers: clientHeaders, body: vodBody })).status, 403);
+  const vodRes = await fetch(`${BASE}/api/vods`, { method: 'POST', headers: adminHeaders, body: vodBody });
+  assert.ok([200, 201].includes(vodRes.status), `admin vod create failed: ${vodRes.status} ${await vodRes.clone().text()}`);
 });

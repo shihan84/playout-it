@@ -5,10 +5,11 @@ import fs from 'fs';
 import https from 'https';
 import cookieParser from 'cookie-parser';
 import { authenticateToken, requireAdmin } from './src/server/middleware/auth';
+import { csrfProtection } from './src/server/middleware/csrf';
 
 import { config } from './src/server/config';
 import './src/server/db'; // initializes DB as side effect
-import { wss } from './src/server/websocket';
+import { wss, verifyWsAuth } from './src/server/websocket';
 import { startWatchdog } from './src/server/services/watchdog';
 
 import authRoutes from './src/server/routes/auth';
@@ -32,6 +33,7 @@ const SSL_KEY_PATH = config.sslKeyPath;
 const SSL_CERT_PATH = config.sslCertPath;
 
 app.use(cookieParser());
+app.use('/api', csrfProtection);
 app.use(express.json({ limit: '1000gb' }));
 app.use(express.urlencoded({ limit: '1000gb', extended: true }));
 
@@ -105,6 +107,11 @@ async function startServer() {
 
   server.on('upgrade', (request: any, socket: any, head: any) => {
     if (request.url === '/ws') {
+      if (!verifyWsAuth(request)) {
+        socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+        socket.destroy();
+        return;
+      }
       wss.handleUpgrade(request, socket, head, (ws) => {
         wss.emit('connection', ws, request);
       });
