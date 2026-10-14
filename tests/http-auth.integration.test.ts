@@ -16,6 +16,7 @@ const TSX_CLI = path.join(process.cwd(), 'node_modules/tsx/dist/cli.mjs');
 // Minimal mock Flussonic v3 API. Records DELETE calls to assert unlink-only delete.
 let mockServer: any;
 const remoteDeletes: string[] = [];
+const remoteRequests: string[] = [];
 const remotePort = 36198;
 
 let appProcess: any;
@@ -55,8 +56,28 @@ test.before(async () => {
   // Mock Flussonic server
   mockServer = createServer((req, res) => {
     if (req.method === 'DELETE') remoteDeletes.push(req.url || '');
+    remoteRequests.push(`${req.method} ${req.url}`);
     res.setHeader('Content-Type', 'application/json');
-    if (req.url?.includes('/config')) {
+    // Companion-VOD fixtures:
+    //  - legacy-stream: VOD exists only under the stream's own name (pre-upgrade
+    //    convention); `legacy-stream_vod` 404s
+    //  - new-stream: VOD exists only under `new-stream_vod` (current convention)
+    if (req.url?.startsWith('/flussonic/api/v3/vods/legacy-stream_vod')) {
+      res.statusCode = 404;
+      res.end(JSON.stringify({ error: 'not_found' }));
+    } else if (req.url?.startsWith('/flussonic/api/v3/vods/legacy-stream')) {
+      if (req.method === 'GET' && req.url.includes('/files')) {
+        res.end(JSON.stringify({ files: [{ name: 'legacy-clip.mp4', size: 123 }] }));
+      } else {
+        res.end(JSON.stringify({ prefix: 'legacy-stream', storages: [{ url: '/storage/legacy-stream' }] }));
+      }
+    } else if (req.method === 'GET' && req.url?.startsWith('/flussonic/api/v3/vods/new-stream_vod')) {
+      if (req.url.includes('/files')) {
+        res.end(JSON.stringify({ files: [{ name: 'new-clip.mp4', size: 456 }] }));
+      } else {
+        res.end(JSON.stringify({ prefix: 'new-stream_vod', storages: [{ url: '/storage/new-stream_vod' }] }));
+      }
+    } else if (req.url?.includes('/config')) {
       res.end(JSON.stringify({ stats: { total_clients: 0, uptime: 1 } }));
     } else if (req.url?.includes('/streams')) {
       res.end(JSON.stringify([]));
@@ -264,4 +285,52 @@ test('stream and VOD write operations enforce auth and roles', async () => {
   assert.equal((await fetch(`${BASE}/api/vods`, { method: 'POST', headers: clientHeaders, body: vodBody })).status, 403);
   const vodRes = await fetch(`${BASE}/api/vods`, { method: 'POST', headers: adminHeaders, body: vodBody });
   assert.ok([200, 201].includes(vodRes.status), `admin vod create failed: ${vodRes.status} ${await vodRes.clone().text()}`);
+});
+
+test('companion VOD resolves both _vod and legacy same-name conventions', async () => {
+  const { res: loginRes } = await login('itadmin', 'it-admin-pass-12345');
+  const { token } = await loginRes.json();
+  const headers = { authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+
+  const mk = await fetch(`${BASE}/api/servers`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ name: 'mock-vod', url: `http://127.0.0.1:${remotePort}`, username: 'ituser', password: 'itpass123456' })
+  });
+  const server = await mk.json();
+
+  for (const name of ['legacy-stream', 'new-stream']) {
+    const r = await fetch(`${BASE}/api/streams`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ server_id: server.id, name, inputs: ['fake://src'] })
+    });
+    assert.equal(r.status, 200, `create ${name}: ${await r.clone().text()}`);
+  }
+
+  const list = await (await fetch(`${BASE}/api/streams`, { headers })).json();
+  const legacy = list.find((s: any) => s.name === 'legacy-stream');
+  const modern = list.find((s: any) => s.name === 'new-stream');
+  assert.ok(legacy && modern, 'seeded streams missing');
+
+  remoteRequests.length = 0;
+  const legacyFiles = await (await fetch(`${BASE}/api/streams/${legacy.id}/vod-files`, { headers })).json();
+  assert.equal(legacyFiles.files?.[0]?.name, 'legacy-clip.mp4', 'legacy same-name VOD not resolved');
+  assert.ok(
+    remoteRequests.some(u => u === `GET /flussonic/api/v3/vods/legacy-stream_vod`) &&
+    remoteRequests.some(u => u.startsWith('GET /flussonic/api/v3/vods/legacy-stream/')),
+    'resolver should probe _vod first then fall back to legacy name'
+  );
+
+  remoteRequests.length = 0;
+  const newFiles = await (await fetch(`${BASE}/api/streams/${modern.id}/vod-files`, { headers })).json();
+  assert.equal(newFiles.files?.[0]?.name, 'new-clip.mp4', '_vod VOD not resolved');
+  assert.ok(
+    remoteRequests.some(u => u.startsWith('GET /flussonic/api/v3/vods/new-stream_vod/storages/0/files')),
+    'modern convention should hit _vod VOD directly'
+  );
+  assert.ok(
+    !remoteRequests.some(u => u.startsWith('GET /flussonic/api/v3/vods/new-stream/')),
+    'modern convention should not probe legacy name after _vod hit'
+  );
 });
