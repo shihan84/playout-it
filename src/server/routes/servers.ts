@@ -198,7 +198,7 @@ router.post('/:id/sync', authenticateToken, requireAdmin, async (req, res) => {
     const server = db.prepare('SELECT * FROM servers WHERE id = ?').get(req.params.id) as any;
     if (!server) return res.status(404).json({ error: 'Server not found' });
 
-    const { addedCount, removedCount } = await syncServerStreams(server);
+    const { addedCount, removedCount, pendingRemovals } = await syncServerStreams(server);
     const vodSync = await syncServerVods(server);
     db.prepare('UPDATE servers SET last_synced_at = CURRENT_TIMESTAMP WHERE id = ?').run(server.id);
 
@@ -207,11 +207,13 @@ router.post('/:id/sync', authenticateToken, requireAdmin, async (req, res) => {
     }
 
     res.json({
-      success: true,
+      success: !vodSync.error,
       added: addedCount,
       removed: removedCount,
       vodsAdded: vodSync.addedCount,
-      vodsRemoved: vodSync.removedCount
+      vodsRemoved: vodSync.removedCount,
+      pendingRemovals: (pendingRemovals || 0) + (vodSync.pendingRemovals || 0),
+      ...(vodSync.error ? { error: vodSync.error } : {})
     });
   } catch (error: any) {
     console.error(`Sync error for server ${req.params.id}:`, error.message);
@@ -227,7 +229,9 @@ router.post('/sync-all', authenticateToken, requireAdmin, async (req, res) => {
     let totalRemoved = 0;
     let totalVodsAdded = 0;
     let totalVodsRemoved = 0;
+    let totalPendingRemovals = 0;
     const skipped: string[] = [];
+    const failed: string[] = [];
 
     // Bounded parallelism so one hung server can't stall the whole sync
     await mapLimit(servers, 4, async (server) => {
@@ -236,15 +240,18 @@ router.post('/sync-all', authenticateToken, requireAdmin, async (req, res) => {
         return;
       }
       try {
-        const { addedCount, removedCount } = await syncServerStreams(server);
+        const s = await syncServerStreams(server);
         const vodSync = await syncServerVods(server);
 
-        totalAdded += addedCount;
-        totalRemoved += removedCount;
+        totalAdded += s.addedCount + vodSync.addedCount;
+        totalRemoved += s.removedCount + vodSync.removedCount;
         totalVodsAdded += vodSync.addedCount;
         totalVodsRemoved += vodSync.removedCount;
+        totalPendingRemovals += (s.pendingRemovals || 0) + (vodSync.pendingRemovals || 0);
+        if (vodSync.error) failed.push(server.name);
       } catch (err: any) {
         console.error(`Failed to sync server ${server.name}:`, err.message);
+        failed.push(server.name);
       }
     });
 
@@ -258,7 +265,9 @@ router.post('/sync-all', authenticateToken, requireAdmin, async (req, res) => {
       removed: totalRemoved,
       vodsAdded: totalVodsAdded,
       vodsRemoved: totalVodsRemoved,
-      skipped
+      pendingRemovals: totalPendingRemovals,
+      skipped,
+      failed
     });
   } catch (error: any) {
     console.error('Sync all error:', error.message);

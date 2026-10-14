@@ -19,7 +19,7 @@ const remoteDeletes: string[] = [];
 const remoteRequests: string[] = [];
 const remotePort = 36198;
 // Test-controlled mock behavior: override GET /streams payload and add latency
-const mockBehavior = { streamsPayload: null as any, delayMs: 0 };
+const mockBehavior = { streamsPayload: null as any, vodsPayload: null as any, vodFilesPayload: null as any, delayMs: 0 };
 
 let appProcess: any;
 let tmpDir: string;
@@ -65,6 +65,14 @@ test.before(async () => {
       // Test-controlled GET /streams payload override (sync tests)
       if (req.method === 'GET' && mockBehavior.streamsPayload !== null && /\/streams$/.test(req.url || '')) {
         res.end(JSON.stringify(mockBehavior.streamsPayload));
+        return;
+      }
+      if (req.method === 'GET' && mockBehavior.vodsPayload !== null && /\/vods$/.test(req.url || '')) {
+        res.end(JSON.stringify(mockBehavior.vodsPayload));
+        return;
+      }
+      if (req.method === 'GET' && mockBehavior.vodFilesPayload !== null && /\/vods\/[^/]+\/(storages\/0\/)?files$/.test(req.url || '')) {
+        res.end(JSON.stringify(mockBehavior.vodFilesPayload));
         return;
       }
       // Companion-VOD fixtures:
@@ -498,4 +506,115 @@ test('WebSocket stream updates are scoped to user assignments', async () => {
   assert.ok(adminNames.includes('ws-scoped'), 'admin should see the new stream');
   assert.ok(!clientNames.includes('ws-scoped'), 'client must not see unassigned streams');
   assert.ok(clientNames.includes('persist-stream'), 'client should see its assigned stream');
+});
+
+test('partial nonempty remote stream list cannot delete local records', async () => {
+  const { res: loginRes } = await login('itadmin', 'it-admin-pass-12345');
+  const { token } = await loginRes.json();
+  const headers = { authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+
+  // Seed 50 streams remotely, create server → auto-sync pulls them
+  mockBehavior.streamsPayload = Array.from({ length: 50 }, (_, i) => ({ name: `bulk-${i}`, inputs: [{ url: 'fake://x' }] }));
+  const mk = await fetch(`${BASE}/api/servers`, {
+    method: 'POST', headers,
+    body: JSON.stringify({ name: 'mock-partial', url: `http://127.0.0.1:${remotePort}`, username: 'u', password: 'p123456' })
+  });
+  const server = await mk.json();
+
+  let list = await (await fetch(`${BASE}/api/streams`, { headers })).json();
+  assert.equal(list.filter((s: any) => s.server_id === server.id).length, 50, 'seeded 50 streams');
+
+  // Remote now returns only 10 (partial/truncated) → zero deletions
+  mockBehavior.streamsPayload = Array.from({ length: 10 }, (_, i) => ({ name: `bulk-${i}`, inputs: [{ url: 'fake://x' }] }));
+  const sync = await (await fetch(`${BASE}/api/servers/${server.id}/sync`, { method: 'POST', headers })).json();
+  assert.equal(sync.removed, 0, 'partial response must not delete local streams');
+  assert.ok(sync.pendingRemovals >= 40, 'missing streams should be reported as pendingRemovals');
+
+  list = await (await fetch(`${BASE}/api/streams`, { headers })).json();
+  assert.equal(list.filter((s: any) => s.server_id === server.id).length, 50, 'all 50 local streams preserved');
+
+  // Full restore → still all present, zero churn
+  mockBehavior.streamsPayload = Array.from({ length: 50 }, (_, i) => ({ name: `bulk-${i}`, inputs: [{ url: 'fake://x' }] }));
+  await fetch(`${BASE}/api/servers/${server.id}/sync`, { method: 'POST', headers });
+  mockBehavior.streamsPayload = null;
+});
+
+test('names-only VOD responses preserve stored paths; partial VOD list never deletes', async () => {
+  const { res: loginRes } = await login('itadmin', 'it-admin-pass-12345');
+  const { token } = await loginRes.json();
+  const headers = { authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+
+  // Seed 20 VODs with real storages
+  mockBehavior.vodsPayload = { vods: Array.from({ length: 20 }, (_, i) => ({ prefix: `pv-${i}`, storages: [{ url: `/storage/pv-${i}` }] })) };
+  const mk = await fetch(`${BASE}/api/servers`, {
+    method: 'POST', headers,
+    body: JSON.stringify({ name: 'mock-vodpartial', url: `http://127.0.0.1:${remotePort}`, username: 'u', password: 'p123456' })
+  });
+  const server = await mk.json();
+
+  const idb = new Database(dbPath);
+  assert.equal((idb.prepare('SELECT COUNT(*) n FROM vods WHERE server_id = ?').get(server.id) as any).n, 20);
+  const before = idb.prepare("SELECT paths FROM vods WHERE server_id = ? AND name = 'pv-0'").get(server.id) as any;
+  assert.equal(JSON.parse(before.paths)[0], '/storage/pv-0', 'paths seeded from sync');
+
+  // Names-only response must not overwrite paths
+  mockBehavior.vodsPayload = Array.from({ length: 20 }, (_, i) => `pv-${i}`);
+  await fetch(`${BASE}/api/servers/${server.id}/sync`, { method: 'POST', headers });
+  const after = idb.prepare("SELECT paths FROM vods WHERE server_id = ? AND name = 'pv-0'").get(server.id) as any;
+  assert.equal(JSON.parse(after.paths)[0], '/storage/pv-0', 'names-only sync must not clear stored paths');
+
+  // Partial list (5 of 20) → no deletions, pendingRemovals reported
+  mockBehavior.vodsPayload = Array.from({ length: 5 }, (_, i) => `pv-${i}`);
+  const sync = await (await fetch(`${BASE}/api/servers/${server.id}/sync`, { method: 'POST', headers })).json();
+  assert.equal((idb.prepare('SELECT COUNT(*) n FROM vods WHERE server_id = ?').get(server.id) as any).n, 20, 'all 20 local VODs preserved');
+  assert.ok(sync.pendingRemovals >= 15, 'missing VODs reported as pendingRemovals');
+  mockBehavior.vodsPayload = null;
+  idb.close();
+});
+
+test('malformed VOD file listing preserves local vod_files', async () => {
+  const { res: loginRes } = await login('itadmin', 'it-admin-pass-12345');
+  const { token } = await loginRes.json();
+  const headers = { authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+
+  const idb = new Database(dbPath);
+  const server = idb.prepare("SELECT id FROM servers WHERE name = 'mock-vodpartial'").get() as any;
+  const vod = idb.prepare("SELECT id FROM vods WHERE server_id = ? AND name = 'pv-0'").get(server.id) as any;
+  idb.prepare("INSERT INTO vod_files (vod_id, filename, size) VALUES (?, 'keep.mp4', 100)").run(vod.id);
+  idb.close();
+
+  // Malformed response → 500, local vod_files untouched
+  mockBehavior.vodFilesPayload = { error: 'weird upstream' };
+  const bad = await fetch(`${BASE}/api/vods/${vod.id}/files/sync`, { method: 'POST', headers });
+  assert.equal(bad.status, 500, 'malformed listing should fail');
+  const idb2 = new Database(dbPath);
+  assert.equal((idb2.prepare('SELECT COUNT(*) n FROM vod_files WHERE vod_id = ?').get(vod.id) as any).n, 1, 'vod_files preserved');
+
+  // Valid listing replaces correctly
+  mockBehavior.vodFilesPayload = { files: [{ name: 'new.mp4', size: 5 }] };
+  const good = await fetch(`${BASE}/api/vods/${vod.id}/files/sync`, { method: 'POST', headers });
+  assert.equal(good.status, 200);
+  const files = idb2.prepare('SELECT filename FROM vod_files WHERE vod_id = ?').all(vod.id) as any[];
+  assert.deepEqual(files.map(f => f.filename), ['new.mp4']);
+  mockBehavior.vodFilesPayload = null;
+  idb2.close();
+});
+
+test('sync failure propagates explicitly to the API response', async () => {
+  const { res: loginRes } = await login('itadmin', 'it-admin-pass-12345');
+  const { token } = await loginRes.json();
+  const headers = { authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+
+  // Server whose /vods returns malformed garbage → explicit error surface
+  mockBehavior.vodsPayload = 'totally-invalid';
+  const mk = await fetch(`${BASE}/api/servers`, {
+    method: 'POST', headers,
+    body: JSON.stringify({ name: 'mock-vodfail', url: `http://127.0.0.1:${remotePort}`, username: 'u', password: 'p123456' })
+  });
+  const server = await mk.json();
+
+  const sync = await (await fetch(`${BASE}/api/servers/${server.id}/sync`, { method: 'POST', headers })).json();
+  assert.equal(sync.success, false, 'sync should report failure');
+  assert.ok(sync.error, 'error message must be present');
+  mockBehavior.vodsPayload = null;
 });

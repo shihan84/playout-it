@@ -31,12 +31,70 @@ function parseStreamsPayload(data: any): any[] {
   throw new Error('Unrecognized Flussonic /streams response format');
 }
 
-export async function syncServerStreams(server: any) {
+// Follow `next` pagination cursors until the full inventory is collected.
+// Throws if pagination never terminates — an incomplete inventory must
+// never reach deletion reconciliation.
+async function fetchAllPages(server: any, url: string, maxPages = 50): Promise<any[]> {
+  const baseUrl = server.url.replace(/\/$/, '');
+  const pages: any[] = [];
+  let next: string | null = url;
+  let guard = 0;
+  while (next) {
+    if (guard++ >= maxPages) throw new Error(`Pagination did not complete within ${maxPages} pages`);
+    const pageUrl = next.startsWith('http') ? next : `${baseUrl}${next}`;
+    const response = await flussonicRequest('GET', pageUrl, server);
+    pages.push(response.data);
+    next = response.data && typeof response.data === 'object' ? (response.data.next || null) : null;
+  }
+  return pages;
+}
+
+// ---- Verified deletion policy -------------------------------------------
+// Local rows are only auto-deleted when ALL of these hold:
+//   1. The remote inventory is COMPLETE (all pages fetched).
+//   2. The removal count is within a conservative limit — large drops are
+//     treated as suspicious and reported as pendingRemovals instead.
+//   3. Each candidate name is absent in a SECOND independent fetch.
+const MAX_AUTO_REMOVALS = 10;
+const MAX_AUTO_REMOVAL_RATIO = 0.2;
+
+interface SyncResult {
+  addedCount: number;
+  removedCount: number;
+  skippedDeletions?: boolean;
+  pendingRemovals?: number;
+  error?: string;
+}
+
+// Confirm candidate deletions with a second full fetch. Only names absent
+// in BOTH inventories are eligible for deletion. `parser` converts one
+// page into a list of named items.
+async function confirmAbsent(
+  server: any,
+  url: string,
+  candidates: any[],
+  parser: (page: any) => any[]
+): Promise<any[]> {
+  try {
+    const pages = await fetchAllPages(server, url);
+    const present = new Set<string>();
+    for (const page of pages) {
+      for (const s of parser(page)) {
+        const n = typeof s === 'string' ? s : (s?.name ?? s?.prefix);
+        if (n) present.add(n);
+      }
+    }
+    return candidates.filter(c => !present.has(c.name));
+  } catch {
+    return []; // second fetch failed — delete nothing
+  }
+}
+
+export async function syncServerStreams(server: any): Promise<SyncResult> {
   const baseUrl = server.url.replace(/\/$/, '');
   const flussonicUrl = `${baseUrl}/flussonic/api/v3/streams`;
-  const response = await flussonicRequest('GET', flussonicUrl, server);
-
-  const streams = parseStreamsPayload(response.data);
+  const pages = await fetchAllPages(server, flussonicUrl);
+  const streams = pages.flatMap(p => parseStreamsPayload(p));
 
   let addedCount = 0;
   let removedCount = 0;
@@ -81,42 +139,56 @@ export async function syncServerStreams(server: any) {
     }
   }
 
-  // Remove deleted streams only when the remote list is trustworthy.
-  // Malformed payloads never reach this point (parse throws first), and an
-  // empty remote list with non-empty local state is treated as suspicious
-  // (partial response, auth regression) — deletions are skipped rather than
-  // wiping streams, assignments, videos and alerts.
-  if (streams.length === 0 && existingStreams.length > 0) {
-    console.warn(`[syncServerStreams] ${server.name}: remote returned 0 streams but ${existingStreams.length} local rows exist — skipping deletions (possible incomplete response)`);
-    return { addedCount, removedCount: 0, skippedDeletions: true };
+  // Verified deletion reconciliation. Malformed payloads never reach this
+  // point (parse throws). An empty remote list with non-empty local state,
+  // or a removal set exceeding the conservative limit, is treated as a
+  // possible incomplete response — deletions are skipped and reported.
+  const candidates = existingStreams.filter(e => !remoteStreamNames.has(e.name));
+
+  if (candidates.length === 0) return { addedCount, removedCount: 0 };
+  if (streams.length === 0) {
+    console.warn(`[syncServerStreams] ${server.name}: remote returned 0 streams but ${existingStreams.length} local rows exist — skipping deletions`);
+    return { addedCount, removedCount: 0, skippedDeletions: true, pendingRemovals: candidates.length };
+  }
+  if (candidates.length > MAX_AUTO_REMOVALS || candidates.length > existingStreams.length * MAX_AUTO_REMOVAL_RATIO) {
+    console.warn(`[syncServerStreams] ${server.name}: ${candidates.length}/${existingStreams.length} local streams missing remotely — exceeds auto-removal limit, reporting as pendingRemovals`);
+    return { addedCount, removedCount: 0, skippedDeletions: true, pendingRemovals: candidates.length };
   }
 
-  for (const existing of existingStreams) {
-    if (!remoteStreamNames.has(existing.name)) {
-      deleteStmt.run(existing.id);
-      removedCount++;
-    }
+  // Second independent fetch: only names absent in both inventories delete
+  const confirmed = await confirmAbsent(server, flussonicUrl, candidates, parseStreamsPayload);
+  for (const c of confirmed) {
+    deleteStmt.run(c.id);
+    removedCount++;
+  }
+  if (removedCount < candidates.length) {
+    console.log(`[syncServerStreams] ${server.name}: ${candidates.length - removedCount} candidate deletions rejected by second-fetch confirmation`);
   }
 
-  return { addedCount, removedCount };
+  return { addedCount, removedCount, pendingRemovals: candidates.length - removedCount || undefined };
 }
 
-export async function syncServerVods(server: any) {
+function parseVodsPayload(data: any): any[] {
+  if (Array.isArray(data)) return data;
+  if (data && Array.isArray(data.vods)) return data.vods;
+  if (data && typeof data === 'object') return parseObjectMap(data);
+  throw new Error('Unrecognized Flussonic /vods response format');
+}
+
+export async function syncServerVods(server: any): Promise<SyncResult> {
   const baseUrl = server.url.replace(/\/$/, '');
   const flussonicUrl = `${baseUrl}/flussonic/api/v3/vods`;
   try {
-    let response;
+    let pages: any[];
     try {
-      response = await flussonicRequest('GET', flussonicUrl, server);
-      console.log(`[syncServerVods] /vods response for ${server.name}:`, JSON.stringify(response.data).substring(0, 500));
+      pages = await fetchAllPages(server, flussonicUrl);
     } catch (e: any) {
       if (e.response && e.response.status === 404) {
         // Fallback to config API if /vods endpoint is not available
         const configUrl = `${baseUrl}/flussonic/api/v3/config`;
-        response = await flussonicRequest('GET', configUrl, server);
-        console.log(`[syncServerVods] /config response for ${server.name}:`, JSON.stringify(response.data.vods || {}).substring(0, 500));
+        const response = await flussonicRequest('GET', configUrl, server);
         if (response.data && response.data.vods) {
-          response.data = response.data.vods;
+          pages = [response.data.vods];
         } else {
           throw new Error('No VODs found in config');
         }
@@ -125,15 +197,7 @@ export async function syncServerVods(server: any) {
       }
     }
 
-    let vodsList: any[] = [];
-    if (Array.isArray(response.data)) {
-      vodsList = response.data;
-    } else if (response.data && Array.isArray(response.data.vods)) {
-      vodsList = response.data.vods;
-    } else if (response.data && typeof response.data === 'object') {
-      // Legacy config-shaped response: VOD names as keys
-      vodsList = parseObjectMap(response.data);
-    }
+    const vodsList = pages.flatMap(p => parseVodsPayload(p));
 
     let addedCount = 0;
     let removedCount = 0;
@@ -176,32 +240,41 @@ export async function syncServerVods(server: any) {
 
       const existingId = existingVodByName.get(name);
       if (existingId) {
-        updateStmt.run(JSON.stringify(paths), existingId);
+        // Names-only responses carry no path info — never overwrite
+        // existing storage paths with an empty array.
+        if (paths.length > 0) {
+          updateStmt.run(JSON.stringify(paths), existingId);
+        }
       } else {
         insertStmt.run(server.id, name, JSON.stringify(paths));
         addedCount++;
       }
     }
 
-    // Same safety rule as streams: never reconcile an empty remote list
-    // against non-empty local state.
-    if (vodsList.length === 0 && existingVods.length > 0) {
+    // Same verified-deletion policy as streams.
+    const candidates = existingVods.filter(e => !remoteVodNames.has(e.name));
+
+    if (candidates.length === 0) return { addedCount, removedCount: 0 };
+    if (vodsList.length === 0) {
       console.warn(`[syncServerVods] ${server.name}: remote returned 0 VODs but ${existingVods.length} local rows exist — skipping deletions`);
-      return { addedCount, removedCount: 0, skippedDeletions: true };
+      return { addedCount, removedCount: 0, skippedDeletions: true, pendingRemovals: candidates.length };
+    }
+    if (candidates.length > MAX_AUTO_REMOVALS || candidates.length > existingVods.length * MAX_AUTO_REMOVAL_RATIO) {
+      console.warn(`[syncServerVods] ${server.name}: ${candidates.length}/${existingVods.length} local VODs missing remotely — exceeds auto-removal limit, reporting as pendingRemovals`);
+      return { addedCount, removedCount: 0, skippedDeletions: true, pendingRemovals: candidates.length };
     }
 
-    // Remove deleted VODs
-    for (const existing of existingVods) {
-      if (!remoteVodNames.has(existing.name)) {
-        deleteStmt.run(existing.id);
-        removedCount++;
-      }
+    const confirmed = await confirmAbsent(server, flussonicUrl, candidates, parseVodsPayload);
+    for (const c of confirmed) {
+      deleteStmt.run(c.id);
+      removedCount++;
     }
 
-    return { addedCount, removedCount };
+    return { addedCount, removedCount, pendingRemovals: candidates.length - removedCount || undefined };
   } catch (error: any) {
     console.warn(`Failed to sync VODs for server ${server.name}:`, error.message);
-    return { addedCount: 0, removedCount: 0 };
+    // Explicit failure — callers must not treat this as "0 changes"
+    return { addedCount: 0, removedCount: 0, error: error.message };
   }
 }
 
@@ -241,12 +314,15 @@ export async function syncVodFilesFromRemote(vod: any, server: any) {
   }
 
   try {
-    let remoteFiles: any[] = [];
-
+    // Reject malformed responses BEFORE touching vod_files — an
+    // unrecognized shape must never be treated as "zero files".
+    let remoteFiles: any[];
     if (Array.isArray(response.data)) {
       remoteFiles = response.data;
     } else if (response.data && Array.isArray(response.data.files)) {
       remoteFiles = response.data.files;
+    } else {
+      throw new Error('Unrecognized VOD file listing response format');
     }
 
     db.transaction(() => {
