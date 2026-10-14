@@ -14,7 +14,7 @@ if (!passwordFile) {
 }
 let password: string;
 try {
-  password = readFileSync(passwordFile, 'utf8').replace(/\\r?\\n$/, '');
+  password = readFileSync(passwordFile, 'utf8').replace(/\r?\n$/, '');
 } catch {
   console.error('Cannot read ADMIN_PASSWORD_FILE. Verify the file exists and is readable.');
   process.exit(1);
@@ -39,15 +39,15 @@ try {
     console.error('Users table is missing. Initialize the application schema before provisioning.');
     process.exitCode = 1;
   } else {
-  const users = db.prepare('SELECT COUNT(*) AS count FROM users').get() as { count: number };
-  if (users.count !== 0) {
-    console.error('Provisioning refused: user accounts already exist.');
-    process.exitCode = 1;
-  } else {
-    const hash = bcrypt.hashSync(password, 12);
-    db.prepare('INSERT INTO users (username, password_hash, email, role) VALUES (?, ?, ?, ?)').run(username, hash, email, 'admin');
-    console.log('Initial administrator provisioned. Password was not printed.');
-  }
+    const users = db.prepare('SELECT COUNT(*) AS count FROM users').get() as { count: number };
+    if (users.count !== 0) {
+      console.error('Provisioning refused: user accounts already exist.');
+      process.exitCode = 1;
+    } else {
+      const hash = bcrypt.hashSync(password, 12);
+      db.prepare('INSERT INTO users (username, password_hash, email, role) VALUES (?, ?, ?, ?)').run(username, hash, email, 'admin');
+      console.log('Initial administrator provisioned. Password was not printed.');
+    }
   }
 } finally {
   db.close();
