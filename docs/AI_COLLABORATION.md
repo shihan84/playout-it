@@ -187,3 +187,36 @@ User requested consecutive development phases with Devin staging verification af
 **Remaining risks:** `_vod` resolution adds 1–2 probe GETs per write op (negligible); server-offline paths default to `_vod`; qs/esbuild vulns pending upstream-compatible bumps.
 
 **Phase 1B scope ready:** multi-server connectivity, sync reliability, per-server health monitoring, error handling — per `docs/PHASE1B_MULTISERVER_HANDOFF.md`. Recommend mock/isolated staging Flussonic for further tests; no production modifications.
+
+## Devin status — Phase 1B branch created + multi-server audit — 2026-10-14
+
+**Branch:** `feature/phase-1b-multiserver` created from `0591516` (approved 1A baseline + companion-VOD tests). Not merged; no PR yet.
+
+**Companion-VOD compat test added (test #9, integration):** mock Flussonic exposes `legacy-stream` VOD only under the same name and `new-stream` only under `new-stream_vod`. Verified resolver probes `_vod` first, falls back to legacy, and never probes legacy after a `_vod` hit. 9/9 integration + 6/6 regression pass.
+
+### Multi-server audit findings (sync.ts / watchdog.ts)
+
+1. **Sync wipe risk (high):** `syncServerStreams`/`syncServerVods` delete every local row absent from the remote response. A partial/empty/malformed remote response (network blip, auth change) wipes local state — and stream `id` churn orphans `videos`, `user_streams`, `telegram_alerts` rows keyed by it. Observed live: a locally-created stream was auto-removed when its remote PUT silently failed.
+2. **No auto-sync overlap guard:** `checkStreams` has `isChecking`, the auto-sync timer does not. Serial per-server sync with 30s timeouts can exceed the interval at scale → overlapping syncs.
+3. **Sequential everything:** watchdog iterates servers serially — one hung server (30s timeout) delays the whole cycle. Same for auto-sync loop.
+4. **No persisted per-server health:** status is probed on demand in `GET /api/servers`; no `last_seen`, `last_error`, `latency`, or failure counter — errors exist only in logs.
+5. **No retry/backoff/circuit breaker:** offline servers cost a full timeout every interval forever (observed 15s DNS-error spam); only a legacy 401/403 auth retry exists.
+6. **N+1 VOD detail fetch:** `syncServerVods` does one GET per VOD when the remote returns a string array.
+7. **Watchdog self-HTTP call** for Telegram alerts (`POST localhost:port/api/telegram-alerts/send`) inside the checking loop — adds latency; should call the service directly.
+8. **Duplicate names OK** across servers (scoped by server_id) but stream-id instability on delete+re-add breaks client assignments.
+9. **WS broadcast is all-or-nothing:** every client receives the full stream list; no per-user scoping (carry-over).
+
+### Proposed Phase 1B tasks
+
+1. Persist per-server health: `servers.last_seen_at`, `last_error`, `consecutive_failures`, `latency_ms`; update in watchdog + sync; surface in `/api/servers` and UI.
+2. Safe sync: abort deletion reconciliation when the remote list is empty/unexpected while local rows exist; upsert by `UNIQUE(server_id, name)` instead of delete+insert so stream ids (and assignments) survive.
+3. Sync/watchdog concurrency: overlap guard on auto-sync; bounded parallelism (cap ~4 servers) for both watchdog checks and sync; per-server timeout.
+4. Retry policy: exponential backoff / circuit breaker for failing servers; keep the 401 legacy-auth retry.
+5. Per-server sync control + `GET /api/servers/:id/health`; manual sync button already exists — verify it reports per-server errors.
+6. Replace watchdog self-HTTP Telegram call with direct service call.
+7. Fix syncServerVods N+1 (skip detail fetch or batch).
+8. Tests: sync reconciliation against array/`{streams:[]}`/object-map payloads; empty-response no-wipe guard; upsert preserves ids; offline server doesn't block others; concurrent-run overlap guard; 50-server sync cycle timing vs interval.
+
+### Phase 1B acceptance gates
+
+- Lint + all tests green; sync cycle with 50 mock servers completes < interval; a server returning `{}` never deletes local rows; client stream assignments survive sync churn; per-server health visible via API.
