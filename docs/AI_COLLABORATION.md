@@ -445,3 +445,21 @@ User requested consecutive development phases with Devin staging verification af
 4. **Rollout plan:** `docs/MERGE_AND_ROLLOUT_PLAN.md` — merge order, pre-deploy gates, deploy steps, rollback, 24h monitoring, non-goals.
 
 **Status:** PR #2 draft, CI green, awaiting CodeRabbit output + human review. No merge/deploy/production changes; Phase 2 on hold.
+
+## Devin status — PR #2 CodeRabbit review resolved — 2026-10-14
+
+**Commit:** `9a93d38` on `feature/phase-1b-multiserver`
+
+**CodeRabbit findings — all addressed:**
+- `next` is an opaque cursor → echoed as `?cursor=` (URL-shaped cursors still origin/path-confined; loop+page caps kept). Was a major correctness bug — real paginated servers would have failed sync.
+- `POST /api/telegram-alerts/send` → admin-only (client could spoof alerts + suppress watchdog via last_alert_sent)
+- Dedupe in one transaction; INSERT OR IGNORE re-point for assignments/alerts (UNIQUE collision safe); no swallowed UPDATEs
+- Child protection re-checked inside the delete transaction (late-protected → protectedRemovals)
+- recordServerFailure once per request (was per-attempt → early backoff)
+- Interval skip applies only to overridden servers; tick = min(global, min override)
+- Bonus fix: repeated record across pages → UNIQUE violation (map updated post-insert)
+- 4 doc findings fixed (checklist step, staging seed 10 streams + backoff precondition, Phase 2 backup prereq)
+
+**Gate:** lint clean · **40/40 tests** · build 134 kB · audit 2 non-critical · **CI green on 1B branch** (run 38561226569 — workflow extended to cover this branch + full suite).
+
+**Acceptance summaries posted on PR #1 and PR #2.** Merge order confirmed: PR #1 → main, then retarget + merge PR #2. Awaiting explicit merge approval.
