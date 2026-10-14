@@ -1,0 +1,113 @@
+export const schema = `
+  CREATE TABLE IF NOT EXISTS servers (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL,
+    url TEXT NOT NULL,
+    api_key TEXT NOT NULL,
+    username TEXT,
+    password TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS streams (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    server_id INTEGER,
+    name TEXT NOT NULL,
+    live_url TEXT NOT NULL,
+    playlist_url TEXT NOT NULL,
+    push_urls TEXT DEFAULT '[]',
+    push_status TEXT DEFAULT '[]',
+    status TEXT DEFAULT 'unknown',
+    input_status TEXT DEFAULT 'unknown',
+    source_type TEXT DEFAULT 'unknown',
+    uptime INTEGER DEFAULT 0,
+    last_checked DATETIME,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(server_id) REFERENCES servers(id) ON DELETE SET NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS vods (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    server_id INTEGER,
+    name TEXT NOT NULL,
+    paths TEXT NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(server_id) REFERENCES servers(id) ON DELETE SET NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS videos (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    stream_id INTEGER NOT NULL,
+    filename TEXT NOT NULL,
+    size INTEGER NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(stream_id) REFERENCES streams(id) ON DELETE CASCADE
+  );
+
+  CREATE TABLE IF NOT EXISTS vod_files (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    vod_id INTEGER NOT NULL,
+    filename TEXT NOT NULL,
+    size INTEGER NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(vod_id) REFERENCES vods(id) ON DELETE CASCADE
+  );
+
+  CREATE TABLE IF NOT EXISTS settings (
+    key TEXT PRIMARY KEY,
+    value TEXT
+  );
+
+  CREATE TABLE IF NOT EXISTS users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,
+    email TEXT,
+    role TEXT NOT NULL DEFAULT 'client',
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS user_stream_assignments (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    stream_id INTEGER NOT NULL,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY(stream_id) REFERENCES streams(id) ON DELETE CASCADE,
+    UNIQUE(user_id, stream_id)
+  );
+
+  CREATE TABLE IF NOT EXISTS blocked_ips (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ip_address TEXT NOT NULL UNIQUE,
+    reason TEXT,
+    blocked_by INTEGER,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(blocked_by) REFERENCES users(id) ON DELETE SET NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS telegram_alerts (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    stream_id INTEGER NOT NULL,
+    telegram_chat_id TEXT NOT NULL,
+    alert_enabled INTEGER DEFAULT 1,
+    downtime_threshold INTEGER DEFAULT 30,
+    last_alert_sent DATETIME,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY(stream_id) REFERENCES streams(id) ON DELETE CASCADE,
+    UNIQUE(user_id, stream_id)
+  );
+
+  CREATE TABLE IF NOT EXISTS telegram_alert_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    telegram_alert_id INTEGER NOT NULL,
+    alert_type TEXT NOT NULL,
+    message TEXT,
+    sent_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    success INTEGER DEFAULT 1,
+    error_message TEXT,
+    FOREIGN KEY(telegram_alert_id) REFERENCES telegram_alerts(id) ON DELETE CASCADE
+  );
+`;

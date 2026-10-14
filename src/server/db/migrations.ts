@@ -1,0 +1,165 @@
+import bcrypt from 'bcrypt';
+import { config } from '../config';
+
+export function runMigrations(db: any) {
+  // Migration for new columns
+  try {
+    db.prepare('ALTER TABLE streams ADD COLUMN input_status TEXT DEFAULT "unknown"').run();
+  } catch (e) {}
+  try {
+    db.prepare('ALTER TABLE streams ADD COLUMN source_type TEXT DEFAULT "unknown"').run();
+  } catch (e) {}
+  try {
+    db.prepare('ALTER TABLE streams ADD COLUMN uptime INTEGER DEFAULT 0').run();
+  } catch (e) {}
+
+  // Initialize settings if empty
+  try {
+    db.exec('ALTER TABLE streams ADD COLUMN push_urls TEXT DEFAULT "[]"');
+  } catch (e) {
+    // Column already exists
+  }
+
+  try {
+    db.exec('ALTER TABLE streams ADD COLUMN push_status TEXT DEFAULT "[]"');
+  } catch (e) {
+    // Column already exists
+  }
+
+  try {
+    db.exec("ALTER TABLE videos ADD COLUMN sort_order INTEGER DEFAULT 0");
+    db.exec("ALTER TABLE videos ADD COLUMN duration INTEGER DEFAULT 0");
+    // Initialize sort_order from existing row order
+    const vids = db.prepare('SELECT id FROM videos ORDER BY created_at ASC').all() as any[];
+    vids.forEach((v, i) => db.prepare('UPDATE videos SET sort_order = ? WHERE id = ?').run(i, v.id));
+  } catch (e) { /* Column already exists */ }
+
+  try {
+    db.exec("ALTER TABLE streams ADD COLUMN inputs TEXT DEFAULT '[]'");
+    const streams = db.prepare('SELECT * FROM streams').all() as any[];
+    const updateStmt = db.prepare('UPDATE streams SET inputs = ? WHERE id = ?');
+    for (const s of streams) {
+      const inputs = [];
+      if (s.live_url) inputs.push(s.live_url);
+      if (s.playlist_url) inputs.push(s.playlist_url);
+      updateStmt.run(JSON.stringify(inputs), s.id);
+    }
+  } catch (e) {
+    // Column already exists
+  }
+
+  // Add username/password columns to servers and backfill from api_key
+  try {
+    db.exec('ALTER TABLE servers ADD COLUMN username TEXT');
+    db.exec('ALTER TABLE servers ADD COLUMN password TEXT');
+  } catch (e) {
+    // Columns already exist
+  }
+  try {
+    const servers = db.prepare('SELECT id, api_key, username, password FROM servers').all() as any[];
+    const updateCreds = db.prepare('UPDATE servers SET username = ?, password = ? WHERE id = ?');
+    for (const s of servers) {
+      if (!s.username || !s.password) {
+        if (s.api_key && s.api_key.includes(':')) {
+          const [u, ...rest] = s.api_key.split(':');
+          updateCreds.run(u, rest.join(':'), s.id);
+        } else {
+          updateCreds.run('flussonic', s.api_key || '', s.id);
+        }
+      }
+    }
+  } catch (e) {}
+
+  const telegramEnabled = db.prepare('SELECT value FROM settings WHERE key = ?').get('telegram_enabled');
+  if (!telegramEnabled) {
+    db.prepare('INSERT INTO settings (key, value) VALUES (?, ?)').run('telegram_enabled', 'false');
+  }
+
+  const telegramBotToken = db.prepare('SELECT value FROM settings WHERE key = ?').get('telegram_bot_token');
+  if (!telegramBotToken) {
+    db.prepare('INSERT INTO settings (key, value) VALUES (?, ?)').run('telegram_bot_token', '');
+    db.prepare('INSERT INTO settings (key, value) VALUES (?, ?)').run('telegram_chat_id', '');
+    db.prepare('INSERT INTO settings (key, value) VALUES (?, ?)').run('watchdog_interval', '5');
+  } else {
+    // Update existing default from 60 to 5 for better real-time updates
+    db.exec("UPDATE settings SET value = '5' WHERE key = 'watchdog_interval' AND value = '60'");
+  }
+
+  const autoSyncEnabled = db.prepare('SELECT value FROM settings WHERE key = ?').get('auto_sync_enabled');
+  if (!autoSyncEnabled) {
+    db.prepare('INSERT INTO settings (key, value) VALUES (?, ?)').run('auto_sync_enabled', 'false');
+    db.prepare('INSERT INTO settings (key, value) VALUES (?, ?)').run('auto_sync_interval', '60');
+  }
+
+  // Create default admin user if not exists
+  const adminUser = db.prepare('SELECT * FROM users WHERE username = ?').get('admin');
+  if (!adminUser) {
+    const defaultPassword = 'admin123';
+    const passwordHash = bcrypt.hashSync(defaultPassword, config.saltRounds);
+    db.prepare('INSERT INTO users (username, password_hash, email, role) VALUES (?, ?, ?, ?)').run(
+      'admin',
+      passwordHash,
+      'admin@localhost',
+      'admin'
+    );
+    console.log('Default admin user created. Username: admin, Password: admin123');
+  }
+
+  // Migration to make server_id nullable and add ON DELETE SET NULL
+  migrateNullableServerId(db, 'streams');
+  migrateNullableServerId(db, 'vods');
+}
+
+function migrateNullableServerId(db: any, tableName: string) {
+  try {
+    const tableInfo = db.prepare(`PRAGMA table_info(${tableName})`).all() as any[];
+    const serverIdCol = tableInfo.find(c => c.name === 'server_id');
+    if (serverIdCol && serverIdCol.notnull === 1) {
+      console.log(`Migrating ${tableName} table to allow NULL server_id...`);
+      db.pragma('foreign_keys = OFF');
+      db.transaction(() => {
+        if (tableName === 'streams') {
+          db.exec(`
+            CREATE TABLE streams_new (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              server_id INTEGER,
+              name TEXT NOT NULL,
+              live_url TEXT NOT NULL,
+              playlist_url TEXT NOT NULL,
+              push_urls TEXT DEFAULT '[]',
+              push_status TEXT DEFAULT '[]',
+              status TEXT DEFAULT 'unknown',
+              last_checked DATETIME,
+              created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+              inputs TEXT DEFAULT '[]',
+              FOREIGN KEY(server_id) REFERENCES servers(id) ON DELETE SET NULL
+            );
+            INSERT INTO streams_new (id, server_id, name, live_url, playlist_url, push_urls, push_status, status, last_checked, created_at, inputs)
+            SELECT id, server_id, name, live_url, playlist_url, push_urls, push_status, status, last_checked, created_at, inputs FROM streams;
+            DROP TABLE streams;
+            ALTER TABLE streams_new RENAME TO streams;
+          `);
+        } else if (tableName === 'vods') {
+          db.exec(`
+            CREATE TABLE vods_new (
+              id INTEGER PRIMARY KEY AUTOINCREMENT,
+              server_id INTEGER,
+              name TEXT NOT NULL,
+              paths TEXT NOT NULL,
+              created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+              FOREIGN KEY(server_id) REFERENCES servers(id) ON DELETE SET NULL
+            );
+            INSERT INTO vods_new (id, server_id, name, paths, created_at)
+            SELECT id, server_id, name, paths, created_at FROM vods;
+            DROP TABLE vods;
+            ALTER TABLE vods_new RENAME TO vods;
+          `);
+        }
+      })();
+      db.pragma('foreign_keys = ON');
+    }
+  } catch (e) {
+    console.error(`Failed to migrate ${tableName} table:`, e);
+    db.pragma('foreign_keys = ON');
+  }
+}

@@ -1,0 +1,491 @@
+import { Router } from 'express';
+import multer from 'multer';
+import os from 'os';
+import fs from 'fs';
+import { db } from '../db';
+import { flussonicRequest } from '../services/flussonic';
+import { updatePlaylistFile } from '../services/playlist';
+import { broadcastStreamsUpdate } from '../websocket';
+import { parseStream } from '../utils/streams';
+import { authenticateToken, requireAdmin, requireStreamAccess, AuthRequest } from '../middleware/auth';
+
+const upload = multer({
+  dest: os.tmpdir(),
+  limits: { fileSize: 1000 * 1024 * 1024 * 1024 }
+});
+
+const router = Router();
+
+router.get('/', authenticateToken, (req: AuthRequest, res) => {
+  try {
+    let streams;
+    if (req.user.role === 'admin') {
+      streams = db.prepare(`
+        SELECT streams.*, servers.name as server_name, servers.url as server_url 
+        FROM streams 
+        LEFT JOIN servers ON streams.server_id = servers.id
+      `).all();
+    } else {
+      streams = db.prepare(`
+        SELECT streams.*, servers.name as server_name, servers.url as server_url 
+        FROM streams 
+        LEFT JOIN servers ON streams.server_id = servers.id
+        JOIN user_stream_assignments ON streams.id = user_stream_assignments.stream_id
+        WHERE user_stream_assignments.user_id = ?
+      `).all(req.user.id);
+    }
+
+    const parsedStreams = streams.map(parseStream);
+    res.json(parsedStreams);
+  } catch (error: any) {
+    console.error('Failed to fetch streams:', error);
+    res.status(500).json({ error: 'Failed to fetch streams' });
+  }
+});
+
+router.post('/', authenticateToken, requireAdmin, async (req, res) => {
+  const { server_id, name, inputs, push_urls } = req.body;
+
+  // Input validation
+  if (!server_id || typeof server_id !== 'number') {
+    return res.status(400).json({ error: 'Valid server ID is required' });
+  }
+  if (!name || typeof name !== 'string' || name.trim().length === 0) {
+    return res.status(400).json({ error: 'Stream name is required' });
+  }
+  if (!inputs || !Array.isArray(inputs) || inputs.length === 0) {
+    return res.status(400).json({ error: 'At least one input URL is required' });
+  }
+  if (push_urls && !Array.isArray(push_urls)) {
+    return res.status(400).json({ error: 'Push URLs must be an array' });
+  }
+
+  const pushes = (push_urls || []).map((url: string) => ({ url }));
+  const streamInputs = (inputs || []).map((url: string) => ({ url }));
+
+  try {
+    const server = db.prepare('SELECT * FROM servers WHERE id = ?').get(server_id) as any;
+    if (!server) return res.status(404).json({ error: 'Server not found' });
+
+    const baseUrl = server.url.replace(/\/$/, '');
+    // Automatically create a VOD folder for this stream
+    const vodName = name;
+    const vodPath = `/storage/${vodName}`;
+
+    // Check if VOD already exists in DB
+    const existingVod = db.prepare('SELECT * FROM vods WHERE name = ? AND server_id = ?').get(vodName, server_id);
+    if (!existingVod) {
+      const vodPayload = {
+        storages: [{ url: vodPath }]
+      };
+      const flussonicVodUrl = `${baseUrl}/flussonic/api/v3/vods/${encodeURIComponent(vodName)}`;
+      await flussonicRequest('PUT', flussonicVodUrl, server, vodPayload)
+        .catch(e => {
+          console.warn(`Flussonic create VOD error for ${vodName}:`, e.message);
+          // Try alternative payload if first fails
+          return flussonicRequest('PUT', flussonicVodUrl, server, { storage: vodPath })
+            .catch(e2 => console.warn('Alternative VOD create failed:', e2.message));
+        });
+
+      db.prepare('INSERT INTO vods (server_id, name, paths) VALUES (?, ?, ?)').run(server_id, vodName, JSON.stringify([vodPath]));
+    }
+
+    // Configure stream on Flussonic
+    const flussonicUrl = `${baseUrl}/flussonic/api/v3/streams/${encodeURIComponent(name)}`;
+
+    const payload: any = {
+      inputs: streamInputs
+    };
+    if (pushes.length > 0) {
+      payload.pushes = pushes;
+    }
+
+    await flussonicRequest('PUT', flussonicUrl, server, payload)
+      .catch(e => console.warn('Flussonic create stream error (ignored for preview):', e.message));
+
+    const stmt = db.prepare('INSERT INTO streams (server_id, name, live_url, playlist_url, push_urls, inputs) VALUES (?, ?, ?, ?, ?, ?)');
+    // Keep live_url and playlist_url empty for backward compatibility in DB, use inputs
+    const info = stmt.run(server_id, name.trim(), '', '', JSON.stringify(push_urls || []), JSON.stringify(inputs || []));
+
+    broadcastStreamsUpdate();
+    res.json({ id: info.lastInsertRowid, server_id, name, inputs, push_urls });
+  } catch (error: any) {
+    console.error('Error creating stream on Flussonic:', error.message);
+    res.status(500).json({ error: 'Failed to configure stream on Flussonic' });
+  }
+});
+
+router.put('/:id', authenticateToken, requireAdmin, async (req, res) => {
+  const { server_id, name, inputs, push_urls } = req.body;
+
+  // Input validation
+  if (!server_id || typeof server_id !== 'number') {
+    return res.status(400).json({ error: 'Valid server ID is required' });
+  }
+  if (!name || typeof name !== 'string' || name.trim().length === 0) {
+    return res.status(400).json({ error: 'Stream name is required' });
+  }
+  if (!inputs || !Array.isArray(inputs) || inputs.length === 0) {
+    return res.status(400).json({ error: 'At least one input URL is required' });
+  }
+  if (push_urls && !Array.isArray(push_urls)) {
+    return res.status(400).json({ error: 'Push URLs must be an array' });
+  }
+
+  const pushes = (push_urls || []).map((url: string) => ({ url }));
+  const streamInputs = (inputs || []).map((url: string) => ({ url }));
+
+  try {
+    const stream = db.prepare('SELECT * FROM streams WHERE id = ?').get(req.params.id) as any;
+    if (!stream) return res.status(404).json({ error: 'Stream not found' });
+
+    const server = db.prepare('SELECT * FROM servers WHERE id = ?').get(server_id) as any;
+    if (!server) return res.status(404).json({ error: 'Server not found' });
+
+    // If name changed, we might need to delete old one and create new, but for simplicity let's just update the new one
+    if (stream.name !== name) {
+      const oldServer = db.prepare('SELECT * FROM servers WHERE id = ?').get(stream.server_id) as any;
+      if (oldServer) {
+        const oldFlussonicUrl = `${oldServer.url}/flussonic/api/v3/streams/${encodeURIComponent(stream.name)}`;
+        await flussonicRequest('DELETE', oldFlussonicUrl, oldServer)
+          .catch(e => console.error('Flussonic delete error (ignored):', e.message));
+      }
+    }
+
+    // Automatically create a VOD folder for this stream if it doesn't exist
+    const vodName = name;
+    const vodPath = `/storage/${vodName}`;
+    const existingVod = db.prepare('SELECT * FROM vods WHERE name = ? AND server_id = ?').get(vodName, server_id);
+    if (!existingVod) {
+      const vodPayload = {
+        storages: [{ url: vodPath }]
+      };
+      const flussonicVodUrl = `${server.url}/flussonic/api/v3/vods/${encodeURIComponent(vodName)}`;
+      await flussonicRequest('PUT', flussonicVodUrl, server, vodPayload)
+        .catch(e => console.warn('Flussonic create VOD error (ignored for preview):', e.message));
+
+      db.prepare('INSERT INTO vods (server_id, name, paths) VALUES (?, ?, ?)').run(server_id, vodName, JSON.stringify([vodPath]));
+    }
+
+    const flussonicUrl = `${server.url}/flussonic/api/v3/streams/${encodeURIComponent(name)}`;
+    const payload: any = {
+      name,
+      inputs: streamInputs
+    };
+    if (pushes.length > 0) {
+      payload.pushes = pushes;
+    }
+
+    await flussonicRequest('PUT', flussonicUrl, server, payload)
+      .catch(e => console.warn('Flussonic update stream error (ignored for preview):', e.message));
+
+    const stmt = db.prepare('UPDATE streams SET server_id = ?, name = ?, inputs = ?, push_urls = ? WHERE id = ?');
+    stmt.run(server_id, name.trim(), JSON.stringify(inputs || []), JSON.stringify(push_urls || []), req.params.id);
+
+    broadcastStreamsUpdate();
+    res.json({ id: req.params.id, server_id, name, inputs, push_urls });
+  } catch (error: any) {
+    console.error('Error updating stream on Flussonic:', error.message);
+    res.status(500).json({ error: 'Failed to update stream on Flussonic' });
+  }
+});
+
+router.delete('/:id', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const stream = db.prepare('SELECT * FROM streams WHERE id = ?').get(req.params.id) as any;
+    if (stream) {
+      const server = db.prepare('SELECT * FROM servers WHERE id = ?').get(stream.server_id) as any;
+      if (server) {
+        // Delete from Flussonic
+        const flussonicUrl = `${server.url}/flussonic/api/v3/streams/${encodeURIComponent(stream.name)}`;
+        await flussonicRequest('DELETE', flussonicUrl, server)
+          .catch(e => console.error('Flussonic delete error (ignored):', e.message));
+
+        // Also try to delete the associated VOD location if it exists
+        const vodUrl = `${server.url}/flussonic/api/v3/vods/${encodeURIComponent(stream.name)}`;
+        await flussonicRequest('DELETE', vodUrl, server)
+          .catch(e => console.error('Flussonic delete VOD error (ignored):', e.message));
+      }
+    }
+    db.prepare('DELETE FROM streams WHERE id = ?').run(req.params.id);
+    if (stream) {
+      db.prepare('DELETE FROM vods WHERE name = ? AND server_id = ?').run(stream.name, stream.server_id);
+    }
+    res.json({ success: true });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+router.get('/:id/details', authenticateToken, requireStreamAccess, async (req, res) => {
+  try {
+    const stream = db.prepare(`
+      SELECT streams.*, servers.name as server_name, servers.url as server_url, servers.api_key, servers.username, servers.password
+      FROM streams 
+      LEFT JOIN servers ON streams.server_id = servers.id
+      WHERE streams.id = ?
+    `).get(req.params.id) as any;
+
+    if (!stream) return res.status(404).json({ error: 'Stream not found' });
+
+    try {
+      stream.push_urls = JSON.parse(stream.push_urls || '[]');
+    } catch (e) {
+      stream.push_urls = [];
+    }
+
+    try {
+      stream.push_status = JSON.parse(stream.push_status || '[]');
+    } catch (e) {
+      stream.push_status = [];
+    }
+
+    try {
+      stream.inputs = JSON.parse(stream.inputs || '[]');
+    } catch (e) {
+      stream.inputs = [];
+    }
+
+    if (stream.server_url && stream.api_key) {
+      try {
+        const flussonicUrl = `${stream.server_url}/flussonic/api/v3/streams/${encodeURIComponent(stream.name)}`;
+        const response = await flussonicRequest('GET', flussonicUrl, { api_key: stream.api_key, username: stream.username, password: stream.password });
+        const fData = response.data;
+
+        // Use Flussonic real inputs (has url field)
+        const flussonicInputs: any[] = fData.inputs || [];
+        const configInputs: any[] = fData.config_on_disk?.inputs || [];
+        stream.flussonic_inputs = flussonicInputs;
+
+        // Derive source_type from real Flussonic inputs
+        const firstInput = flussonicInputs[0] || configInputs[0];
+        const inputUrl: string = firstInput?.url || '';
+        if (inputUrl.startsWith('publish://')) {
+          stream.source_type = 'publish';
+        } else if (inputUrl.startsWith('rtmp://') || inputUrl.startsWith('rtsp://') || inputUrl.startsWith('srt://') || inputUrl.startsWith('udp://') || inputUrl.startsWith('http')) {
+          stream.source_type = 'live';
+        } else if (inputUrl.includes('.m3u8') || inputUrl.includes('.m3u')) {
+          stream.source_type = 'playlist';
+        } else if (inputUrl.includes('.mp4') || inputUrl.includes('.mkv') || inputUrl.startsWith('file://')) {
+          stream.source_type = 'static';
+        } else if (inputUrl) {
+          stream.source_type = 'live';
+        } else {
+          stream.source_type = 'unknown';
+        }
+
+        // Use Flussonic real stats
+        const fStats = fData.stats || {};
+        stream.flussonic_stats = fStats;
+        stream.status = (fStats.alive === true || fStats.running === true || fStats.status === 'running') ? 'online' : 'offline';
+        stream.input_status = flussonicInputs.length > 0 && flussonicInputs[0].stats ? 'online' : 'offline';
+        stream.bitrate = fStats.bitrate || 0;
+        stream.client_count = fStats.client_count || 0;
+        stream.uptime = fStats.lifetime ? Math.floor(fStats.lifetime / 1000) : 0;
+        stream.published_via = fStats.published_via || null;
+        stream.published_from = fStats.published_from || null;
+
+        // Real push statuses from Flussonic
+        const fPushes: any[] = fData.pushes || [];
+        stream.flussonic_pushes = fPushes;
+
+        // Media info (codec, resolution)
+        stream.media_info = fStats.media_info || flussonicInputs[0]?.stats?.media_info || null;
+      } catch (e: any) {
+        stream.flussonic_error = e.message;
+        if (e.response && e.response.status === 404) {
+          stream.source_type = stream.source_type || 'unknown';
+          stream.status = 'offline';
+          stream.flussonic_pushes = stream.push_urls.map((url: string) => ({ url, status: 'offline' }));
+        } else {
+          stream.source_type = stream.source_type || 'unknown';
+          stream.flussonic_pushes = stream.push_urls.map((url: string) => ({ url, status: 'unknown' }));
+        }
+      }
+    } else {
+      stream.source_type = stream.source_type || 'unknown';
+      stream.flussonic_pushes = stream.push_urls.map((url: string) => ({ url, status: 'unknown' }));
+    }
+
+    delete stream.api_key;
+    delete stream.username;
+    delete stream.password;
+    res.json(stream);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Stream VOD Videos
+router.get('/:id/videos', authenticateToken, requireStreamAccess, (req, res) => {
+  const stream = db.prepare('SELECT id FROM streams WHERE id = ?').get(req.params.id) as any;
+  if (!stream) return res.status(404).json({ error: 'Stream not found' });
+
+  const videos = db.prepare('SELECT id, filename as name, size, duration, sort_order, created_at FROM videos WHERE stream_id = ? ORDER BY sort_order ASC, created_at ASC').all(req.params.id);
+  res.json(videos);
+});
+
+// Reorder playlist
+router.put('/:id/videos/order', authenticateToken, requireStreamAccess, (req, res) => {
+  const { order } = req.body; // array of video ids in new order
+  if (!Array.isArray(order)) return res.status(400).json({ error: 'order must be an array of ids' });
+  const stream = db.prepare('SELECT * FROM streams WHERE id = ?').get(req.params.id) as any;
+  if (!stream) return res.status(404).json({ error: 'Stream not found' });
+  const update = db.prepare('UPDATE videos SET sort_order = ? WHERE id = ? AND stream_id = ?');
+  db.transaction(() => { order.forEach((id: number, i: number) => update.run(i, id, stream.id)); })();
+  // Regenerate playlist with new order
+  updatePlaylistFile(stream).catch(e => console.warn('Playlist update after reorder:', e.message));
+  res.json({ success: true });
+});
+
+// Update video duration
+router.patch('/:id/videos/:videoId/duration', authenticateToken, requireStreamAccess, (req, res) => {
+  const { duration } = req.body;
+  db.prepare('UPDATE videos SET duration = ? WHERE id = ? AND stream_id = ?').run(duration || 0, req.params.videoId, req.params.id);
+  res.json({ success: true });
+});
+
+router.post('/:id/videos', authenticateToken, requireStreamAccess, upload.single('video'), async (req, res) => {
+  if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
+
+  const stream = db.prepare('SELECT * FROM streams WHERE id = ?').get(req.params.id) as any;
+  if (!stream) {
+    fs.unlinkSync(req.file.path);
+    return res.status(404).json({ error: 'Stream not found' });
+  }
+
+  try {
+    const server = db.prepare('SELECT * FROM servers WHERE id = ?').get(stream.server_id) as any;
+    if (!server) throw new Error('Server not found');
+
+    // Upload video to Flussonic
+    const uploadUrl = `${server.url}/flussonic/api/v3/vods/${encodeURIComponent(stream.name)}/storages/0/files/${req.file.originalname}`;
+    const fileBuffer = fs.readFileSync(req.file.path);
+
+    try {
+      await flussonicRequest('PUT', uploadUrl, server, fileBuffer);
+    } catch (uploadError: any) {
+      if (uploadError.response && uploadError.response.status === 404) {
+        // VOD doesn't exist, create it
+        console.log(`VOD ${stream.name} not found, creating it...`);
+        const createVodUrl = `${server.url}/flussonic/api/v3/vods/${encodeURIComponent(stream.name)}`;
+        await flussonicRequest('PUT', createVodUrl, server, {
+          storages: [{ url: `/storage/vods/${stream.name}` }]
+        });
+
+        // Also save it to our database so it shows up in VODs page
+        db.prepare('INSERT INTO vods (server_id, name, paths) VALUES (?, ?, ?)').run(server.id, stream.name, JSON.stringify([`/storage/vods/${stream.name}`]));
+
+        // Try uploading again
+        await flussonicRequest('PUT', uploadUrl, server, fileBuffer);
+      } else {
+        throw uploadError;
+      }
+    }
+    console.log(`Video uploaded to Flussonic VOD: ${stream.name}/${req.file.originalname}`);
+
+    // Insert into database
+    db.prepare('INSERT INTO videos (stream_id, filename, size) VALUES (?, ?, ?)').run(stream.id, req.file.originalname, req.file.size);
+
+    await updatePlaylistFile(stream);
+
+    res.json({ success: true, filename: req.file.originalname });
+  } catch (error: any) {
+    console.error('Failed to upload video to Flussonic:', error.message);
+    res.status(500).json({ error: 'Failed to upload video to Flussonic' });
+  } finally {
+    // Clean up temp file
+    if (fs.existsSync(req.file.path)) {
+      fs.unlinkSync(req.file.path);
+    }
+  }
+});
+
+router.delete('/:id/videos/:filename', authenticateToken, requireStreamAccess, async (req, res) => {
+  const stream = db.prepare('SELECT * FROM streams WHERE id = ?').get(req.params.id) as any;
+  if (!stream) return res.status(404).json({ error: 'Stream not found' });
+
+  const video = db.prepare('SELECT * FROM videos WHERE stream_id = ? AND filename = ?').get(stream.id, req.params.filename) as any;
+  if (!video) return res.status(404).json({ error: 'File not found' });
+
+  try {
+    const server = db.prepare('SELECT * FROM servers WHERE id = ?').get(stream.server_id) as any;
+    if (server) {
+      // Delete video from Flussonic
+      const deleteUrl = `${server.url}/flussonic/api/v3/vods/${encodeURIComponent(stream.name)}/storages/0/files/${req.params.filename}`;
+      await flussonicRequest('DELETE', deleteUrl, server).catch(e => console.warn('Failed to delete from Flussonic (ignored):', e.message));
+      console.log(`Video deleted from Flussonic VOD: ${stream.name}/${req.params.filename}`);
+    }
+
+    // Delete from database
+    db.prepare('DELETE FROM videos WHERE id = ?').run(video.id);
+
+    await updatePlaylistFile(stream);
+    res.json({ success: true });
+  } catch (error: any) {
+    console.error('Failed to delete video from Flussonic:', error.message);
+    res.status(500).json({ error: 'Failed to delete video from Flussonic' });
+  }
+});
+
+router.get('/:id/playlist.txt', authenticateToken, requireStreamAccess, (req, res) => {
+  const stream = db.prepare('SELECT id, name FROM streams WHERE id = ?').get(req.params.id) as any;
+  if (!stream) return res.status(404).send('Stream not found');
+
+  const videos = db.prepare('SELECT filename FROM videos WHERE stream_id = ? ORDER BY sort_order ASC, created_at ASC').all(stream.id) as any[];
+  if (videos.length === 0) {
+    return res.type('text/plain').send('');
+  }
+
+  const playlistContent = videos.map((v: any) => {
+    const fname = v.filename as string;
+    if (fname.startsWith(`${stream.name}/`)) return fname.slice(stream.name.length + 1);
+    return fname;
+  }).join('\n');
+  res.type('text/plain').send(playlistContent);
+});
+
+// Fetch live VOD files from Flussonic for a stream (shows what is actually on the server)
+router.get('/:id/vod-files', authenticateToken, requireStreamAccess, async (req, res) => {
+  try {
+    const stream = db.prepare('SELECT streams.*, servers.url as server_url, servers.api_key, servers.username, servers.password FROM streams LEFT JOIN servers ON streams.server_id = servers.id WHERE streams.id = ?').get(req.params.id) as any;
+    if (!stream) return res.status(404).json({ error: 'Stream not found' });
+    if (!stream.server_url || (!stream.api_key && !stream.username)) return res.json({ files: [] });
+
+    const baseUrl = stream.server_url.replace(/\/$/, '');
+    const encodedName = encodeURIComponent(stream.name);
+    const urls = [
+      `${baseUrl}/flussonic/api/v3/vods/${encodedName}/storages/0/files`,
+      `${baseUrl}/flussonic/api/v3/vods/${encodedName}/files`,
+    ];
+
+    let files: any[] = [];
+    for (const url of urls) {
+      try {
+        const r = await flussonicRequest('GET', url, { api_key: stream.api_key, username: stream.username, password: stream.password });
+        const data = r.data;
+        files = Array.isArray(data) ? data : (Array.isArray(data?.files) ? data.files : []);
+        if (files.length > 0) break;
+      } catch (e: any) {
+        if (e.response?.status !== 404) console.warn('[vod-files]', url, e.message);
+      }
+    }
+
+    const result = files
+      .filter((f: any) => f.type !== 'directory')
+      .map((f: any) => ({
+        name: f.path || f.name || f.filename,
+        size: f.size || 0,
+        type: f.type || 'file',
+      }));
+
+    delete stream.api_key;
+    delete stream.username;
+    delete stream.password;
+    res.json({ files: result });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+export default router;

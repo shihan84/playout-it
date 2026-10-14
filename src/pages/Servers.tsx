@@ -6,7 +6,7 @@ export default function Servers() {
   const [servers, setServers] = useState<any[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
   const [isAdding, setIsAdding] = useState(false);
-  const [formData, setFormData] = useState({ name: '', url: '', api_key: '' });
+  const [formData, setFormData] = useState({ name: '', url: '', username: '', password: '' });
   
   const [metricsServer, setMetricsServer] = useState<any>(null);
   const [metricsData, setMetricsData] = useState<any>(null);
@@ -144,7 +144,7 @@ export default function Servers() {
     e.preventDefault();
     try {
       await axios.post('/api/servers', formData);
-      setFormData({ name: '', url: '', api_key: '' });
+      setFormData({ name: '', url: '', username: '', password: '' });
       setIsAdding(false);
       fetchServers();
       showNotification('Server added successfully');
@@ -263,14 +263,25 @@ export default function Servers() {
               />
             </div>
             <div>
-              <label className="block text-sm font-medium text-zinc-400 mb-1">API Key / Password</label>
+              <label className="block text-sm font-medium text-zinc-400 mb-1">Username</label>
+              <input 
+                required
+                type="text" 
+                value={formData.username}
+                onChange={e => setFormData({...formData, username: e.target.value})}
+                className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-2 text-white focus:outline-none focus:border-emerald-500 transition-colors"
+                placeholder="flussonic"
+              />
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-zinc-400 mb-1">Password</label>
               <input 
                 required
                 type="password" 
-                value={formData.api_key}
-                onChange={e => setFormData({...formData, api_key: e.target.value})}
+                value={formData.password}
+                onChange={e => setFormData({...formData, password: e.target.value})}
                 className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-2 text-white focus:outline-none focus:border-emerald-500 transition-colors"
-                placeholder="flussonic_api_key"
+                placeholder="flussonic password"
               />
             </div>
             <div className="flex gap-3 pt-2">
