@@ -1,7 +1,8 @@
 # IBS Manager — Engineering Handoff
 
 Date: 2026-10-14
-Repo: `git@github.com:shihan84/playout-it.git` (branch `main`, latest `7930785`)
+Repo: `git@github.com:shihan84/playout-it.git` (branch `main`, latest `b668f84`)
+Active PR branch: `feature/broadcast-security-foundation` (`72ba965`) — see §12
 Scope: Flussonic Media Server management dashboard (React SPA + Express + SQLite)
 
 ---
@@ -183,8 +184,8 @@ Migrations are idempotent (try/catch ALTERs). Latest: `servers.username`/`passwo
 ## 8. Known Issues / Loose Ends
 
 1. **Metrics mount may be wrong**: `metricsRoutes` mounted at `/api/servers/:id/metrics` with router path `GET /:id` → effective path may be `/api/servers/:id/metrics/:id` while frontend calls `/api/servers/{id}/metrics`. Verify/fix.
-2. **`GET /api/servers` returns `password`/`api_key`** to admins — consider masking.
-3. **Unauthenticated VOD file routes** (`files`, chunked-upload, `upload-info` which leaks Basic auth header, playlist routes) — matches original design; tighten if exposed publicly.
+2. **`GET /api/servers` returns `password`/`api_key`** to admins — fixed on `feature/broadcast-security-foundation` via `publicServer()` redaction.
+3. **Unauthenticated VOD file routes** (`files`, chunked-upload, `upload-info` which leaks Basic auth header, playlist routes) — fixed on `feature/broadcast-security-foundation` (router-wide admin guard, headers removed).
 4. **Watchdog calls its own HTTP API** for telegram alerts (`axios` to `localhost:${port}`) — brittle; could call the service directly.
 5. **No tests** — lint + build + smoke only.
 6. **Heavy `any`** typing across server code.
@@ -198,7 +199,8 @@ Migrations are idempotent (try/catch ALTERs). Latest: `servers.username`/`passwo
 - ✅ `deploy-windows.ps1` now reads `PI_HOST`/`PI_USER`/`PI_PASSWORD` from env vars (commit `7930785`).
 - ✅ Pi SSH password rotated by owner; old value remains in git history but is harmless.
 - ⚠ Git history still contains the old password — if it was ever reused elsewhere, rotate those too.
-- ⚠ Still to do for production: set real `JWT_SECRET`, change default `admin123`, consider masking server creds in API responses.
+- ⚠ Still to do for production: set real `JWT_SECRET` (enforced ≥32 chars on the security branch), change default `admin123` (default-user creation removed on the security branch — needs a provisioning path).
+- ✅ `feature/broadcast-security-foundation` addresses: server-credential masking, VOD route auth, upload-info credential leak, SameSite cookie, production JWT enforcement, fail-closed DB recovery.
 
 ---
 
@@ -209,6 +211,45 @@ Migrations are idempotent (try/catch ALTERs). Latest: `servers.username`/`passwo
 - `scripts/flussonic-manager.service` — systemd alternative.
 - `deploy.sh`, `deploy-setup.sh`, `deploy-windows.ps1` (env-var creds).
 - `nginx.conf` — proxies `/` and `/ws` to `localhost:3000`, `client_max_body_size 1000G`; HTTPS block optional. In-app `/api/ssl/*` manages certbot + nginx SSL config.
+
+---
+
+## 12. Contributor Branch Review — `feature/broadcast-security-foundation`
+
+Security hardening branch (9 commits ahead of `main`). Reviewed and smoke-verified 2026-10-14.
+
+### Changes
+
+- **JWT hardening**: production refuses to boot unless `JWT_SECRET` ≥32 chars (`config/index.ts`); auth cookie gains `sameSite: 'lax'`; login debug logs removed.
+- **Credential redaction**: `publicServer()` strips `api_key`/`username`/`password` from `GET /api/servers` and POST responses.
+- **Safer server delete**: `DELETE /api/servers/:id` now only unlinks (`server_id → NULL` on streams/vods) — never deletes remote Flussonic resources or reassigns to duplicates.
+- **VOD lockdown**: `router.use(authenticateToken, requireAdmin)` guards the entire `/api/vods` router; `upload-info` no longer returns Basic auth headers (`directUploadSupported: false`); chunked uploads use `randomBytes(16)` IDs + filename/chunk validation.
+- **DB fail-closed**: corrupted DB files are preserved for operator recovery instead of silently deleted/recreated; startup throws.
+- **No default admin**: migration no longer creates `admin/admin123`.
+- **CI**: `.github/workflows/security-ci.yml` — lint + regression tests + build.
+- **Tests**: `tests/security-regression.test.ts` — 5 source-level checks (VOD auth, credential redaction, unlink-only delete, no DB unlink, no default password, JWT requirement).
+
+### Verification results
+
+| Check | Result |
+|---|---|
+| `npm ci` | ✅ (kill running dev server first — native module locks) |
+| `npm run lint` | ✅ clean |
+| `npx tsx --test tests/security-regression.test.ts` | ✅ 5/5 pass |
+| `npm run build` | ✅ `dist/server.cjs` ~114 kB |
+
+### Open concerns before merge
+
+1. **Fresh install has no admin user.** The migration no longer creates `admin/admin123` and no provisioning tooling exists yet — a new deployment cannot log in. Needs a bootstrap path: e.g. `ADMIN_USERNAME`/`ADMIN_PASSWORD` env vars consumed by the migration, or a CLI provisioning script.
+2. **`VodFileManager` ignores `directUploadSupported`**. Frontend still calls `/api/vods/:id/upload-info` then attempts `performDirectUpload(authHeader)` with `authHeader === undefined` → guaranteed failure → falls back to chunked upload. Works, but wastes a request per file. Fix: skip the direct-upload attempt when `directUploadSupported !== true`.
+3. **npm audit**: 26 vulns (3 critical) in existing deps — pre-existing, unrelated to this branch.
+4. **Behavior changes to note**: server delete no longer removes remote Flussonic resources (unlink-only); all `/api/vods/*` routes now require admin (client-role users lose VOD playlist/content endpoints).
+
+### Suggested response to contributor
+
+- ✅ Approach and regression tests are solid — mergeable after concerns 1–2 are addressed.
+- Provide an admin provisioning path (env-driven) before merge, or document it as a follow-up.
+- Optionally update `VodFileManager.tsx` to honor `directUploadSupported`.
 
 ---
 
