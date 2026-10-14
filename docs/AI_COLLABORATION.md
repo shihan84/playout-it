@@ -348,3 +348,27 @@ User requested consecutive development phases with Devin staging verification af
 **Phase 2 remains on hold.** No merge, deploy, or production changes.
 
 **PR blocker (unchanged):** `gh pr create` → `GraphQL: must be a collaborator (createPullRequest)`. Manual: /pull/new/feature/phase-1b-multiserver
+
+## Devin status — Phase 1B final PR review — 2026-10-14
+
+**Commit:** `3f19307` on `feature/phase-1b-multiserver`
+
+**Review findings addressed this round:**
+
+- **Redirect credential-forwarding gap (found & fixed):** axios followed redirects by default — a 3xx from a Flussonic server could forward the Basic auth header to an arbitrary host, bypassing cursor confinement. `flussonicRequest` now sets `maxRedirects: 0` + `validateStatus < 300`; a redirect fails loudly. Verified: mock 302 → `success:false`, no cross-host request.
+- **Prune auth verified:** anon → 401, client → 403, admin without `{confirm:true}` → 400, admin with confirm → verified deletion only.
+- **Prune audit log:** `[prune] admin=<username> server=<name> removed=<n> vodsRemoved=<n> pending=<n>` on every invocation.
+- **Transaction safety:** deletion sets wrapped in `db.transaction` — atomic, no partial removal sets.
+- **Child protection:** candidates with live `user_stream_assignments`/`videos`/`telegram_alerts`/`vod_files` are never deleted, even by confirmed prune — surfaced as `protectedRemovals`. Verified: stream with assignment+video survives prune (`removed=1`, `protectedRemovals=1`, assignment intact).
+- **Backup/restore:** `backup-db.ts` now supports `--restore <file> --confirm`; disposable WAL-DB test covers backup+restore round-trip.
+
+**Gate (independent rerun):** lint clean · **32/32 tests pass** · build 133.4 kB · audit = 2 unchanged (esbuild low dev-only, qs moderate — no critical/high).
+
+**Remaining production risks:**
+1. `/flussonic/api` under plain HTTP — Basic credentials sent base64, interceptable on untrusted networks. Deploy HTTPS or a private network path.
+2. Pending/protected removals accumulate without UI — no dashboard surface yet for `pendingRemovals`/`protectedRemovals` (API exposes them; admin UX pending Phase 2).
+3. No automated scheduled backup — `backup-db.ts` exists but must be wired into cron/PM2 deployment manually.
+4. `qs` moderate DoS is transitive (via a dependency); no compatible fix yet — monitor.
+5. PR creation still blocked: `GraphQL: must be a collaborator (createPullRequest)`. Manual: /pull/new/feature/phase-1b-multiserver
+
+**Phase 2 remains on hold.** No merge, deploy, or production changes performed.
