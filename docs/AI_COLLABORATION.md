@@ -463,3 +463,27 @@ User requested consecutive development phases with Devin staging verification af
 **Gate:** lint clean · **40/40 tests** · build 134 kB · audit 2 non-critical · **CI green on 1B branch** (run 38561226569 — workflow extended to cover this branch + full suite).
 
 **Acceptance summaries posted on PR #1 and PR #2.** Merge order confirmed: PR #1 → main, then retarget + merge PR #2. Awaiting explicit merge approval.
+
+## Devin status — Final merge readiness — 2026-10-14
+
+**Heads:** PR #2 = `7df6981` (draft, MERGEABLE, base `feature/broadcast-security-foundation`) · PR #1 = `0591516` (draft→open, MERGEABLE, base `main`)
+
+**Verified:**
+- CI run **38561641173** on PR #2 head `7df6981` — **success** (lint + full 40-test suite + build)
+- All **10 CodeRabbit findings resolved** (6 code: opaque cursor, /send auth, dedupe tx, late child check, per-request failure count, interval skip; 4 docs: checklist step, staging seed/backoff, Phase 2 backup prereq). No new findings since.
+- PR #1 CI green (runs 38544767338, 38544762014); PR #2 merge-base = PR #1 tip — stack confirmed.
+
+**Merge sequence (awaiting explicit approval — NOT executed):**
+1. Merge PR #1 (`feature/broadcast-security-foundation` → `main`)
+2. Retarget PR #2 base to `main` (`gh pr edit 2 --base main`), confirm diff shrinks to 1B-only changes
+3. Merge PR #2 (`feature/phase-1b-multiserver` → `main`)
+4. Deploy per `docs/MERGE_AND_ROLLOUT_PLAN.md` + `docs/DEPLOYMENT_CHECKLIST.md`
+
+**Remaining deployment risks:**
+- HTTP Basic to Flussonic interceptable without HTTPS/private network
+- pendingRemovals/protectedRemovals have no UI surface (Phase 2)
+- Backups need manual cron/PM2 scheduling at deploy time
+- `qs` moderate DoS — transitive, no compatible fix; monitor
+- Per-server sync override shorter than global takes effect after watchdog restart
+
+**Status:** Ready for merge approval. Nothing merged or deployed.
