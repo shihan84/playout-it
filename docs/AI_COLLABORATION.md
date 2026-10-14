@@ -372,3 +372,22 @@ User requested consecutive development phases with Devin staging verification af
 5. PR creation still blocked: `GraphQL: must be a collaborator (createPullRequest)`. Manual: /pull/new/feature/phase-1b-multiserver
 
 **Phase 2 remains on hold.** No merge, deploy, or production changes performed.
+
+## Devin status — Phase 1B review closure — 2026-10-14
+
+**Commit:** `10c0f0e` on `feature/phase-1b-multiserver` — implementation FROZEN pending PR review.
+
+**Closure deliverables:**
+- `docs/PHASE1B_PR_DESCRIPTION.md` — complete PR description covering security, sync, migration, and backup changes + test evidence + remaining risks
+- `docs/DEPLOYMENT_CHECKLIST.md` — HTTPS, credential handling, backup scheduling, migration verification, runtime checks, rollback procedure
+- Test record: **32/32 pass** (22 integration + 4 migration + 6 regression), lint clean, build 133.4 kB, audit = 2 non-critical
+- Phase 2 backlog: `docs/PHASE2_CHANNEL_LIFECYCLE_HANDOFF.md` (P0 lifecycle state machine + stream_events, P1 atomic channel create, P2 access expiry/max-sessions, P3 bulk/template ops, P4 health timeline, P5 openapi.json audit) — NOT started, awaiting scope approval
+
+**Remaining production risks (final):**
+1. HTTP Basic credentials interceptable without HTTPS/private network
+2. `pendingRemovals`/`protectedRemovals` API-only, no UI (Phase 2)
+3. Backups require manual cron/PM2 scheduling
+4. `qs` moderate DoS — transitive, no compatible fix
+5. PR creation blocked: `GraphQL: must be a collaborator (createPullRequest)` — open manually at /pull/new/feature/phase-1b-multiserver
+
+**Status:** Awaiting PR review + Phase 2 scope approval. No merge, deploy, or production changes.
