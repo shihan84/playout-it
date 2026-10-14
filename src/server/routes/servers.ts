@@ -221,6 +221,39 @@ router.post('/:id/sync', authenticateToken, requireAdmin, async (req, res) => {
   }
 });
 
+// Explicit admin-confirmed reconciliation: applies pending deletions.
+// Regular sync NEVER deletes — it only reports pendingRemovals. This
+// endpoint requires { confirm: true } and still enforces the verified
+// deletion policy (complete inventory + second-fetch confirmation +
+// conservative limits) inside the sync service.
+router.post('/:id/prune', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    if (req.body?.confirm !== true) {
+      return res.status(400).json({ error: 'Pruning requires { confirm: true } — deletions are never automatic' });
+    }
+    const server = db.prepare('SELECT * FROM servers WHERE id = ?').get(req.params.id) as any;
+    if (!server) return res.status(404).json({ error: 'Server not found' });
+
+    const s = await syncServerStreams(server, { allowDeletions: true });
+    const vodSync = await syncServerVods(server, { allowDeletions: true });
+
+    if (s.removedCount > 0 || vodSync.removedCount > 0) {
+      broadcastStreamsUpdate();
+    }
+
+    res.json({
+      success: !vodSync.error,
+      removed: s.removedCount,
+      vodsRemoved: vodSync.removedCount,
+      pendingRemovals: (s.pendingRemovals || 0) + (vodSync.pendingRemovals || 0),
+      ...(vodSync.error ? { error: vodSync.error } : {})
+    });
+  } catch (error: any) {
+    console.error(`Prune error for server ${req.params.id}:`, error.message);
+    res.json({ success: false, error: error.message });
+  }
+});
+
 // Sync All Servers
 router.post('/sync-all', authenticateToken, requireAdmin, async (req, res) => {
   try {

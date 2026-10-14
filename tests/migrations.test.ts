@@ -105,3 +105,33 @@ test('fresh install: schema + migrations produce complete DB with no admin user'
   }
   db.close();
 });
+
+test('SQLite online backup produces a restorable copy of a live WAL database', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'playout-backup-'));
+  const srcPath = path.join(dir, 'live.db');
+  const bakPath = path.join(dir, 'backup.db');
+
+  // Live DB in WAL mode (production default) — a raw file copy would be
+  // unsafe here; .backup() is the online-safe mechanism.
+  const src = new Database(srcPath);
+  src.pragma('journal_mode = WAL');
+  src.exec('CREATE TABLE t (id INTEGER PRIMARY KEY, val TEXT)');
+  src.prepare("INSERT INTO t (val) VALUES ('a'), ('b'), ('c')").run();
+  // Uncommitted-to-mainfile state: WAL holds recent writes
+  src.prepare("INSERT INTO t (val) VALUES ('wal-only')").run();
+
+  await src.backup(bakPath);
+
+  const restored = new Database(bakPath, { readonly: true });
+  const rows = restored.prepare('SELECT val FROM t ORDER BY id').all() as any[];
+  assert.equal(rows.length, 4, 'backup must capture WAL-resident rows');
+  assert.equal(rows[3].val, 'wal-only');
+  restored.close();
+  src.close();
+
+  // Restored copy is writable and fully independent of the source
+  const rw = new Database(bakPath);
+  rw.prepare("INSERT INTO t (val) VALUES ('post-restore')").run();
+  assert.equal((rw.prepare('SELECT COUNT(*) n FROM t').get() as any).n, 5);
+  rw.close();
+});

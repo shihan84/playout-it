@@ -19,7 +19,14 @@ const remoteDeletes: string[] = [];
 const remoteRequests: string[] = [];
 const remotePort = 36198;
 // Test-controlled mock behavior: override GET /streams payload and add latency
-const mockBehavior = { streamsPayload: null as any, vodsPayload: null as any, vodFilesPayload: null as any, delayMs: 0 };
+const mockBehavior = {
+  streamsPayload: null as any,
+  vodsPayload: null as any,
+  vodFilesPayload: null as any,
+  delayMs: 0,
+  // Optional pagination cursor generator: (requestUrl) => nextCursor|null
+  streamsNext: null as null | ((url: string) => string | null)
+};
 
 let appProcess: any;
 let tmpDir: string;
@@ -63,8 +70,11 @@ test.before(async () => {
     const respond = () => {
       res.setHeader('Content-Type', 'application/json');
       // Test-controlled GET /streams payload override (sync tests)
-      if (req.method === 'GET' && mockBehavior.streamsPayload !== null && /\/streams$/.test(req.url || '')) {
-        res.end(JSON.stringify(mockBehavior.streamsPayload));
+      if (req.method === 'GET' && mockBehavior.streamsPayload !== null && /\/streams/.test(req.url || '')) {
+        const body = mockBehavior.streamsNext
+          ? { streams: mockBehavior.streamsPayload, next: mockBehavior.streamsNext(req.url || '') }
+          : mockBehavior.streamsPayload;
+        res.end(JSON.stringify(body));
         return;
       }
       if (req.method === 'GET' && mockBehavior.vodsPayload !== null && /\/vods$/.test(req.url || '')) {
@@ -617,4 +627,117 @@ test('sync failure propagates explicitly to the API response', async () => {
   assert.equal(sync.success, false, 'sync should report failure');
   assert.ok(sync.error, 'error message must be present');
   mockBehavior.vodsPayload = null;
+});
+
+test('pagination cursors are confined to the server origin and /flussonic/api path', async () => {
+  const { res: loginRes } = await login('itadmin', 'it-admin-pass-12345');
+  const { token } = await loginRes.json();
+  const headers = { authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+
+  // Fresh server per case so local state is isolated
+  const mkServer = async (name: string) => {
+    const r = await fetch(`${BASE}/api/servers`, {
+      method: 'POST', headers,
+      body: JSON.stringify({ name, url: `http://127.0.0.1:${remotePort}`, username: 'u', password: 'p123456' })
+    });
+    return (await r.json()).id;
+  };
+
+  // 1. Cross-origin next URL must be rejected — sync fails, nothing applied
+  mockBehavior.streamsPayload = [{ name: 'page-1', inputs: [] }];
+  mockBehavior.streamsNext = () => 'http://evil.example.com/flussonic/api/v3/streams';
+  const s1 = await mkServer('mock-xorigin');
+  const r1 = await (await fetch(`${BASE}/api/servers/${s1}/sync`, { method: 'POST', headers })).json();
+  assert.equal(r1.success, false, 'cross-origin cursor must fail the sync');
+  assert.ok(/cross-origin/i.test(r1.error || ''), `expected cross-origin error, got: ${r1.error}`);
+
+  // 2. Cursor outside /flussonic/api must be rejected
+  mockBehavior.streamsNext = () => `http://127.0.0.1:${remotePort}/admin/secret`;
+  const s2 = await mkServer('mock-offpath');
+  const r2 = await (await fetch(`${BASE}/api/servers/${s2}/sync`, { method: 'POST', headers })).json();
+  assert.equal(r2.success, false, 'off-path cursor must fail the sync');
+
+  // 3. Looping cursor (next points back to the same URL) must be rejected
+  mockBehavior.streamsNext = () => `http://127.0.0.1:${remotePort}/flussonic/api/v3/streams`;
+  const s3 = await mkServer('mock-loop');
+  const r3 = await (await fetch(`${BASE}/api/servers/${s3}/sync`, { method: 'POST', headers })).json();
+  assert.equal(r3.success, false, 'looping cursor must fail the sync');
+
+  // 4. Non-terminating pagination (>50 pages) must be rejected
+  let n = 0;
+  mockBehavior.streamsNext = () => `http://127.0.0.1:${remotePort}/flussonic/api/v3/streams?page=${++n}`;
+  const s4 = await mkServer('mock-endless');
+  const r4 = await (await fetch(`${BASE}/api/servers/${s4}/sync`, { method: 'POST', headers })).json();
+  assert.equal(r4.success, false, 'non-terminating pagination must fail the sync');
+
+  mockBehavior.streamsNext = null;
+  mockBehavior.streamsPayload = null;
+});
+
+test('invalid records fail the sync closed instead of partially applying', async () => {
+  const { res: loginRes } = await login('itadmin', 'it-admin-pass-12345');
+  const { token } = await loginRes.json();
+  const headers = { authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+
+  // Seed a healthy stream first
+  mockBehavior.streamsPayload = [{ name: 'good-one', inputs: [{ url: 'fake://a' }] }];
+  const mk = await fetch(`${BASE}/api/servers`, {
+    method: 'POST', headers,
+    body: JSON.stringify({ name: 'mock-badrec', url: `http://127.0.0.1:${remotePort}`, username: 'u', password: 'p123456' })
+  });
+  const server = await mk.json();
+
+  // Inventory containing a malformed record → sync must fail, local rows preserved
+  mockBehavior.streamsPayload = [{ name: 'ok' }, { name: 12345 }, [1, 2, 3]];
+  const sync = await fetch(`${BASE}/api/servers/${server.id}/sync`, { method: 'POST', headers });
+  const body = await sync.json();
+  assert.equal(body.success, false, 'malformed record must fail the sync');
+
+  const list = await (await fetch(`${BASE}/api/streams`, { headers })).json();
+  assert.ok(list.some((s: any) => s.name === 'good-one'), 'pre-existing stream must survive failed sync');
+  mockBehavior.streamsPayload = null;
+});
+
+test('repeated small partial inventories never delete; prune requires explicit confirm', async () => {
+  const { res: loginRes } = await login('itadmin', 'it-admin-pass-12345');
+  const { token } = await loginRes.json();
+  const headers = { authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+
+  mockBehavior.streamsPayload = Array.from({ length: 20 }, (_, i) => ({ name: `prune-${i}`, inputs: [{ url: 'fake://x' }] }));
+  const mk = await fetch(`${BASE}/api/servers`, {
+    method: 'POST', headers,
+    body: JSON.stringify({ name: 'mock-prune', url: `http://127.0.0.1:${remotePort}`, username: 'u', password: 'p123456' })
+  });
+  const server = await mk.json();
+
+  const count = async () => {
+    const list = await (await fetch(`${BASE}/api/streams`, { headers })).json();
+    return list.filter((s: any) => s.server_id === server.id).length;
+  };
+  assert.equal(await count(), 20);
+
+  // Remote drops to 18 (2 missing, within conservative limits) — run sync TWICE.
+  // Auto-deletion is disabled by default: zero deletions regardless.
+  mockBehavior.streamsPayload = Array.from({ length: 18 }, (_, i) => ({ name: `prune-${i}`, inputs: [{ url: 'fake://x' }] }));
+  for (let i = 0; i < 2; i++) {
+    const sync = await (await fetch(`${BASE}/api/servers/${server.id}/sync`, { method: 'POST', headers })).json();
+    assert.equal(sync.removed, 0, 'regular sync must never delete');
+    assert.equal(sync.pendingRemovals, 2, 'missing streams reported as pendingRemovals');
+  }
+  assert.equal(await count(), 20, 'repeated partial inventories must not delete');
+
+  // Prune without confirm → 400
+  const noConfirm = await fetch(`${BASE}/api/servers/${server.id}/prune`, { method: 'POST', headers, body: '{}' });
+  assert.equal(noConfirm.status, 400, 'prune without confirm must be rejected');
+  assert.equal(await count(), 20);
+
+  // Prune with confirm → verified deletion removes exactly the 2 missing
+  const pruned = await (await fetch(`${BASE}/api/servers/${server.id}/prune`, {
+    method: 'POST', headers, body: JSON.stringify({ confirm: true })
+  })).json();
+  assert.equal(pruned.success, true);
+  assert.equal(pruned.removed, 2, 'prune should remove exactly the confirmed-missing streams');
+  assert.equal(await count(), 18);
+
+  mockBehavior.streamsPayload = null;
 });

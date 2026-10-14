@@ -32,16 +32,45 @@ function parseStreamsPayload(data: any): any[] {
 }
 
 // Follow `next` pagination cursors until the full inventory is collected.
+// Security rules for cursors:
+//   - must resolve to the SAME origin as the configured server URL
+//   - must stay under the /flussonic/api path
+//   - must not repeat a previously visited URL (loop detection)
 // Throws if pagination never terminates — an incomplete inventory must
 // never reach deletion reconciliation.
-async function fetchAllPages(server: any, url: string, maxPages = 50): Promise<any[]> {
+const ALLOWED_API_PREFIX = '/flussonic/api';
+
+function resolveNextCursor(server: any, next: string, visited: Set<string>): string {
   const baseUrl = server.url.replace(/\/$/, '');
+  const base = new URL(baseUrl);
+  let resolved: URL;
+  try {
+    resolved = new URL(next, `${baseUrl}/`);
+  } catch {
+    throw new Error(`Malformed pagination cursor: ${next}`);
+  }
+  if (resolved.origin !== base.origin) {
+    throw new Error(`Rejected cross-origin pagination cursor: ${resolved.origin}`);
+  }
+  if (!resolved.pathname.startsWith(ALLOWED_API_PREFIX)) {
+    throw new Error(`Rejected pagination cursor outside ${ALLOWED_API_PREFIX}: ${resolved.pathname}`);
+  }
+  const key = resolved.toString();
+  if (visited.has(key)) {
+    throw new Error(`Pagination loop detected at ${resolved.pathname}`);
+  }
+  visited.add(key);
+  return key;
+}
+
+async function fetchAllPages(server: any, url: string, maxPages = 50): Promise<any[]> {
+  const visited = new Set<string>();
   const pages: any[] = [];
   let next: string | null = url;
   let guard = 0;
   while (next) {
     if (guard++ >= maxPages) throw new Error(`Pagination did not complete within ${maxPages} pages`);
-    const pageUrl = next.startsWith('http') ? next : `${baseUrl}${next}`;
+    const pageUrl = resolveNextCursor(server, next, visited);
     const response = await flussonicRequest('GET', pageUrl, server);
     pages.push(response.data);
     next = response.data && typeof response.data === 'object' ? (response.data.next || null) : null;
@@ -50,13 +79,50 @@ async function fetchAllPages(server: any, url: string, maxPages = 50): Promise<a
 }
 
 // ---- Verified deletion policy -------------------------------------------
-// Local rows are only auto-deleted when ALL of these hold:
+// Automatic deletion is DISABLED by default. Sync only ever inserts or
+// updates rows; names absent from the remote inventory are reported as
+// pendingRemovals. Actual deletion requires an explicit, admin-confirmed
+// call (allowDeletions: true) — and even then ALL of these must hold:
 //   1. The remote inventory is COMPLETE (all pages fetched).
 //   2. The removal count is within a conservative limit — large drops are
 //     treated as suspicious and reported as pendingRemovals instead.
 //   3. Each candidate name is absent in a SECOND independent fetch.
 const MAX_AUTO_REMOVALS = 10;
 const MAX_AUTO_REMOVAL_RATIO = 0.2;
+
+export interface SyncOptions {
+  allowDeletions?: boolean;
+}
+
+// Per-record validation — fail closed. A malformed record means the whole
+// inventory is untrustworthy, so reject it rather than partially apply it.
+function isValidName(n: any): n is string {
+  return typeof n === 'string' && n.length > 0 && n.length <= 200 && !/[\/\0]/.test(n);
+}
+
+function validateStreamRecord(s: any) {
+  if (typeof s === 'string') {
+    if (!isValidName(s)) throw new Error('Invalid stream name in response');
+    return;
+  }
+  if (!s || typeof s !== 'object' || Array.isArray(s)) {
+    throw new Error('Invalid stream record: expected object or name string');
+  }
+  if (!isValidName(s.name)) throw new Error('Invalid stream record: missing/invalid name');
+  if (s.inputs !== undefined && !Array.isArray(s.inputs)) throw new Error('Invalid stream record: inputs must be an array');
+  if (s.pushes !== undefined && !Array.isArray(s.pushes)) throw new Error('Invalid stream record: pushes must be an array');
+}
+
+function validateVodRecord(v: any) {
+  if (typeof v === 'string') {
+    if (!isValidName(v)) throw new Error('Invalid VOD name in response');
+    return;
+  }
+  if (!v || typeof v !== 'object' || Array.isArray(v)) {
+    throw new Error('Invalid VOD record: expected object or name string');
+  }
+  if (!isValidName(v.name ?? v.prefix)) throw new Error('Invalid VOD record: missing/invalid name');
+}
 
 interface SyncResult {
   addedCount: number;
@@ -90,11 +156,12 @@ async function confirmAbsent(
   }
 }
 
-export async function syncServerStreams(server: any): Promise<SyncResult> {
+export async function syncServerStreams(server: any, options: SyncOptions = {}): Promise<SyncResult> {
   const baseUrl = server.url.replace(/\/$/, '');
   const flussonicUrl = `${baseUrl}/flussonic/api/v3/streams`;
   const pages = await fetchAllPages(server, flussonicUrl);
   const streams = pages.flatMap(p => parseStreamsPayload(p));
+  streams.forEach(validateStreamRecord); // fail closed on malformed records
 
   let addedCount = 0;
   let removedCount = 0;
@@ -150,6 +217,9 @@ export async function syncServerStreams(server: any): Promise<SyncResult> {
     console.warn(`[syncServerStreams] ${server.name}: remote returned 0 streams but ${existingStreams.length} local rows exist — skipping deletions`);
     return { addedCount, removedCount: 0, skippedDeletions: true, pendingRemovals: candidates.length };
   }
+  if (!options.allowDeletions) {
+    return { addedCount, removedCount: 0, skippedDeletions: true, pendingRemovals: candidates.length };
+  }
   if (candidates.length > MAX_AUTO_REMOVALS || candidates.length > existingStreams.length * MAX_AUTO_REMOVAL_RATIO) {
     console.warn(`[syncServerStreams] ${server.name}: ${candidates.length}/${existingStreams.length} local streams missing remotely — exceeds auto-removal limit, reporting as pendingRemovals`);
     return { addedCount, removedCount: 0, skippedDeletions: true, pendingRemovals: candidates.length };
@@ -175,7 +245,7 @@ function parseVodsPayload(data: any): any[] {
   throw new Error('Unrecognized Flussonic /vods response format');
 }
 
-export async function syncServerVods(server: any): Promise<SyncResult> {
+export async function syncServerVods(server: any, options: SyncOptions = {}): Promise<SyncResult> {
   const baseUrl = server.url.replace(/\/$/, '');
   const flussonicUrl = `${baseUrl}/flussonic/api/v3/vods`;
   try {
@@ -198,6 +268,7 @@ export async function syncServerVods(server: any): Promise<SyncResult> {
     }
 
     const vodsList = pages.flatMap(p => parseVodsPayload(p));
+    vodsList.forEach(validateVodRecord); // fail closed on malformed records
 
     let addedCount = 0;
     let removedCount = 0;
@@ -257,6 +328,9 @@ export async function syncServerVods(server: any): Promise<SyncResult> {
     if (candidates.length === 0) return { addedCount, removedCount: 0 };
     if (vodsList.length === 0) {
       console.warn(`[syncServerVods] ${server.name}: remote returned 0 VODs but ${existingVods.length} local rows exist — skipping deletions`);
+      return { addedCount, removedCount: 0, skippedDeletions: true, pendingRemovals: candidates.length };
+    }
+    if (!options.allowDeletions) {
       return { addedCount, removedCount: 0, skippedDeletions: true, pendingRemovals: candidates.length };
     }
     if (candidates.length > MAX_AUTO_REMOVALS || candidates.length > existingVods.length * MAX_AUTO_REMOVAL_RATIO) {
