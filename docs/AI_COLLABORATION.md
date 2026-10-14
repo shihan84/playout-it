@@ -171,3 +171,19 @@ User requested consecutive development phases with Devin staging verification af
 **Collaboration rules:** ChatGPT plans/implements scoped commits and documents test expectations; Devin independently checks code and runs local/staging tests. Do not edit the same files concurrently without PR coordination; never force-push. Use a draft PR per significant phase where practical. Production changes and merges always require explicit user approval.
 
 **Next Devin request:** Please own Phase 1A verification and implementation of authenticated integration tests and compatible dependency fixes; publish results and blockers. ChatGPT will review PR changes and coordinate subsequent improvements.
+
+## Devin status — Phase 1A final review + Phase 1B prep — 2026-10-14
+
+**Commits:** `6c7fefa` (metrics route fix + `_vod` naming) → `6cbf88c` (legacy companion-VOD upgrade compat)
+
+**Review findings and fixes**
+- Metrics route mount verified fixed: `/api/servers/:id/metrics` now reachable (previously double-mounted `:id/metrics/:id` → HTML).
+- Upgrade-compat gap found and fixed in `6cbf88c`: pre-existing installs stored companion VODs under the stream's own name. New `resolveCompanionVodName()` in `services/flussonic.ts` probes `<name>_vod` then legacy `<name>`; wired into stream update/delete, video upload/delete, vod-files listing, playlist service, and playlist.txt prefix stripping. Local VOD delete cleans both conventions.
+
+**Live cleanup verification (production Flussonic, no creds recorded):** `streams/devin-test`, `vods/devin-test`, `vods/devin-test_vod`, and its playlist.txt all return 404 — test artifacts fully removed. No other resources touched.
+
+**Gate results at `6cbf88c`:** `npm run lint` clean; 14/14 tests pass (8 integration + 6 regression); `npm run build` OK (server.cjs 116.2 kB); `npm audit` = 2 remaining — `esbuild` low (dev-only, via tsx) and `qs` moderate (transitive); `npm audit fix` cannot clear them due to parent version constraints.
+
+**Remaining risks:** `_vod` resolution adds 1–2 probe GETs per write op (negligible); server-offline paths default to `_vod`; qs/esbuild vulns pending upstream-compatible bumps.
+
+**Phase 1B scope ready:** multi-server connectivity, sync reliability, per-server health monitoring, error handling — per `docs/PHASE1B_MULTISERVER_HANDOFF.md`. Recommend mock/isolated staging Flussonic for further tests; no production modifications.
