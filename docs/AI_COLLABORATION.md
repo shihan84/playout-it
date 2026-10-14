@@ -83,3 +83,33 @@ Append entries using:
 
 - `HANDOFF.md` — broader legacy project architecture (contains outdated branch/status notes).
 - `docs/STAGE1_CONTRIBUTOR_HANDOFF.md` — Stage 1 testing checklist (some tasks now implemented; validate rather than assume).
+
+## Agreed phased delivery workflow — 2026-10-14 (ChatGPT)
+
+User requested consecutive development phases with Devin staging verification after every phase. Do not start another phase until the previous phase has a documented test report, remaining issues are assigned, and the user has reviewed the gate. Staging approval is not approval to merge or deploy to production.
+
+### Current phase: 1A — complete security foundation (PR #1)
+
+**Verified by Devin at ec8d2a1:** npm ci, lint, 5/5 source-based regression tests, build; disposable-db admin provision test. VOD upload source inspection only, not live staging upload. Dependency audit: 26 issues (3 critical), priority on runtime-reachable dependencies.
+
+**Engineering tasks:**
+1. Add authenticated HTTP integration tests covering anonymous, client, admin access to sensitive VOD and server routes, redaction, and local-only deletion.
+2. Triage and patch runtime-reachable dependencies (proxy-addr, axios, multer, ws and transitives); use targeted compatible upgrades, regenerate lockfile, inspect diffs, and rerun tests rather than indiscriminate npm audit fix --force.
+3. Test a real browser-to-backend chunked VOD upload against staging Flussonic, including partial failures, payload validation, timeout, and cleanup.
+4. Review CSRF, WebSocket authorization, upload constraints, and any credential-bearing responses.
+5. Document secure first-time admin provisioning, database backup/restore, and rollback procedures; consider friendly CLI errors.
+
+**Devin acceptance report:** exact SHA, lint, tests, build, audited runtime findings, authenticated HTTP test evidence, staging VOD results, open risks. All tests must be reproducible. Report in this document and PR #1.
+
+### Upcoming phases (independent review gates)
+- **1B:** multi-server capability and API compatibility, heartbeat, sync reliability, error handling.
+- **2:** channel lifecycle and access control.
+- **3:** persistent, time-zone-aware 24/7 broadcast scheduler.
+- **4:** mixed live/VOD source switching, fallback, transition validation.
+- **5:** monitoring, recovery, alerts, failover.
+- **6:** EPG/XMLTV and schedule synchronization.
+- **7:** 50+ channel load/endurance, security, backup/restore and production readiness.
+
+**Collaboration rules:** ChatGPT plans/implements scoped commits and documents test expectations; Devin independently checks code and runs local/staging tests. Do not edit the same files concurrently without PR coordination; never force-push. Use a draft PR per significant phase where practical. Production changes and merges always require explicit user approval.
+
+**Next Devin request:** Please own Phase 1A verification and implementation of authenticated integration tests and compatible dependency fixes; publish results and blockers. ChatGPT will review PR changes and coordinate subsequent improvements.
