@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import Database from 'better-sqlite3';
 import { runMigrations } from '../src/server/db/migrations';
+import { schema } from '../src/server/db/schema';
 
 // Build a pre-Phase-1B database: old stream/vod columns, no health columns,
 // no unique indexes, duplicate stream/VOD rows with FK-referencing children.
@@ -77,5 +78,30 @@ test('migrations are idempotent on a current-schema DB', () => {
   runMigrations(db); // second run must not throw or lose data
   const settings = db.prepare('SELECT COUNT(*) n FROM settings').get() as any;
   assert.ok(settings.n > 0, 'default settings seeded');
+  db.close();
+});
+
+test('fresh install: schema + migrations produce complete DB with no admin user', () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'playout-fresh-'));
+  const db = new Database(path.join(dir, 'fresh.db'));
+  db.pragma('foreign_keys = ON');
+  db.exec(schema);
+  runMigrations(db);
+
+  // No default administrator is ever created
+  assert.equal((db.prepare('SELECT COUNT(*) n FROM users').get() as any).n, 0);
+
+  // All Phase 1B columns/indexes present
+  const cols = db.prepare('PRAGMA table_info(servers)').all().map((c: any) => c.name);
+  for (const c of ['username', 'password', 'last_seen_at', 'last_attempt_at', 'last_error', 'consecutive_failures', 'latency_ms', 'sync_interval_secs', 'last_synced_at']) {
+    assert.ok(cols.includes(c), `servers.${c} missing on fresh install`);
+  }
+  const idx = db.prepare("SELECT name FROM sqlite_master WHERE type='index' AND name LIKE 'idx_%'").all().map((r: any) => r.name);
+  assert.ok(idx.includes('idx_streams_server_name') && idx.includes('idx_vods_server_name'));
+
+  const streamCols = db.prepare('PRAGMA table_info(streams)').all().map((c: any) => c.name);
+  for (const c of ['input_status', 'source_type', 'uptime', 'inputs', 'push_urls']) {
+    assert.ok(streamCols.includes(c), `streams.${c} missing on fresh install`);
+  }
   db.close();
 });

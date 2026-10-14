@@ -288,3 +288,20 @@ User requested consecutive development phases with Devin staging verification af
 **Unresolved:** `gh pr create --draft` fails — `GraphQL: must be a collaborator (createPullRequest)`. Open manually: /pull/new/feature/phase-1b-multiserver
 
 **Phase 2 handoff:** `docs/PHASE2_CHANNEL_LIFECYCLE_HANDOFF.md` created.
+
+## Devin status — Phase 1B closure — 2026-10-14
+
+**Commit:** `2c4e2af` + pending test/doc commit on `feature/phase-1b-multiserver`
+
+**Migration verification — complete:**
+- Legacy fixture (old schema, NOT NULL server_id, duplicate streams/VODs with FK children): dedupe merges + re-points assignments/videos/alerts/vod_files; unique indexes created; uniqueness enforced post-migration; idempotent
+- Fresh install fixture (schema + migrations): all Phase 1B columns + indexes present, zero users (no default admin) — verified
+- Latent bugs fixed in `2c4e2af`: index ordering vs table rebuild; streams rebuild dropping input_status/source_type/uptime
+
+**Tests:** 22/22 pass (13 integration + 6 regression + 3 migration)
+
+**Backup/rollback requirements — GAP:** no DB backup tooling exists. Phase 2 plan requires `scripts/backup-db.ts` (better-sqlite3 `.backup()` + restore doc) before destructive schema work. Rollback today = git revert + restore DB file copy; WAL mode means copying while running needs `.backup()`, not raw file copy.
+
+**Phase 2:** detailed implementation plan + acceptance criteria published in `docs/PHASE2_CHANNEL_LIFECYCLE_HANDOFF.md` (lifecycle state machine, atomic channel create, access control with expiry, bulk ops, health history, openapi.json audit, DB backup script). Implementation NOT started — awaiting scope approval.
+
+**PR blocker (exact):** `gh pr create --draft` → `GraphQL: must be a collaborator (createPullRequest)`. Token has issue-comment scope only. Open manually: /pull/new/feature/phase-1b-multiserver
