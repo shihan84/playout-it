@@ -107,11 +107,13 @@ async function startServer() {
 
   server.on('upgrade', (request: any, socket: any, head: any) => {
     if (request.url === '/ws') {
-      if (!verifyWsAuth(request)) {
+      const wsUser = verifyWsAuth(request);
+      if (!wsUser) {
         socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
         socket.destroy();
         return;
       }
+      request.wsUser = wsUser;
       wss.handleUpgrade(request, socket, head, (ws) => {
         wss.emit('connection', ws, request);
       });

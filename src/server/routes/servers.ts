@@ -1,9 +1,10 @@
 import { Router } from 'express';
 import { db } from '../db';
-import { flussonicRequest } from '../services/flussonic';
+import { flussonicRequest, serverInBackoff } from '../services/flussonic';
+import { mapLimit } from '../utils/concurrency';
 import { syncServerStreams, syncServerVods } from '../services/sync';
 import { broadcastStreamsUpdate } from '../websocket';
-import { authenticateToken, requireAdmin } from '../middleware/auth';
+import { authenticateToken, requireAdmin, AuthRequest } from '../middleware/auth';
 
 const router = Router();
 
@@ -47,7 +48,7 @@ router.get('/', authenticateToken, requireAdmin, async (req, res) => {
 });
 
 router.post('/', authenticateToken, requireAdmin, async (req, res) => {
-  const { name, url, username, password, api_key } = req.body;
+  const { name, url, username, password, api_key, sync_interval_secs } = req.body;
 
   // Input validation
   if (!name || typeof name !== 'string' || name.trim().length === 0) {
@@ -83,8 +84,11 @@ router.post('/', authenticateToken, requireAdmin, async (req, res) => {
   // Keep api_key column populated for backward compatibility
   const apiKeyValue = `${finalUser}:${finalPass}`;
 
-  const stmt = db.prepare('INSERT INTO servers (name, url, api_key, username, password) VALUES (?, ?, ?, ?, ?)');
-  const info = stmt.run(name.trim(), url.trim(), apiKeyValue, finalUser, finalPass);
+  const syncInterval = Number.isInteger(sync_interval_secs) && sync_interval_secs >= 10 && sync_interval_secs <= 86400
+    ? sync_interval_secs : null;
+
+  const stmt = db.prepare('INSERT INTO servers (name, url, api_key, username, password, sync_interval_secs) VALUES (?, ?, ?, ?, ?, ?)');
+  const info = stmt.run(name.trim(), url.trim(), apiKeyValue, finalUser, finalPass, syncInterval);
 
   const server = { id: info.lastInsertRowid, name: name.trim(), url: url.trim(), api_key: apiKeyValue, username: finalUser, password: finalPass };
 
@@ -128,6 +132,39 @@ router.get('/:id/status', authenticateToken, requireAdmin, async (req, res) => {
   }
 });
 
+// Persisted health record + live probe for a single server
+router.get('/:id/health', authenticateToken, requireAdmin, async (req, res) => {
+  const server = db.prepare('SELECT * FROM servers WHERE id = ?').get(req.params.id) as any;
+  if (!server) return res.status(404).json({ error: 'Server not found' });
+
+  const started = Date.now();
+  try {
+    const response = await flussonicRequest('GET', `${server.url}/flussonic/api/v3/config`, server, null, 10000);
+    const fresh = db.prepare('SELECT last_seen_at, last_attempt_at, last_error, consecutive_failures, latency_ms FROM servers WHERE id = ?').get(server.id) as any;
+    res.json({
+      status: 'online',
+      latency_ms: Date.now() - started,
+      last_seen_at: fresh?.last_seen_at ?? null,
+      last_attempt_at: fresh?.last_attempt_at ?? null,
+      last_error: null,
+      consecutive_failures: 0,
+      in_backoff: false,
+      version: response.data?.version || response.data?.stats?.version || null
+    });
+  } catch (error: any) {
+    const fresh = db.prepare('SELECT last_seen_at, last_attempt_at, last_error, consecutive_failures, latency_ms FROM servers WHERE id = ?').get(server.id) as any;
+    res.json({
+      status: 'offline',
+      latency_ms: fresh?.latency_ms ?? null,
+      last_seen_at: fresh?.last_seen_at ?? null,
+      last_attempt_at: fresh?.last_attempt_at ?? null,
+      last_error: error.message,
+      consecutive_failures: fresh?.consecutive_failures ?? 0,
+      in_backoff: serverInBackoff(fresh || server)
+    });
+  }
+});
+
 router.delete('/:id', authenticateToken, requireAdmin, async (req, res) => {
   try {
     const serverId = req.params.id;
@@ -161,23 +198,63 @@ router.post('/:id/sync', authenticateToken, requireAdmin, async (req, res) => {
     const server = db.prepare('SELECT * FROM servers WHERE id = ?').get(req.params.id) as any;
     if (!server) return res.status(404).json({ error: 'Server not found' });
 
-    const { addedCount, removedCount } = await syncServerStreams(server);
+    const { addedCount, removedCount, pendingRemovals } = await syncServerStreams(server);
     const vodSync = await syncServerVods(server);
+    db.prepare('UPDATE servers SET last_synced_at = CURRENT_TIMESTAMP WHERE id = ?').run(server.id);
 
     if (addedCount > 0 || removedCount > 0) {
       broadcastStreamsUpdate();
     }
 
     res.json({
-      success: true,
+      success: !vodSync.error,
       added: addedCount,
       removed: removedCount,
       vodsAdded: vodSync.addedCount,
-      vodsRemoved: vodSync.removedCount
+      vodsRemoved: vodSync.removedCount,
+      pendingRemovals: (pendingRemovals || 0) + (vodSync.pendingRemovals || 0),
+      ...(vodSync.error ? { error: vodSync.error } : {})
     });
   } catch (error: any) {
     console.error(`Sync error for server ${req.params.id}:`, error.message);
     res.json({ success: false, added: 0, removed: 0, error: error.message });
+  }
+});
+
+// Explicit admin-confirmed reconciliation: applies pending deletions.
+// Regular sync NEVER deletes — it only reports pendingRemovals. This
+// endpoint requires { confirm: true } and still enforces the verified
+// deletion policy (complete inventory + second-fetch confirmation +
+// conservative limits) inside the sync service.
+router.post('/:id/prune', authenticateToken, requireAdmin, async (req: AuthRequest, res) => {
+  try {
+    if (req.body?.confirm !== true) {
+      return res.status(400).json({ error: 'Pruning requires { confirm: true } — deletions are never automatic' });
+    }
+    const server = db.prepare('SELECT * FROM servers WHERE id = ?').get(req.params.id) as any;
+    if (!server) return res.status(404).json({ error: 'Server not found' });
+
+    const s = await syncServerStreams(server, { allowDeletions: true });
+    const vodSync = await syncServerVods(server, { allowDeletions: true });
+
+    // Audit trail: prune is the only path that can delete local rows
+    console.warn(`[prune] admin=${req.user?.username ?? req.user?.id} server=${server.name} removed=${s.removedCount} vodsRemoved=${vodSync.removedCount} pending=${(s.pendingRemovals || 0) + (vodSync.pendingRemovals || 0)}`);
+
+    if (s.removedCount > 0 || vodSync.removedCount > 0) {
+      broadcastStreamsUpdate();
+    }
+
+    res.json({
+      success: !vodSync.error,
+      removed: s.removedCount,
+      vodsRemoved: vodSync.removedCount,
+      pendingRemovals: (s.pendingRemovals || 0) + (vodSync.pendingRemovals || 0),
+      protectedRemovals: (s.protectedRemovals || 0) + (vodSync.protectedRemovals || 0),
+      ...(vodSync.error ? { error: vodSync.error } : {})
+    });
+  } catch (error: any) {
+    console.error(`Prune error for server ${req.params.id}:`, error.message);
+    res.json({ success: false, error: error.message });
   }
 });
 
@@ -189,20 +266,31 @@ router.post('/sync-all', authenticateToken, requireAdmin, async (req, res) => {
     let totalRemoved = 0;
     let totalVodsAdded = 0;
     let totalVodsRemoved = 0;
+    let totalPendingRemovals = 0;
+    const skipped: string[] = [];
+    const failed: string[] = [];
 
-    for (const server of servers) {
+    // Bounded parallelism so one hung server can't stall the whole sync
+    await mapLimit(servers, 4, async (server) => {
+      if (serverInBackoff(server)) {
+        skipped.push(server.name);
+        return;
+      }
       try {
-        const { addedCount, removedCount } = await syncServerStreams(server);
+        const s = await syncServerStreams(server);
         const vodSync = await syncServerVods(server);
 
-        totalAdded += addedCount;
-        totalRemoved += removedCount;
+        totalAdded += s.addedCount + vodSync.addedCount;
+        totalRemoved += s.removedCount + vodSync.removedCount;
         totalVodsAdded += vodSync.addedCount;
         totalVodsRemoved += vodSync.removedCount;
+        totalPendingRemovals += (s.pendingRemovals || 0) + (vodSync.pendingRemovals || 0);
+        if (vodSync.error) failed.push(server.name);
       } catch (err: any) {
         console.error(`Failed to sync server ${server.name}:`, err.message);
+        failed.push(server.name);
       }
-    }
+    });
 
     if (totalAdded > 0 || totalRemoved > 0) {
       broadcastStreamsUpdate();
@@ -213,7 +301,10 @@ router.post('/sync-all', authenticateToken, requireAdmin, async (req, res) => {
       added: totalAdded,
       removed: totalRemoved,
       vodsAdded: totalVodsAdded,
-      vodsRemoved: totalVodsRemoved
+      vodsRemoved: totalVodsRemoved,
+      pendingRemovals: totalPendingRemovals,
+      skipped,
+      failed
     });
   } catch (error: any) {
     console.error('Sync all error:', error.message);

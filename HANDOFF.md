@@ -112,7 +112,7 @@ npm start        # node dist/server.cjs
 
 `PORT` (3000), `DATABASE_PATH` (flussonic.db), `JWT_SECRET`, `TELEGRAM_BOT_TOKEN`, `SSL_ENABLED`, `SSL_KEY_PATH`, `SSL_CERT_PATH`, `NODE_ENV`.
 
-Defaults: `JWT_SECRET` falls back to `'your-secret-key-change-in-production'`; default admin `admin`/`admin123` is auto-created — **change both in production**.
+Security defaults: `JWT_SECRET` is **required** (≥32 chars) in production — the app refuses to boot without it. No default admin is ever created; provision one with `ADMIN_PASSWORD_FILE=<path> npm run admin:provision`.
 
 ---
 

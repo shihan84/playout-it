@@ -6,7 +6,7 @@ export default function Servers() {
   const [servers, setServers] = useState<any[]>([]);
   const [searchQuery, setSearchQuery] = useState('');
   const [isAdding, setIsAdding] = useState(false);
-  const [formData, setFormData] = useState({ name: '', url: '', username: '', password: '' });
+  const [formData, setFormData] = useState({ name: '', url: '', username: '', password: '', sync_interval_secs: '' });
   
   const [metricsServer, setMetricsServer] = useState<any>(null);
   const [metricsData, setMetricsData] = useState<any>(null);
@@ -143,8 +143,11 @@ export default function Servers() {
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
-      await axios.post('/api/servers', formData);
-      setFormData({ name: '', url: '', username: '', password: '' });
+      const payload: any = { ...formData };
+      payload.sync_interval_secs = formData.sync_interval_secs ? parseInt(formData.sync_interval_secs, 10) : undefined;
+      if (payload.sync_interval_secs === undefined) delete payload.sync_interval_secs;
+      await axios.post('/api/servers', payload);
+      setFormData({ name: '', url: '', username: '', password: '', sync_interval_secs: '' });
       setIsAdding(false);
       fetchServers();
       showNotification('Server added successfully');
@@ -284,6 +287,18 @@ export default function Servers() {
                 placeholder="flussonic password"
               />
             </div>
+            <div>
+              <label className="block text-sm font-medium text-zinc-400 mb-1">Sync Interval (seconds, optional)</label>
+              <input
+                type="number"
+                min={10}
+                max={86400}
+                value={formData.sync_interval_secs}
+                onChange={e => setFormData({...formData, sync_interval_secs: e.target.value})}
+                className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-4 py-2 text-white focus:outline-none focus:border-emerald-500 transition-colors"
+                placeholder="Use global auto-sync interval"
+              />
+            </div>
             <div className="flex gap-3 pt-2">
               <button type="submit" className="bg-emerald-500 hover:bg-emerald-600 text-white px-6 py-2 rounded-xl font-medium transition-colors">
                 Save Server
@@ -359,11 +374,29 @@ export default function Servers() {
             <p className="text-sm text-zinc-400 font-mono break-all mb-4">{server.url}</p>
             
             {server.last_checked && (
-              <p className="text-xs text-zinc-500 mb-4 flex items-center gap-1">
+              <p className="text-xs text-zinc-500 mb-2 flex items-center gap-1">
                 <Clock size={12} />
                 Last checked: {new Date(server.last_checked).toLocaleString()}
               </p>
             )}
+
+            <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-zinc-500 mb-4">
+              {server.latency_ms != null && (
+                <span>Latency: <span className="text-zinc-300">{server.latency_ms}ms</span></span>
+              )}
+              {server.last_seen_at && (
+                <span>Last seen: <span className="text-zinc-300">{new Date(server.last_seen_at + 'Z').toLocaleString()}</span></span>
+              )}
+              {(server.consecutive_failures ?? 0) > 0 && (
+                <span className="text-rose-400">Failures: {server.consecutive_failures}</span>
+              )}
+              {server.last_error && (
+                <span className="text-rose-400/80 truncate max-w-full" title={server.last_error}>Error: {server.last_error}</span>
+              )}
+              {server.sync_interval_secs && (
+                <span>Sync: every {server.sync_interval_secs}s</span>
+              )}
+            </div>
             
             <div className="mt-auto pt-4 border-t border-zinc-800 grid grid-cols-2 gap-4">
               <div>

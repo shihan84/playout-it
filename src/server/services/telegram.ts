@@ -40,6 +40,40 @@ export async function sendTelegramMessage(chatId: string, message: string, retry
   }
 }
 
+// Dispatch per-stream alerts with rate limiting + history logging.
+// Shared by the /api/telegram-alerts/send route and the watchdog (which
+// previously called its own HTTP endpoint to reach this logic).
+export async function dispatchStreamAlerts(streamId: number, alertType: string, message: string) {
+  const alerts = db.prepare(`
+    SELECT ta.*, s.name as stream_name
+    FROM telegram_alerts ta
+    JOIN streams s ON ta.stream_id = s.id
+    WHERE ta.stream_id = ? AND ta.alert_enabled = 1
+  `).all(streamId) as any[];
+
+  const results = [];
+  for (const alert of alerts) {
+    if (alert.last_alert_sent) {
+      const diffMinutes = (Date.now() - new Date(alert.last_alert_sent).getTime()) / (1000 * 60);
+      if (diffMinutes < alert.downtime_threshold) {
+        console.log(`Skipping alert for chat ${alert.telegram_chat_id} - last alert sent ${diffMinutes.toFixed(1)} minutes ago`);
+        continue;
+      }
+    }
+
+    const success = await sendTelegramMessage(alert.telegram_chat_id, message);
+    db.prepare(`
+      INSERT INTO telegram_alert_history (telegram_alert_id, alert_type, message, success, error_message)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(alert.id, alertType, message, success ? 1 : 0, success ? null : 'Failed to send');
+    if (success) {
+      db.prepare('UPDATE telegram_alerts SET last_alert_sent = CURRENT_TIMESTAMP WHERE id = ?').run(alert.id);
+    }
+    results.push({ telegram_chat_id: alert.telegram_chat_id, success });
+  }
+  return results;
+}
+
 export async function sendTelegramNotification(message: string) {
   const enabled = db.prepare('SELECT value FROM settings WHERE key = ?').get('telegram_enabled') as any;
   if (!enabled || enabled.value !== 'true') return;

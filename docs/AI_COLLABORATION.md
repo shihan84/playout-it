@@ -187,3 +187,303 @@ User requested consecutive development phases with Devin staging verification af
 **Remaining risks:** `_vod` resolution adds 1–2 probe GETs per write op (negligible); server-offline paths default to `_vod`; qs/esbuild vulns pending upstream-compatible bumps.
 
 **Phase 1B scope ready:** multi-server connectivity, sync reliability, per-server health monitoring, error handling — per `docs/PHASE1B_MULTISERVER_HANDOFF.md`. Recommend mock/isolated staging Flussonic for further tests; no production modifications.
+
+## Devin status — Phase 1B branch created + multi-server audit — 2026-10-14
+
+**Branch:** `feature/phase-1b-multiserver` created from `0591516` (approved 1A baseline + companion-VOD tests). Not merged; no PR yet.
+
+**Companion-VOD compat test added (test #9, integration):** mock Flussonic exposes `legacy-stream` VOD only under the same name and `new-stream` only under `new-stream_vod`. Verified resolver probes `_vod` first, falls back to legacy, and never probes legacy after a `_vod` hit. 9/9 integration + 6/6 regression pass.
+
+### Multi-server audit findings (sync.ts / watchdog.ts)
+
+1. **Sync wipe risk (high):** `syncServerStreams`/`syncServerVods` delete every local row absent from the remote response. A partial/empty/malformed remote response (network blip, auth change) wipes local state — and stream `id` churn orphans `videos`, `user_streams`, `telegram_alerts` rows keyed by it. Observed live: a locally-created stream was auto-removed when its remote PUT silently failed.
+2. **No auto-sync overlap guard:** `checkStreams` has `isChecking`, the auto-sync timer does not. Serial per-server sync with 30s timeouts can exceed the interval at scale → overlapping syncs.
+3. **Sequential everything:** watchdog iterates servers serially — one hung server (30s timeout) delays the whole cycle. Same for auto-sync loop.
+4. **No persisted per-server health:** status is probed on demand in `GET /api/servers`; no `last_seen`, `last_error`, `latency`, or failure counter — errors exist only in logs.
+5. **No retry/backoff/circuit breaker:** offline servers cost a full timeout every interval forever (observed 15s DNS-error spam); only a legacy 401/403 auth retry exists.
+6. **N+1 VOD detail fetch:** `syncServerVods` does one GET per VOD when the remote returns a string array.
+7. **Watchdog self-HTTP call** for Telegram alerts (`POST localhost:port/api/telegram-alerts/send`) inside the checking loop — adds latency; should call the service directly.
+8. **Duplicate names OK** across servers (scoped by server_id) but stream-id instability on delete+re-add breaks client assignments.
+9. **WS broadcast is all-or-nothing:** every client receives the full stream list; no per-user scoping (carry-over).
+
+### Proposed Phase 1B tasks
+
+1. Persist per-server health: `servers.last_seen_at`, `last_error`, `consecutive_failures`, `latency_ms`; update in watchdog + sync; surface in `/api/servers` and UI.
+2. Safe sync: abort deletion reconciliation when the remote list is empty/unexpected while local rows exist; upsert by `UNIQUE(server_id, name)` instead of delete+insert so stream ids (and assignments) survive.
+3. Sync/watchdog concurrency: overlap guard on auto-sync; bounded parallelism (cap ~4 servers) for both watchdog checks and sync; per-server timeout.
+4. Retry policy: exponential backoff / circuit breaker for failing servers; keep the 401 legacy-auth retry.
+5. Per-server sync control + `GET /api/servers/:id/health`; manual sync button already exists — verify it reports per-server errors.
+6. Replace watchdog self-HTTP Telegram call with direct service call.
+7. Fix syncServerVods N+1 (skip detail fetch or batch).
+8. Tests: sync reconciliation against array/`{streams:[]}`/object-map payloads; empty-response no-wipe guard; upsert preserves ids; offline server doesn't block others; concurrent-run overlap guard; 50-server sync cycle timing vs interval.
+
+### Phase 1B acceptance gates
+
+- Lint + all tests green; sync cycle with 50 mock servers completes < interval; a server returning `{}` never deletes local rows; client stream assignments survive sync churn; per-server health visible via API.
+
+## Devin status — Phase 1B implementation P1+P2 — 2026-10-14
+
+**Commit:** `685c9e9` on `feature/phase-1b-multiserver`
+
+**Implemented**
+
+*Safe sync (P1):*
+- Upsert-by-name: existing stream/VOD rows are UPDATEd in place — ids, user_stream_assignments, videos, telegram_alerts survive sync
+- `parseStreamsPayload`/`parseObjectMap` reject error/pagination envelopes and unrecognized shapes before reconciliation
+- Empty remote list + non-empty local state → deletions skipped (`skippedDeletions` flag, warning logged)
+- UNIQUE(server_id,name) indexes; dedupe migration keeps earliest row
+- Test caught a real hole mid-development: `{error:...}` payloads were being turned into a stream named "error" and wiping locals — fixed via ENVELOPE_KEYS rejection
+
+*Reliability (P2):*
+- `mapLimit` bounded concurrency (4) in watchdog, auto-sync, `/api/servers/sync-all`
+- Auto-sync overlap guard (`isSyncing`)
+- Per-server health columns: `last_seen_at`, `last_attempt_at`, `last_error`, `consecutive_failures`, `latency_ms` (flow through `publicServer` automatically)
+- Circuit breaker: ≥3 consecutive failures → backoff 30s doubling to 5min cap; watchdog/auto-sync/sync-all skip, manual `:id/sync` still tries
+- `flussonicRequest` retries network/5xx once with 300ms backoff; 4xx never retried
+- Watchdog Telegram alerts use `dispatchStreamAlerts()` directly (was self-HTTP POST); `POST /api/telegram-alerts/send` gained missing `authenticateToken`
+
+**Tests:** 17/17 pass. New: malformed/empty/envelope sync never deletes local rows; stream id + assignment survive re-sync; metadata refresh verified; 50-server sync-all with 120ms/server latency completes ~4.3s under bounded concurrency; health columns populated.
+
+**Gate:** lint clean, build 120.8 kB, audit = 2 (esbuild low dev-only, qs moderate transitive).
+
+**Remaining:** frontend health-surface UI not yet wired; WS per-user scoping and syncServerVods N+1 still open; per-server sync interval config deferred.
+
+## Devin status — Phase 1B continued — 2026-10-14
+
+**Commit:** `060c01d` on `feature/phase-1b-multiserver`
+
+**Implemented (second batch)**
+- `GET /api/servers/:id/health` — authenticated admin endpoint: live probe + persisted record (latency_ms, last_seen_at, last_attempt_at, last_error, consecutive_failures, in_backoff)
+- Servers dashboard cards now show latency, last-seen, consecutive failures, last error, and per-server sync interval; add-server form accepts optional `sync_interval_secs` (10–86400)
+- WebSocket `STREAMS_UPDATE` scoped per user: JWT payload attached at upgrade; client roles receive only assigned streams (`user_stream_assignments`), admins get the full list. Verified live over WS
+- `syncServerVods` N+1 removed: string-array VODs no longer trigger a per-VOD detail request
+- Auto-sync honors per-server `sync_interval_secs` + `last_synced_at`; skips servers not yet due
+
+**Tests:** 19/19 pass (13 integration + 6 regression). New coverage: `/health` live+persisted state, offline server accumulating failures and being skipped by sync-all via backoff, WS scoping (admin sees new stream, client doesn't, client still sees its assigned stream). 50-server slow-mock sync-all remains ~4.3s.
+
+**Gate:** lint clean, build 123.4 kB, audit = 2 unchanged (esbuild low dev-only, qs moderate transitive).
+
+**Remaining:** draft PR creation blocked — token lacks collaborator permission (`createPullRequest` denied). Frontend health badge could poll `/health` on demand. No production changes.
+
+## Devin status — Phase 1B final acceptance — 2026-10-14
+
+**Branch:** `feature/phase-1b-multiserver`
+
+**Diff review vs security baseline:** 13 files, +650/−186 — sync, watchdog, flussonic, websocket, servers, telegram, migrations, Servers.tsx, tests, docs. All changes accounted for; no unrelated drift.
+
+**Migration verification — found and fixed TWO latent upgrade bugs:**
+1. Dedupe + unique-index creation ran BEFORE `migrateNullableServerId`, which rebuilds the tables — indexes were silently destroyed. Reordered: rebuild → dedupe (child re-point) → index.
+2. The `streams` table rebuild omitted `input_status`/`source_type`/`uptime` — upgraded DBs lost those columns. Fixed rebuild DDL with COALESCE fallbacks.
+3. Dedupe now re-points `user_stream_assignments`, `videos`, `telegram_alerts`, `vod_files` to the kept row — verified by new `tests/migrations.test.ts` (legacy-schema fixture with FK-linked duplicates).
+
+**Acceptance results**
+- 50-server sync-all with 120ms/server latency: ~4.3s (bounded concurrency working); slow, offline and malformed-response servers all covered by tests 10–12
+- `/api/servers/:id/health` — live + persisted; offline server → offline + last_error; ≥3 failures → sync-all `skipped` list includes it (backoff verified)
+- Per-server `sync_interval_secs` honored by auto-sync
+- WS scoping verified: admin receives all streams; client receives only assigned
+- Dashboard shows latency/last-seen/failures/last-error + sync-interval field
+
+**Gate:** lint clean · 21/21 tests (13 integration + 6 regression + 2 migration) · build 124.9 kB · audit = 2 (esbuild low dev-only, qs moderate transitive — no compatible fix path)
+
+**Unresolved:** `gh pr create --draft` fails — `GraphQL: must be a collaborator (createPullRequest)`. Open manually: /pull/new/feature/phase-1b-multiserver
+
+**Phase 2 handoff:** `docs/PHASE2_CHANNEL_LIFECYCLE_HANDOFF.md` created.
+
+## Devin status — Phase 1B closure — 2026-10-14
+
+**Commit:** `2c4e2af` + pending test/doc commit on `feature/phase-1b-multiserver`
+
+**Migration verification — complete:**
+- Legacy fixture (old schema, NOT NULL server_id, duplicate streams/VODs with FK children): dedupe merges + re-points assignments/videos/alerts/vod_files; unique indexes created; uniqueness enforced post-migration; idempotent
+- Fresh install fixture (schema + migrations): all Phase 1B columns + indexes present, zero users (no default admin) — verified
+- Latent bugs fixed in `2c4e2af`: index ordering vs table rebuild; streams rebuild dropping input_status/source_type/uptime
+
+**Tests:** 22/22 pass (13 integration + 6 regression + 3 migration)
+
+**Backup/rollback requirements — GAP:** no DB backup tooling exists. Phase 2 plan requires `scripts/backup-db.ts` (better-sqlite3 `.backup()` + restore doc) before destructive schema work. Rollback today = git revert + restore DB file copy; WAL mode means copying while running needs `.backup()`, not raw file copy.
+
+**Phase 2:** detailed implementation plan + acceptance criteria published in `docs/PHASE2_CHANNEL_LIFECYCLE_HANDOFF.md` (lifecycle state machine, atomic channel create, access control with expiry, bulk ops, health history, openapi.json audit, DB backup script). Implementation NOT started — awaiting scope approval.
+
+**PR blocker (exact):** `gh pr create --draft` → `GraphQL: must be a collaborator (createPullRequest)`. Token has issue-comment scope only. Open manually: /pull/new/feature/phase-1b-multiserver
+
+## Devin status — Phase 1B review fixes — 2026-10-14
+
+**Commit:** `bfc8a19` on `feature/phase-1b-multiserver`
+
+**Critical data-integrity fixes (per code review):**
+- Complete-inventory sync: `fetchAllPages()` follows `next` pagination cursors (≤50 pages, throws if unterminated) — a truncated page set can never reach reconciliation
+- Verified deletion policy: removals require complete inventory + conservative limits (>10 absolute OR >20% of local → reported as `pendingRemovals`, never deleted) + second independent fetch confirmation (only names absent in BOTH inventories are deleted)
+- Names-only VOD responses no longer overwrite stored `paths` with `[]`
+- Malformed VOD-file listings rejected before `vod_files` is touched
+- `syncServerVods` returns explicit `{ error }` (was silent zero-changes); `/:id/sync` returns `success:false` + error; `/sync-all` reports `pendingRemovals`, `skipped`, `failed`
+- `scripts/backup-db.ts` — online SQLite `.backup()` with row-count verification; backup+restore round-trip verified on live `flussonic.db`
+
+**New test evidence (all passing):**
+- 50 local streams / 10 remote → 0 deletions, `pendingRemovals=40`
+- 20 local VODs / 5 remote → all 20 preserved
+- Names-only VOD sync leaves `/storage/pv-0` paths intact
+- `{error}` file-listing → HTTP 500, `vod_files` untouched
+- `/vods` garbage payload → `success:false` + error message surfaced
+
+**Gate:** lint clean · **26/26 tests** · build 127.7 kB · audit = 2 unchanged (esbuild low, qs moderate)
+
+**Phase 2 remains on hold** pending review of these fixes.
+
+## Devin status — Phase 1B final hardening — 2026-10-14
+
+**Commit:** `9223fe6` on `feature/phase-1b-multiserver`
+
+**1. Automatic deletions disabled by default.** Regular sync (manual, auto-sync, watchdog, sync-all) now only inserts/updates — it never deletes. Missing names are reported as `pendingRemovals`. Actual deletion requires `POST /api/servers/:id/prune` with admin auth + `{confirm:true}`, and still enforces complete-inventory + second-fetch confirmation + conservative limits inside the sync service.
+
+**2. Pagination cursor confinement.** `resolveNextCursor()` validates every `next` URL: must resolve to the configured server's origin, must stay under `/flussonic/api`, must not repeat a visited URL (loop detection), >50 pages aborts. Verified by tests: cross-origin cursor, off-path cursor (`/admin/secret`), self-loop, and non-terminating pagination all fail the sync closed.
+
+**3. Per-record validation.** `validateStreamRecord`/`validateVodRecord` run over the entire inventory before any DB write — one malformed record (bad name type, non-array inputs/pushes, arrays-as-records) fails the whole sync. Fail closed, never partial.
+
+**4. Repeated partial inventories.** Two consecutive syncs at 18/20 remote → zero deletions both times, `pendingRemovals: 2` each time. `prune` without confirm → 400; with confirm → exactly the 2 verified-missing removed.
+
+**5. SQLite backup/restore.** `scripts/backup-db.ts` uses better-sqlite3 `.backup()`; new disposable-DB test proves a WAL-mode live DB backs up completely (including WAL-resident rows) and restores to an independent writable copy.
+
+**Gate:** lint clean · **30/30 tests pass** (20 integration + 4 migration + 6 regression) · build 131.1 kB · audit = 2 unchanged (esbuild low, qs moderate — no critical/high).
+
+**Phase 2 remains on hold.** No merge, deploy, or production changes.
+
+**PR blocker (unchanged):** `gh pr create` → `GraphQL: must be a collaborator (createPullRequest)`. Manual: /pull/new/feature/phase-1b-multiserver
+
+## Devin status — Phase 1B final PR review — 2026-10-14
+
+**Commit:** `3f19307` on `feature/phase-1b-multiserver`
+
+**Review findings addressed this round:**
+
+- **Redirect credential-forwarding gap (found & fixed):** axios followed redirects by default — a 3xx from a Flussonic server could forward the Basic auth header to an arbitrary host, bypassing cursor confinement. `flussonicRequest` now sets `maxRedirects: 0` + `validateStatus < 300`; a redirect fails loudly. Verified: mock 302 → `success:false`, no cross-host request.
+- **Prune auth verified:** anon → 401, client → 403, admin without `{confirm:true}` → 400, admin with confirm → verified deletion only.
+- **Prune audit log:** `[prune] admin=<username> server=<name> removed=<n> vodsRemoved=<n> pending=<n>` on every invocation.
+- **Transaction safety:** deletion sets wrapped in `db.transaction` — atomic, no partial removal sets.
+- **Child protection:** candidates with live `user_stream_assignments`/`videos`/`telegram_alerts`/`vod_files` are never deleted, even by confirmed prune — surfaced as `protectedRemovals`. Verified: stream with assignment+video survives prune (`removed=1`, `protectedRemovals=1`, assignment intact).
+- **Backup/restore:** `backup-db.ts` now supports `--restore <file> --confirm`; disposable WAL-DB test covers backup+restore round-trip.
+
+**Gate (independent rerun):** lint clean · **32/32 tests pass** · build 133.4 kB · audit = 2 unchanged (esbuild low dev-only, qs moderate — no critical/high).
+
+**Remaining production risks:**
+1. `/flussonic/api` under plain HTTP — Basic credentials sent base64, interceptable on untrusted networks. Deploy HTTPS or a private network path.
+2. Pending/protected removals accumulate without UI — no dashboard surface yet for `pendingRemovals`/`protectedRemovals` (API exposes them; admin UX pending Phase 2).
+3. No automated scheduled backup — `backup-db.ts` exists but must be wired into cron/PM2 deployment manually.
+4. `qs` moderate DoS is transitive (via a dependency); no compatible fix yet — monitor.
+5. PR creation still blocked: `GraphQL: must be a collaborator (createPullRequest)`. Manual: /pull/new/feature/phase-1b-multiserver
+
+**Phase 2 remains on hold.** No merge, deploy, or production changes performed.
+
+## Devin status — Phase 1B review closure — 2026-10-14
+
+**Commit:** `10c0f0e` on `feature/phase-1b-multiserver` — implementation FROZEN pending PR review.
+
+**Closure deliverables:**
+- `docs/PHASE1B_PR_DESCRIPTION.md` — complete PR description covering security, sync, migration, and backup changes + test evidence + remaining risks
+- `docs/DEPLOYMENT_CHECKLIST.md` — HTTPS, credential handling, backup scheduling, migration verification, runtime checks, rollback procedure
+- Test record: **32/32 pass** (22 integration + 4 migration + 6 regression), lint clean, build 133.4 kB, audit = 2 non-critical
+- Phase 2 backlog: `docs/PHASE2_CHANNEL_LIFECYCLE_HANDOFF.md` (P0 lifecycle state machine + stream_events, P1 atomic channel create, P2 access expiry/max-sessions, P3 bulk/template ops, P4 health timeline, P5 openapi.json audit) — NOT started, awaiting scope approval
+
+**Remaining production risks (final):**
+1. HTTP Basic credentials interceptable without HTTPS/private network
+2. `pendingRemovals`/`protectedRemovals` API-only, no UI (Phase 2)
+3. Backups require manual cron/PM2 scheduling
+4. `qs` moderate DoS — transitive, no compatible fix
+5. PR creation blocked: `GraphQL: must be a collaborator (createPullRequest)` — open manually at /pull/new/feature/phase-1b-multiserver
+
+**Status:** Awaiting PR review + Phase 2 scope approval. No merge, deploy, or production changes.
+
+## Devin status — Phase 1B PR & staging acceptance prep — 2026-10-14
+
+**Commit:** `9a839c0` on `feature/phase-1b-multiserver`
+
+1. PR description updated to current head; merge-base vs `feature/broadcast-security-foundation` verified = `0591516` (clean 14-commit stack, 18 files).
+2. Gate rerun: **32/32 tests**, lint clean, build 133.4 kB, audit = 2 non-critical (esbuild low dev-only, qs moderate).
+3. `docs/STAGING_ACCEPTANCE_TEST.md` added — isolated staging drill: sync, safe deletion + protected removals, health/backoff, backup+restore rollback, failure injection, sign-off criteria.
+4. **Secret scan finding (fixed):** `Login.tsx` displayed "Default admin: admin / admin123" — stale (no default admin is provisioned) and disclosed a credential in the shipped bundle; replaced with a neutral message. `HANDOFF.md` corrected to document JWT_SECRET requirement + explicit provisioning. No other credentials, API keys or Flussonic secrets found in tracked files (deployment creds remain local-DB only).
+5. Deployment prerequisites: `docs/DEPLOYMENT_CHECKLIST.md` (JWT_SECRET ≥32, admin provisioning, HTTPS, backup cron, rollback).
+
+**Status:** Phase 1B ready for PR review + staging acceptance. No merge, deploy, production changes, or Phase 2 code.
+
+## Devin status — PR #2 review fixes — 2026-10-14
+
+**Commit:** `1399b93` on `feature/phase-1b-multiserver`. PR #2 (draft) exists: https://github.com/shihan84/playout-it/pull/2 — earlier `createPullRequest` permission blocker is moot (PR was created outside this automation).
+
+**Reviewer findings (Saad123safa) — all addressed:**
+
+1. **WS missing-identity exposure (fixed):** `broadcastStreamsUpdate` was fail-open — `!user || role==='admin'` sent the full stream list to sockets without identity. Now fail-closed: no verified user → nothing sent; role re-validated against `users` table per broadcast so stale JWT claims/deleted users lose access immediately. Unit tests: `tests/websocket.test.ts` (3 tests).
+2. **Names-only stream metadata overwrite (fixed):** string records previously drove `UPDATE streams SET live_url='', inputs='[]', push_urls='[]'`. Now fields merge only when present in the remote record; new names-only entries still insert. Integration test added.
+3. **Backup verification race (fixed):** `backup-db.ts` compared dest counts to a single live read — false failures on busy DBs. Now `PRAGMA integrity_check` on the backup + counts bounded by a before/after snapshot window. Concurrent-write regression test added.
+4. **Docs updated:** head SHA references bumped to `1399b93`; PR-blocker notes superseded (PR #2 exists as draft).
+5. Staging acceptance + deployment checklist already delivered (`docs/STAGING_ACCEPTANCE_TEST.md`, `docs/DEPLOYMENT_CHECKLIST.md`) — flagged in review reply.
+
+**Gate:** lint clean · **37/37 tests pass** (23 integration + 5 migration + 3 WS + 6 regression) · build 134.0 kB · audit = 2 non-critical.
+
+**Status:** PR #2 stays draft. No merge, deploy, or production changes. Phase 2 on hold.
+
+## Devin status — PR #2 final staging gate — 2026-10-14
+
+**Commit:** `401ff6c` on `feature/phase-1b-multiserver` (draft PR #2 head)
+
+**Independent gate rerun:** lint clean · **37/37 tests pass** · build 134.0 kB · audit = 2 non-critical.
+
+**Staging acceptance (mocks + disposable DBs):**
+- WS revocation verified — identity-less/deleted/stale-role sockets receive nothing
+- Names-only stream sync — metadata preserved, new entries insert
+- Prune auth — 401/403/400 matrix + confirmed-only verified deletion + child protection
+- Backup/restore — live script drill: verified backup → wiped rows → `--restore` refused without `--confirm` → restored cleanly, integrity ok
+- Sync safety matrix (malformed/empty/partial/cursor confinement/redirect) — all covered
+
+**Unresolved security or data-loss findings: none.** PR #2 remains draft; no merge/deploy/production changes; Phase 2 on hold.
+
+## Devin status — Phase 1B approval prep — 2026-10-14
+
+**Commit:** `f82314c` on `feature/phase-1b-multiserver` (PR #2 head)
+
+1. **CodeRabbit manual review triggered** via `@coderabbitai review` comment on PR #2 — acknowledged "Review triggered"; no findings posted yet at time of writing (incremental review in progress). Will address any actionable findings when they land.
+2. **CI checks:** "Stage 1 security CI" previously ran only on `push` to the 1A branch and PRs to `main` — the 1B branch had no coverage. Added `feature/phase-1b-multiserver` to the push trigger and extended the job with the full test suite. **First run on the 1B branch: success** (run 38558461242).
+3. **Base dependency verified:** PR #2 base = `feature/broadcast-security-foundation` (PR #1's branch); merge-base `0591516` = its tip — correct stacked dependency. Merge order requires PR #1 first, then retarget PR #2 to `main`.
+4. **Rollout plan:** `docs/MERGE_AND_ROLLOUT_PLAN.md` — merge order, pre-deploy gates, deploy steps, rollback, 24h monitoring, non-goals.
+
+**Status:** PR #2 draft, CI green, awaiting CodeRabbit output + human review. No merge/deploy/production changes; Phase 2 on hold.
+
+## Devin status — PR #2 CodeRabbit review resolved — 2026-10-14
+
+**Commit:** `9a93d38` on `feature/phase-1b-multiserver`
+
+**CodeRabbit findings — all addressed:**
+- `next` is an opaque cursor → echoed as `?cursor=` (URL-shaped cursors still origin/path-confined; loop+page caps kept). Was a major correctness bug — real paginated servers would have failed sync.
+- `POST /api/telegram-alerts/send` → admin-only (client could spoof alerts + suppress watchdog via last_alert_sent)
+- Dedupe in one transaction; INSERT OR IGNORE re-point for assignments/alerts (UNIQUE collision safe); no swallowed UPDATEs
+- Child protection re-checked inside the delete transaction (late-protected → protectedRemovals)
+- recordServerFailure once per request (was per-attempt → early backoff)
+- Interval skip applies only to overridden servers; tick = min(global, min override)
+- Bonus fix: repeated record across pages → UNIQUE violation (map updated post-insert)
+- 4 doc findings fixed (checklist step, staging seed 10 streams + backoff precondition, Phase 2 backup prereq)
+
+**Gate:** lint clean · **40/40 tests** · build 134 kB · audit 2 non-critical · **CI green on 1B branch** (run 38561226569 — workflow extended to cover this branch + full suite).
+
+**Acceptance summaries posted on PR #1 and PR #2.** Merge order confirmed: PR #1 → main, then retarget + merge PR #2. Awaiting explicit merge approval.
+
+## Devin status — Final merge readiness — 2026-10-14
+
+**Heads:** PR #2 = `7df6981` (draft, MERGEABLE, base `feature/broadcast-security-foundation`) · PR #1 = `0591516` (draft→open, MERGEABLE, base `main`)
+
+**Verified:**
+- CI run **38561641173** on PR #2 head `7df6981` — **success** (lint + full 40-test suite + build)
+- All **10 CodeRabbit findings resolved** (6 code: opaque cursor, /send auth, dedupe tx, late child check, per-request failure count, interval skip; 4 docs: checklist step, staging seed/backoff, Phase 2 backup prereq). No new findings since.
+- PR #1 CI green (runs 38544767338, 38544762014); PR #2 merge-base = PR #1 tip — stack confirmed.
+
+**Merge sequence (awaiting explicit approval — NOT executed):**
+1. Merge PR #1 (`feature/broadcast-security-foundation` → `main`)
+2. Retarget PR #2 base to `main` (`gh pr edit 2 --base main`), confirm diff shrinks to 1B-only changes
+3. Merge PR #2 (`feature/phase-1b-multiserver` → `main`)
+4. Deploy per `docs/MERGE_AND_ROLLOUT_PLAN.md` + `docs/DEPLOYMENT_CHECKLIST.md`
+
+**Remaining deployment risks:**
+- HTTP Basic to Flussonic interceptable without HTTPS/private network
+- pendingRemovals/protectedRemovals have no UI surface (Phase 2)
+- Backups need manual cron/PM2 scheduling at deploy time
+- `qs` moderate DoS — transitive, no compatible fix; monitor
+- Per-server sync override shorter than global takes effect after watchdog restart
+
+**Status:** Ready for merge approval. Nothing merged or deployed.
