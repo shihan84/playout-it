@@ -3,7 +3,7 @@ import multer from 'multer';
 import os from 'os';
 import fs from 'fs';
 import { db } from '../db';
-import { flussonicRequest } from '../services/flussonic';
+import { flussonicRequest, resolveCompanionVodName } from '../services/flussonic';
 import { updatePlaylistFile } from '../services/playlist';
 import { broadcastStreamsUpdate } from '../websocket';
 import { parseStream } from '../utils/streams';
@@ -153,10 +153,11 @@ router.put('/:id', authenticateToken, requireAdmin, async (req, res) => {
       }
     }
 
-    // Automatically create a VOD folder for this stream if it doesn't exist
-    const vodName = `${name}_vod`;
+    // Automatically create a VOD folder for this stream if it doesn't exist.
+    // resolveCompanionVodName keeps legacy same-name VODs working on upgrades.
+    const vodName = await resolveCompanionVodName(server, name);
     const vodPath = `/storage/${vodName}`;
-    const existingVod = db.prepare('SELECT * FROM vods WHERE name = ? AND server_id = ?').get(vodName, server_id);
+    const existingVod = db.prepare('SELECT * FROM vods WHERE name IN (?, ?) AND server_id = ?').get(vodName, name, server_id);
     if (!existingVod) {
       const vodPayload = {
         storages: [{ url: vodPath }]
@@ -203,14 +204,17 @@ router.delete('/:id', authenticateToken, requireAdmin, async (req, res) => {
           .catch(e => console.error('Flussonic delete error (ignored):', e.message));
 
         // Also try to delete the associated VOD location if it exists
-        const vodUrl = `${server.url}/flussonic/api/v3/vods/${encodeURIComponent(`${stream.name}_vod`)}`;
+        const vodName = await resolveCompanionVodName(server, stream.name);
+        const vodUrl = `${server.url}/flussonic/api/v3/vods/${encodeURIComponent(vodName)}`;
         await flussonicRequest('DELETE', vodUrl, server)
           .catch(e => console.error('Flussonic delete VOD error (ignored):', e.message));
       }
     }
     db.prepare('DELETE FROM streams WHERE id = ?').run(req.params.id);
     if (stream) {
-      db.prepare('DELETE FROM vods WHERE name = ? AND server_id = ?').run(`${stream.name}_vod`, stream.server_id);
+      // Clean up local VOD row under either naming convention
+      db.prepare('DELETE FROM vods WHERE name IN (?, ?) AND server_id = ?')
+        .run(`${stream.name}_vod`, stream.name, stream.server_id);
     }
     res.json({ success: true });
   } catch (error: any) {
@@ -360,8 +364,9 @@ router.post('/:id/videos', authenticateToken, requireStreamAccess, upload.single
     if (!server) throw new Error('Server not found');
 
     // Upload video to Flussonic (VOD name differs from stream name —
-    // Flussonic shares a namespace between streams and VODs)
-    const vodName = `${stream.name}_vod`;
+    // Flussonic shares a namespace between streams and VODs). Resolves to
+    // the legacy same-name VOD when one exists from a pre-upgrade install.
+    const vodName = await resolveCompanionVodName(server, stream.name);
     const uploadUrl = `${server.url}/flussonic/api/v3/vods/${encodeURIComponent(vodName)}/storages/0/files/${req.file.originalname}`;
     const fileBuffer = fs.readFileSync(req.file.path);
 
@@ -414,8 +419,9 @@ router.delete('/:id/videos/:filename', authenticateToken, requireStreamAccess, a
   try {
     const server = db.prepare('SELECT * FROM servers WHERE id = ?').get(stream.server_id) as any;
     if (server) {
-      // Delete video from Flussonic
-      const deleteUrl = `${server.url}/flussonic/api/v3/vods/${encodeURIComponent(`${stream.name}_vod`)}/storages/0/files/${req.params.filename}`;
+      // Delete video from Flussonic (resolve legacy same-name VODs too)
+      const vodName = await resolveCompanionVodName(server, stream.name);
+      const deleteUrl = `${server.url}/flussonic/api/v3/vods/${encodeURIComponent(vodName)}/storages/0/files/${req.params.filename}`;
       await flussonicRequest('DELETE', deleteUrl, server).catch(e => console.warn('Failed to delete from Flussonic (ignored):', e.message));
       console.log(`Video deleted from Flussonic VOD: ${stream.name}/${req.params.filename}`);
     }
@@ -442,7 +448,9 @@ router.get('/:id/playlist.txt', authenticateToken, requireStreamAccess, (req, re
 
   const playlistContent = videos.map((v: any) => {
     const fname = v.filename as string;
-    if (fname.startsWith(`${stream.name}/`)) return fname.slice(stream.name.length + 1);
+    for (const prefix of [`${stream.name}/`, `${stream.name}_vod/`]) {
+      if (fname.startsWith(prefix)) return fname.slice(prefix.length);
+    }
     return fname;
   }).join('\n');
   res.type('text/plain').send(playlistContent);
@@ -456,7 +464,11 @@ router.get('/:id/vod-files', authenticateToken, requireStreamAccess, async (req,
     if (!stream.server_url || (!stream.api_key && !stream.username)) return res.json({ files: [] });
 
     const baseUrl = stream.server_url.replace(/\/$/, '');
-    const encodedName = encodeURIComponent(`${stream.name}_vod`);
+    const vodName = await resolveCompanionVodName(
+      { url: stream.server_url, api_key: stream.api_key, username: stream.username, password: stream.password },
+      stream.name
+    );
+    const encodedName = encodeURIComponent(vodName);
     const urls = [
       `${baseUrl}/flussonic/api/v3/vods/${encodedName}/storages/0/files`,
       `${baseUrl}/flussonic/api/v3/vods/${encodedName}/files`,
