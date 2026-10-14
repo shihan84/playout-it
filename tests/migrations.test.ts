@@ -66,6 +66,14 @@ test('migrations preserve production data and dedupe keeps FK references valid',
   assert.ok(idx.includes('idx_streams_server_name'));
   assert.ok(idx.includes('idx_vods_server_name'));
 
+  // Phase 2 lifecycle column + events table survive the legacy rebuild path
+  const streamCols = db.prepare('PRAGMA table_info(streams)').all().map((c: any) => c.name);
+  assert.ok(streamCols.includes('lifecycle_state'), 'streams.lifecycle_state missing after legacy migration');
+  assert.ok(streamCols.includes('channel_group'), 'streams.channel_group missing after legacy migration');
+  assert.ok(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='stream_events'").get(), 'stream_events table missing');
+  const states = db.prepare('SELECT DISTINCT lifecycle_state s FROM streams').all().map((r: any) => r.s);
+  assert.ok(states.every(s => s === 'live'), `existing streams must default to live, got ${states}`);
+
   // Uniqueness now enforced
   assert.throws(() => db.prepare("INSERT INTO streams (server_id, name, live_url, playlist_url) VALUES (1, 'dupstream', 'x', '')").run());
 
@@ -100,8 +108,13 @@ test('fresh install: schema + migrations produce complete DB with no admin user'
   assert.ok(idx.includes('idx_streams_server_name') && idx.includes('idx_vods_server_name'));
 
   const streamCols = db.prepare('PRAGMA table_info(streams)').all().map((c: any) => c.name);
-  for (const c of ['input_status', 'source_type', 'uptime', 'inputs', 'push_urls']) {
+  for (const c of ['input_status', 'source_type', 'uptime', 'inputs', 'push_urls', 'lifecycle_state', 'channel_group']) {
     assert.ok(streamCols.includes(c), `streams.${c} missing on fresh install`);
+  }
+  assert.ok(db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name='stream_events'").get(), 'stream_events missing on fresh install');
+  const assignCols = db.prepare('PRAGMA table_info(user_stream_assignments)').all().map((c: any) => c.name);
+  for (const c of ['expires_at', 'max_sessions']) {
+    assert.ok(assignCols.includes(c), `user_stream_assignments.${c} missing on fresh install`);
   }
   db.close();
 });

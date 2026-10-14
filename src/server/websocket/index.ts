@@ -24,8 +24,32 @@ export function verifyWsAuth(request: any): any | null {
   }
 }
 
+// Lowest max_sessions across the user's active assignments, or null when
+// unconstrained. Counted against concurrent WS connections for that user.
+export function maxSessionsForUser(userId: number): number | null {
+  const row = db.prepare(`
+    SELECT MIN(max_sessions) AS m FROM user_stream_assignments
+    WHERE user_id = ? AND max_sessions IS NOT NULL
+      AND (expires_at IS NULL OR datetime(expires_at) > datetime('now'))
+  `).get(userId) as any;
+  return row?.m ?? null;
+}
+
 wss.on('connection', (ws, request: any) => {
   (ws as any).user = (request as any).wsUser || null;
+  const user = (ws as any).user;
+  if (user && typeof user.id === 'number') {
+    const limit = maxSessionsForUser(user.id);
+    if (limit !== null) {
+      const openForUser = [...clients].filter(c =>
+        c.readyState === WebSocket.OPEN && (c as any).user?.id === user.id
+      ).length;
+      if (openForUser >= limit) {
+        ws.close(4409, 'max_sessions reached');
+        return;
+      }
+    }
+  }
   clients.add(ws);
   ws.on('close', () => clients.delete(ws));
 });
@@ -41,7 +65,7 @@ export const broadcastStreamsUpdate = () => {
     const parsedStreams = streams.map(parseStream);
     const adminMessage = JSON.stringify({ type: 'STREAMS_UPDATE', data: parsedStreams });
 
-    const assignmentStmt = db.prepare('SELECT stream_id FROM user_stream_assignments WHERE user_id = ?');
+    const assignmentStmt = db.prepare(`SELECT stream_id FROM user_stream_assignments WHERE user_id = ? AND (expires_at IS NULL OR datetime(expires_at) > datetime('now'))`);
     const userStmt = db.prepare('SELECT role FROM users WHERE id = ?');
     const clientMessageCache = new Map<number, string>();
     const roleCache = new Map<number, string | null>();

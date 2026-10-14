@@ -510,3 +510,31 @@ User requested consecutive development phases with Devin staging verification af
 **Residual risks (unchanged):** HTTPS/private path required for Flussonic Basic auth; explicit `JWT_SECRET` + admin provisioning required in production; pending/protected removals have no UI (Phase 2); backups need cron/PM2 scheduling; `qs` moderate DoS monitored; interval overrides may need watchdog restart.
 
 **Phase 2:** implementation branch `feature/phase-2-channel-lifecycle` prepared off merged `main`. Backlog + plan in `docs/PHASE2_CHANNEL_LIFECYCLE_HANDOFF.md`. **Code not started — awaiting scope approval.**
+
+## Devin status — Phase 2 P0–P5 implementation — 2026-10-14
+
+Branch `feature/phase-2-channel-lifecycle` off `main@38ce4ea`. All five milestones implemented and verified on mocks only.
+
+**P0 — Lifecycle state machine**
+- `streams.lifecycle_state` (default `live`), `stream_events` table (stream_id, from/to_state, actor_id, detail, created_at)
+- `src/server/services/lifecycle.ts`: `draft → provisioned → live ⇄ suspended → retired`; terminal `retired`; server-reachability required for provisioned/live; playlist channels require companion VOD for `live`
+- Endpoints: `POST /api/streams/:id/transition` (admin), `GET /api/streams/:id/lifecycle` (assigned/admin) — ordered events incl. creation + actor
+
+**P1 — Atomic channel creation** — `src/server/services/channels.ts` + `POST /api/channels`: pre-flight duplicate check (local DB + remote stream/vod/companion-VOD namespace), VOD-first provision with remote rollback on stream failure, transactional local insert. Fails closed on unreachable server (502).
+
+**P2 — Access enforcement** — `user_stream_assignments.expires_at` + `max_sessions`. Expiry enforced in `requireStreamAccess` (403 expired), `/api/streams`, `/api/my-streams`, WS scoping. `max_sessions` caps concurrent WS sockets (min over active assignments; close code 4409). `POST /api/users/:userId/streams` accepts both fields; `PATCH /api/users/:userId/streams/:streamId` updates them.
+
+**P3 — Bulk ops + templates** — `channel_templates` table + GET/POST/DELETE `/api/channels/templates`; `POST /api/channels/bulk` actions create/transition/delete, `template_id` expansion, bounded concurrency (4), ≤100 items, per-item results.
+
+**P4 — Health timeline** — watchdog records real status transitions into `stream_events` (actor NULL, `watchdog:` detail); unreachable-server offline marks recorded. Unknown baselines skipped to avoid noise.
+
+**P5 — OpenAPI audit** — `docs/FLUSSONIC_API_COMPATIBILITY.md`. Fixed: `stats.input_alive` not in spec → `stats.inputs[].active` fallback; `client_count` → `online_clients` preference. Documented: `storage` singular fallback is legacy-only; VOD file-list `next` pagination not yet followed (truncation-only risk); `config_on_disk` undocumented but optional.
+
+**Gate on branch:** lint ✅ · **45/45 tests** ✅ · build 156.4 kB ✅ · audit 2 non-critical ✅
+
+### Contract alignment fixes (post-rebase onto f4ae2e1)
+- Added `streams.channel_group TEXT` (nullable) — schema + migration + verified in legacy + fresh fixture tests
+- Concurrent conflicting transitions guarded: state re-read inside `db.transaction()` → 409 on race
+- Explicit tests: `provisioned→retired` ✅, `suspended→retired` ✅, same-state dup → 409, missing stream → 404
+- No remote side effects on suspend/retire: verified zero remote requests during `live→suspended→retired`
+- `channel_group` stored and queryable via `/lifecycle` endpoint

@@ -8,6 +8,7 @@ import { updatePlaylistFile } from '../services/playlist';
 import { broadcastStreamsUpdate } from '../websocket';
 import { parseStream } from '../utils/streams';
 import { authenticateToken, requireAdmin, requireStreamAccess, AuthRequest } from '../middleware/auth';
+import { transitionStream, getStreamEvents, allowedTransitions, isLifecycleState, recordStreamEvent } from '../services/lifecycle';
 
 const upload = multer({
   dest: os.tmpdir(),
@@ -32,6 +33,7 @@ router.get('/', authenticateToken, (req: AuthRequest, res) => {
         LEFT JOIN servers ON streams.server_id = servers.id
         JOIN user_stream_assignments ON streams.id = user_stream_assignments.stream_id
         WHERE user_stream_assignments.user_id = ?
+          AND (user_stream_assignments.expires_at IS NULL OR datetime(user_stream_assignments.expires_at) > datetime('now'))
       `).all(req.user.id);
     }
 
@@ -107,6 +109,7 @@ router.post('/', authenticateToken, requireAdmin, async (req, res) => {
     const stmt = db.prepare('INSERT INTO streams (server_id, name, live_url, playlist_url, push_urls, inputs) VALUES (?, ?, ?, ?, ?, ?)');
     // Keep live_url and playlist_url empty for backward compatibility in DB, use inputs
     const info = stmt.run(server_id, name.trim(), '', '', JSON.stringify(push_urls || []), JSON.stringify(inputs || []));
+    recordStreamEvent(Number(info.lastInsertRowid), null, 'live', (req as AuthRequest).user.id, 'stream created');
 
     broadcastStreamsUpdate();
     res.json({ id: info.lastInsertRowid, server_id, name, inputs, push_urls });
@@ -222,6 +225,28 @@ router.delete('/:id', authenticateToken, requireAdmin, async (req, res) => {
   }
 });
 
+// Lifecycle state machine (Phase 2 P0)
+router.post('/:id/transition', authenticateToken, requireAdmin, async (req: AuthRequest, res) => {
+  const { to } = req.body || {};
+  if (!to || typeof to !== 'string') {
+    return res.status(400).json({ error: 'Target state "to" is required' });
+  }
+  try {
+    const updated = await transitionStream(Number(req.params.id), to as any, req.user.id);
+    broadcastStreamsUpdate();
+    res.json({ id: updated.id, name: updated.name, lifecycle_state: updated.lifecycle_state });
+  } catch (e: any) {
+    res.status(e.status || 500).json({ error: e.message });
+  }
+});
+
+router.get('/:id/lifecycle', authenticateToken, requireStreamAccess, (req, res) => {
+  const stream = db.prepare('SELECT id, name, lifecycle_state FROM streams WHERE id = ?').get(req.params.id) as any;
+  if (!stream) return res.status(404).json({ error: 'Stream not found' });
+  const from = isLifecycleState(stream.lifecycle_state) ? stream.lifecycle_state : 'live';
+  res.json({ stream_id: stream.id, name: stream.name, lifecycle_state: from, allowed: allowedTransitions(from), events: getStreamEvents(stream.id) });
+});
+
 router.get('/:id/details', authenticateToken, requireStreamAccess, async (req, res) => {
   try {
     const stream = db.prepare(`
@@ -285,7 +310,7 @@ router.get('/:id/details', authenticateToken, requireStreamAccess, async (req, r
         stream.status = (fStats.alive === true || fStats.running === true || fStats.status === 'running') ? 'online' : 'offline';
         stream.input_status = flussonicInputs.length > 0 && flussonicInputs[0].stats ? 'online' : 'offline';
         stream.bitrate = fStats.bitrate || 0;
-        stream.client_count = fStats.client_count || 0;
+        stream.client_count = fStats.online_clients ?? fStats.client_count ?? 0;
         stream.uptime = fStats.lifetime ? Math.floor(fStats.lifetime / 1000) : 0;
         stream.published_via = fStats.published_via || null;
         stream.published_from = fStats.published_from || null;

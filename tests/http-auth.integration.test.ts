@@ -27,7 +27,9 @@ const mockBehavior = {
   // Optional pagination cursor generator: (requestUrl) => nextCursor|null
   streamsNext: null as null | ((url: string) => string | null),
   // Optional redirect target — mock responds 302 Location to /streams
-  redirectTo: null as null | string
+  redirectTo: null as null | string,
+  // Optional PUT failure — mock responds 500 when the URL matches
+  failPut: null as null | RegExp
 };
 
 let appProcess: any;
@@ -70,6 +72,11 @@ test.before(async () => {
     if (req.method === 'DELETE') remoteDeletes.push(req.url || '');
     remoteRequests.push(`${req.method} ${req.url}`);
     const respond = () => {
+      if (req.method === 'PUT' && mockBehavior.failPut && mockBehavior.failPut.test(req.url || '')) {
+        res.statusCode = 500;
+        res.end(JSON.stringify({ error: 'mock_put_failure' }));
+        return;
+      }
       if (req.method === 'GET' && mockBehavior.redirectTo && /\/streams/.test(req.url || '')) {
         res.statusCode = 302;
         res.setHeader('Location', mockBehavior.redirectTo);
@@ -916,4 +923,359 @@ test('a failed request increments consecutive_failures once, not per retry', asy
   const after = (idb.prepare('SELECT consecutive_failures f FROM servers WHERE id = ?').get(server.id) as any).f;
   assert.equal(after - before, 1, `one failed request must count once despite internal retry (got +${after - before})`);
   idb.close();
+});
+
+test('lifecycle state machine: transitions, validation, actor + event history', async () => {
+  const { res: adminLogin } = await login('itadmin', 'it-admin-pass-12345');
+  const { token } = await adminLogin.json();
+  const headers = { authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+  const { res: clientLogin } = await login('itclient', 'it-client-pass-12345');
+  const { token: clientToken } = await clientLogin.json();
+  const clientHeaders = { authorization: `Bearer ${clientToken}`, 'Content-Type': 'application/json' };
+
+  // Reachable mock server + stream
+  const mk = await fetch(`${BASE}/api/servers`, {
+    method: 'POST', headers,
+    body: JSON.stringify({ name: 'mock-lifecycle', url: `http://127.0.0.1:${remotePort}`, username: 'u', password: 'p123456' })
+  });
+  const server = await mk.json();
+  const createRes = await fetch(`${BASE}/api/streams`, {
+    method: 'POST', headers,
+    body: JSON.stringify({ server_id: server.id, name: 'lc-stream', inputs: ['rtsp://cam/1'] })
+  });
+  assert.equal(createRes.status, 200);
+  const stream = await createRes.json();
+
+  // Auth matrix
+  assert.equal((await fetch(`${BASE}/api/streams/${stream.id}/transition`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })).status, 401);
+  assert.equal((await fetch(`${BASE}/api/streams/${stream.id}/transition`, { method: 'POST', headers: clientHeaders, body: JSON.stringify({ to: 'suspended' }) })).status, 403, 'client must not transition');
+
+  // Invalid target + illegal transition
+  assert.equal((await fetch(`${BASE}/api/streams/${stream.id}/transition`, { method: 'POST', headers, body: JSON.stringify({ to: 'bogus' }) })).status, 400);
+  assert.equal((await fetch(`${BASE}/api/streams/${stream.id}/transition`, { method: 'POST', headers, body: JSON.stringify({ to: 'draft' }) })).status, 409, 'live → draft must be rejected');
+
+  // Legal cycle: live → suspended → live → retired
+  for (const to of ['suspended', 'live', 'retired']) {
+    const r = await fetch(`${BASE}/api/streams/${stream.id}/transition`, { method: 'POST', headers, body: JSON.stringify({ to }) });
+    assert.equal(r.status, 200, `→ ${to} should succeed, got ${r.status}: ${await r.text()}`);
+  }
+  // retired is terminal
+  assert.equal((await fetch(`${BASE}/api/streams/${stream.id}/transition`, { method: 'POST', headers, body: JSON.stringify({ to: 'live' }) })).status, 409, 'retired must be terminal');
+
+  // Ordered event history with actor
+  const lc = await fetch(`${BASE}/api/streams/${stream.id}/lifecycle`, { headers });
+  assert.equal(lc.status, 200);
+  const body = await lc.json();
+  assert.equal(body.lifecycle_state, 'retired');
+  assert.deepEqual(body.allowed, []);
+  const seq = body.events.map((e: any) => `${e.from_state}->${e.to_state}`);
+  assert.deepEqual(seq, ['null->live', 'live->suspended', 'suspended->live', 'live->retired']);
+  assert.ok(body.events.every((e: any) => e.actor_username === 'itadmin'), 'events must record actor');
+
+  // draft → provisioned requires a reachable server
+  const deadMk = await fetch(`${BASE}/api/servers`, {
+    method: 'POST', headers,
+    body: JSON.stringify({ name: 'mock-lc-dead', url: 'http://127.0.0.1:3', username: 'u', password: 'p123456' })
+  });
+  const deadServer = await deadMk.json();
+  const idb = new Database(dbPath);
+  idb.prepare("INSERT INTO streams (server_id, name, live_url, playlist_url, lifecycle_state) VALUES (?, ?, '', '', 'draft')").run(deadServer.id, 'lc-draft-offline');
+  const draftId = (idb.prepare('SELECT id FROM streams WHERE name = ?').get('lc-draft-offline') as any).id;
+  idb.close();
+  const failRes = await fetch(`${BASE}/api/streams/${draftId}/transition`, { method: 'POST', headers, body: JSON.stringify({ to: 'provisioned' }) });
+  assert.equal(failRes.status, 409, 'provisioning on an unreachable server must fail closed');
+  const draftLc = await (await fetch(`${BASE}/api/streams/${draftId}/lifecycle`, { headers })).json();
+  assert.equal(draftLc.lifecycle_state, 'draft', 'failed transition must not change state');
+
+  // ---- Contract DoD: provisioned→retired and suspended→retired are allowed ----
+  const idb2 = new Database(dbPath);
+  idb2.prepare("INSERT INTO streams (server_id, name, live_url, playlist_url, lifecycle_state) VALUES (?, ?, '', '', 'provisioned')").run(server.id, 'lc-prov');
+  idb2.prepare("INSERT INTO streams (server_id, name, live_url, playlist_url, lifecycle_state) VALUES (?, ?, '', '', 'suspended')").run(server.id, 'lc-susp');
+  const provId = (idb2.prepare("SELECT id FROM streams WHERE name = 'lc-prov'").get() as any).id;
+  const suspId = (idb2.prepare("SELECT id FROM streams WHERE name = 'lc-susp'").get() as any).id;
+  idb2.close();
+  const provRetire = await fetch(`${BASE}/api/streams/${provId}/transition`, { method: 'POST', headers, body: JSON.stringify({ to: 'retired' }) });
+  assert.equal(provRetire.status, 200, 'provisioned→retired must be allowed');
+  const suspRetire = await fetch(`${BASE}/api/streams/${suspId}/transition`, { method: 'POST', headers, body: JSON.stringify({ to: 'retired' }) });
+  assert.equal(suspRetire.status, 200, 'suspended→retired must be allowed');
+
+  // ---- Same-state transition rejected (409) ----
+  assert.equal((await fetch(`${BASE}/api/streams/${provId}/transition`, { method: 'POST', headers, body: JSON.stringify({ to: 'retired' }) })).status, 409, 'already retired');
+
+  // ---- Non-existent stream ID → 404 ----
+  assert.equal((await fetch(`${BASE}/api/streams/99999/transition`, { method: 'POST', headers, body: JSON.stringify({ to: 'suspended' }) })).status, 404, 'missing stream must be 404');
+
+  // ---- No remote side effects on draft/suspend/retire ----
+  remoteRequests.length = 0;
+  const idb3 = new Database(dbPath);
+  idb3.prepare("INSERT INTO streams (server_id, name, live_url, playlist_url, lifecycle_state) VALUES (?, ?, '', '', 'live')").run(server.id, 'lc-no-remote');
+  const nrId = (idb3.prepare("SELECT id FROM streams WHERE name = 'lc-no-remote'").get() as any).id;
+  idb3.close();
+  await fetch(`${BASE}/api/streams/${nrId}/transition`, { method: 'POST', headers, body: JSON.stringify({ to: 'suspended' }) });
+  await fetch(`${BASE}/api/streams/${nrId}/transition`, { method: 'POST', headers, body: JSON.stringify({ to: 'retired' }) });
+  const sideEffects = remoteRequests.filter(r => r.includes('lc-no-remote'));
+  assert.equal(sideEffects.length, 0, `suspend/retire must not make remote requests, got: ${sideEffects.join(', ')}`);
+
+  // ---- channel_group is preserved ----
+  const idb4 = new Database(dbPath);
+  idb4.prepare("INSERT INTO streams (server_id, name, live_url, playlist_url, channel_group) VALUES (?, ?, '', '', 'news')").run(server.id, 'lc-grouped');
+  const groupedId = (idb4.prepare("SELECT id FROM streams WHERE name = 'lc-grouped'").get() as any).id;
+  idb4.close();
+  const grpLc = await (await fetch(`${BASE}/api/streams/${groupedId}/lifecycle`, { headers })).json();
+  assert.equal(grpLc.lifecycle_state, 'live', 'channel_group streams default to live');
+});
+
+test('atomic channel creation: duplicate protection, rollback, local transaction', async () => {
+  const { res: adminLogin } = await login('itadmin', 'it-admin-pass-12345');
+  const { token } = await adminLogin.json();
+  const headers = { authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+  const { res: clientLogin } = await login('itclient', 'it-client-pass-12345');
+  const { token: clientToken } = await clientLogin.json();
+  const clientHeaders = { authorization: `Bearer ${clientToken}`, 'Content-Type': 'application/json' };
+
+  const mk = await fetch(`${BASE}/api/servers`, {
+    method: 'POST', headers,
+    body: JSON.stringify({ name: 'mock-channels', url: `http://127.0.0.1:${remotePort}`, username: 'u', password: 'p123456' })
+  });
+  const server = await mk.json();
+  const body = JSON.stringify({ server_id: server.id, name: 'chan-1', inputs: ['rtsp://cam/9'], push_urls: ['rtmp://dest/9'] });
+
+  // Auth matrix
+  assert.equal((await fetch(`${BASE}/api/channels`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body })).status, 401);
+  assert.equal((await fetch(`${BASE}/api/channels`, { method: 'POST', headers: clientHeaders, body })).status, 403);
+
+  // Happy path — stream + companion VOD + event created
+  const ok = await fetch(`${BASE}/api/channels`, { method: 'POST', headers, body });
+  const chan = await ok.json();
+  assert.equal(ok.status, 200, `channel create failed: ${JSON.stringify(chan)}`);
+  assert.equal(chan.lifecycle_state, 'live');
+  assert.equal(chan.vod_name, 'chan-1_vod');
+  const idb = new Database(dbPath);
+  assert.ok(idb.prepare('SELECT id FROM vods WHERE id = ?').get(chan.vod_id), 'local VOD row missing');
+  assert.equal((idb.prepare("SELECT to_state FROM stream_events WHERE stream_id = ?").get(chan.id) as any).to_state, 'live');
+
+  // Duplicate local name → 409
+  assert.equal((await fetch(`${BASE}/api/channels`, { method: 'POST', headers, body })).status, 409, 'duplicate channel name must be rejected');
+
+  // Stream PUT failure → companion VOD rolled back remotely, no local rows
+  remoteDeletes.length = 0;
+  mockBehavior.failPut = /\/streams\//;
+  const fail = await fetch(`${BASE}/api/channels`, {
+    method: 'POST', headers,
+    body: JSON.stringify({ server_id: server.id, name: 'chan-2', inputs: ['rtsp://cam/10'] })
+  });
+  mockBehavior.failPut = null;
+  assert.equal(fail.status, 502, `stream failure should be 502, got ${fail.status}`);
+  assert.ok(remoteDeletes.some(u => u === '/flussonic/api/v3/vods/chan-2_vod'), `orphan VOD not rolled back: ${remoteDeletes.join(', ')}`);
+  assert.ok(!idb.prepare("SELECT id FROM streams WHERE name = 'chan-2'").get(), 'local stream row leaked after rollback');
+  assert.ok(!idb.prepare("SELECT id FROM vods WHERE name = 'chan-2_vod'").get(), 'local VOD row leaked after rollback');
+
+  // VOD PUT failure → 502, nothing created
+  mockBehavior.failPut = /\/vods\//;
+  const vodFail = await fetch(`${BASE}/api/channels`, {
+    method: 'POST', headers,
+    body: JSON.stringify({ server_id: server.id, name: 'chan-3', inputs: ['rtsp://cam/11'] })
+  });
+  mockBehavior.failPut = null;
+  assert.equal(vodFail.status, 502);
+  assert.ok(!idb.prepare("SELECT id FROM streams WHERE name = 'chan-3'").get());
+  assert.ok(!remoteRequests.some(u => u.startsWith('PUT /flussonic/api/v3/streams/chan-3')), 'stream PUT must not run after VOD failure');
+  idb.close();
+
+  // Unreachable server → 502 pre-flight (cannot verify namespace)
+  const deadMk = await fetch(`${BASE}/api/servers`, {
+    method: 'POST', headers,
+    body: JSON.stringify({ name: 'mock-ch-dead', url: 'http://127.0.0.1:3', username: 'u', password: 'p123456' })
+  });
+  const dead = await deadMk.json();
+  const unreach = await fetch(`${BASE}/api/channels`, {
+    method: 'POST', headers,
+    body: JSON.stringify({ server_id: dead.id, name: 'chan-4', inputs: ['rtsp://cam/12'] })
+  });
+  assert.equal(unreach.status, 502, 'unreachable server must fail closed');
+});
+
+test('assignment expiry + max_sessions are enforced server-side', async () => {
+  const { res: adminLogin } = await login('itadmin', 'it-admin-pass-12345');
+  const { token } = await adminLogin.json();
+  const headers = { authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+  const { res: clientLogin, cookie: clientCookie } = await login('itclient', 'it-client-pass-12345');
+  const { token: clientToken, id: clientId } = { token: (await clientLogin.json()).token, id: (await (await fetch(`${BASE}/api/auth/me`, { headers: { cookie: clientCookie } })).json() as any).id };
+  const clientHeaders = { authorization: `Bearer ${clientToken}`, 'Content-Type': 'application/json' };
+
+  const mk = await fetch(`${BASE}/api/servers`, {
+    method: 'POST', headers,
+    body: JSON.stringify({ name: 'mock-expiry', url: `http://127.0.0.1:${remotePort}`, username: 'u', password: 'p123456' })
+  });
+  const server = await mk.json();
+  const idb = new Database(dbPath);
+  idb.prepare("INSERT INTO streams (server_id, name, live_url, playlist_url) VALUES (?, 'exp-stream', '', '')").run(server.id);
+  const streamId = (idb.prepare("SELECT id FROM streams WHERE name = 'exp-stream'").get() as any).id;
+  idb.close();
+
+  const assign = (body: any) => fetch(`${BASE}/api/users/${clientId}/streams`, { method: 'POST', headers, body: JSON.stringify({ streamId, ...body }) });
+
+  // Validation
+  assert.equal((await assign({ expires_at: 'not-a-date' })).status, 400, 'bad expires_at must be rejected');
+  assert.equal((await assign({ max_sessions: 0 })).status, 400, 'max_sessions must be positive');
+
+  // Expired assignment → 403 + excluded from lists
+  assert.equal((await assign({ expires_at: new Date(Date.now() - 60_000).toISOString() })).status, 200);
+  assert.equal((await fetch(`${BASE}/api/streams/${streamId}/details`, { headers: clientHeaders })).status, 403, 'expired assignment must be denied');
+  const clientList = await (await fetch(`${BASE}/api/streams`, { headers: clientHeaders })).json();
+  assert.ok(!clientList.some((s: any) => s.id === streamId), 'expired assignment still visible in /api/streams');
+  const mine = await (await fetch(`${BASE}/api/my-streams`, { headers: clientHeaders })).json();
+  assert.ok(!mine.some((s: any) => s.id === streamId), 'expired assignment still visible in /api/my-streams');
+
+  // PATCH to a future expiry → access restored
+  const patch = await fetch(`${BASE}/api/users/${clientId}/streams/${streamId}`, {
+    method: 'PATCH', headers, body: JSON.stringify({ expires_at: new Date(Date.now() + 3600_000).toISOString(), max_sessions: 1 })
+  });
+  assert.equal(patch.status, 200);
+  assert.equal((await fetch(`${BASE}/api/streams/${streamId}/details`, { headers: clientHeaders })).status, 200, 'unexpired assignment must allow access');
+  const mine2 = await (await fetch(`${BASE}/api/my-streams`, { headers: clientHeaders })).json();
+  assert.ok(mine2.some((s: any) => s.id === streamId), 'active assignment missing from /api/my-streams');
+
+  // max_sessions=1 → second concurrent WS connection closed with 4409
+  const ws1 = await new Promise<WebSocket>((resolve, reject) => {
+    const w = new WebSocket(`ws://127.0.0.1:${PORT}/ws`, { headers: { cookie: clientCookie } });
+    w.once('open', () => resolve(w));
+    w.once('error', reject);
+  });
+  const ws2close = await new Promise<number>((resolve) => {
+    const w = new WebSocket(`ws://127.0.0.1:${PORT}/ws`, { headers: { cookie: clientCookie } });
+    w.once('close', (code) => resolve(code));
+    w.once('error', () => resolve(0));
+  });
+  assert.equal(ws2close, 4409, `second connection should be closed with 4409, got ${ws2close}`);
+
+  // Raising the cap admits a second connection
+  await fetch(`${BASE}/api/users/${clientId}/streams/${streamId}`, { method: 'PATCH', headers, body: JSON.stringify({ max_sessions: 2 }) });
+  const ws3 = await new Promise<WebSocket>((resolve, reject) => {
+    const w = new WebSocket(`ws://127.0.0.1:${PORT}/ws`, { headers: { cookie: clientCookie } });
+    w.once('open', () => resolve(w));
+    w.once('close', () => reject(new Error('closed')));
+  });
+  assert.equal(ws3.readyState, WebSocket.OPEN);
+  ws1.close(); ws3.close();
+});
+
+test('bulk channel ops: per-item results, no abort on failure; templates expand', async () => {
+  const { res: adminLogin } = await login('itadmin', 'it-admin-pass-12345');
+  const { token } = await adminLogin.json();
+  const headers = { authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+  const { res: clientLogin } = await login('itclient', 'it-client-pass-12345');
+  const { token: clientToken } = await clientLogin.json();
+  const clientHeaders = { authorization: `Bearer ${clientToken}`, 'Content-Type': 'application/json' };
+
+  const mk = await fetch(`${BASE}/api/servers`, {
+    method: 'POST', headers,
+    body: JSON.stringify({ name: 'mock-bulk', url: `http://127.0.0.1:${remotePort}`, username: 'u', password: 'p123456' })
+  });
+  const server = await mk.json();
+
+  // Auth matrix on /bulk + /templates
+  const bulkBody = JSON.stringify({ server_id: server.id, action: 'create', items: [{ name: 'x', inputs: ['rtsp://a'] }] });
+  assert.equal((await fetch(`${BASE}/api/channels/bulk`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: bulkBody })).status, 401);
+  assert.equal((await fetch(`${BASE}/api/channels/bulk`, { method: 'POST', headers: clientHeaders, body: bulkBody })).status, 403);
+  assert.equal((await fetch(`${BASE}/api/channels/templates`, { headers: clientHeaders })).status, 403);
+
+  // Template CRUD
+  const tplRes = await fetch(`${BASE}/api/channels/templates`, {
+    method: 'POST', headers,
+    body: JSON.stringify({ name: 'tpl-a', inputs: ['rtsp://cam/tpl'], push_urls: ['rtmp://dest/tpl'] })
+  });
+  assert.equal(tplRes.status, 200);
+  const tpl = await tplRes.json();
+  const tplList = await (await fetch(`${BASE}/api/channels/templates`, { headers })).json();
+  assert.ok(tplList.some((t: any) => t.name === 'tpl-a' && t.inputs[0] === 'rtsp://cam/tpl'));
+
+  // Bulk create via template: names only; one item fails remote PUT and must
+  // not abort the batch
+  mockBehavior.failPut = /\/streams\/bulk-bad/;
+  const bulk = await fetch(`${BASE}/api/channels/bulk`, {
+    method: 'POST', headers,
+    body: JSON.stringify({
+      server_id: server.id, action: 'create', template_id: tpl.id,
+      items: [{ name: 'bulk-a' }, { name: 'bulk-bad' }, { name: 'bulk-c' }]
+    })
+  });
+  mockBehavior.failPut = null;
+  assert.equal(bulk.status, 200);
+  const report = await bulk.json();
+  assert.equal(report.succeeded, 2);
+  assert.equal(report.failed, 1);
+  const badItem = report.results.find((r: any) => r.name === 'bulk-bad');
+  assert.equal(badItem.ok, false);
+  const idb = new Database(dbPath);
+  const bulkA = idb.prepare("SELECT * FROM streams WHERE name = 'bulk-a'").get() as any;
+  assert.ok(bulkA, 'bulk-a not created');
+  assert.equal(JSON.parse(bulkA.inputs)[0], 'rtsp://cam/tpl', 'template inputs not applied');
+  assert.ok(!idb.prepare("SELECT id FROM streams WHERE name = 'bulk-bad'").get(), 'failed item leaked a stream row');
+
+  // Bulk transition: suspend both, one missing name reported
+  const tr = await fetch(`${BASE}/api/channels/bulk`, {
+    method: 'POST', headers,
+    body: JSON.stringify({ server_id: server.id, action: 'transition', items: [
+      { name: 'bulk-a', to: 'suspended' }, { name: 'bulk-c', to: 'suspended' }, { name: 'ghost', to: 'suspended' }
+    ] })
+  });
+  const trReport = await tr.json();
+  assert.equal(trReport.succeeded, 2);
+  assert.equal(trReport.failed, 1);
+  assert.equal((idb.prepare("SELECT lifecycle_state s FROM streams WHERE name = 'bulk-a'").get() as any).s, 'suspended');
+
+  // Bulk delete removes remote + local, per-item report
+  remoteDeletes.length = 0;
+  const del = await fetch(`${BASE}/api/channels/bulk`, {
+    method: 'POST', headers,
+    body: JSON.stringify({ server_id: server.id, action: 'delete', items: [{ name: 'bulk-a' }, { name: 'missing-x' }] })
+  });
+  const delReport = await del.json();
+  assert.equal(delReport.succeeded, 1);
+  assert.equal(delReport.failed, 1);
+  assert.ok(!idb.prepare("SELECT id FROM streams WHERE name = 'bulk-a'").get(), 'bulk-a not deleted locally');
+  assert.ok(remoteDeletes.some(u => u === '/flussonic/api/v3/streams/bulk-a'), 'remote stream delete not issued');
+  assert.ok(remoteDeletes.some(u => u === '/flussonic/api/v3/vods/bulk-a_vod'), 'remote vod delete not issued');
+  idb.close();
+
+  // Bad action rejected
+  assert.equal((await fetch(`${BASE}/api/channels/bulk`, {
+    method: 'POST', headers, body: JSON.stringify({ server_id: server.id, action: 'nuke', items: [{ name: 'x' }] })
+  })).status, 400);
+});
+
+test('watchdog records health timeline events into stream_events', async () => {
+  const { res: adminLogin } = await login('itadmin', 'it-admin-pass-12345');
+  const { token } = await adminLogin.json();
+  const headers = { authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+
+  const mk = await fetch(`${BASE}/api/servers`, {
+    method: 'POST', headers,
+    body: JSON.stringify({ name: 'mock-wd', url: `http://127.0.0.1:${remotePort}`, username: 'u', password: 'p123456' })
+  });
+  const server = await mk.json();
+  const idb = new Database(dbPath);
+  // Baseline 'online' so the watchdog's transition isn't skipped as 'unknown'
+  idb.prepare("INSERT INTO streams (server_id, name, live_url, playlist_url, status) VALUES (?, 'wd-stream', '', '', 'online')").run(server.id);
+  const streamId = (idb.prepare("SELECT id FROM streams WHERE name = 'wd-stream'").get() as any).id;
+  idb.close();
+
+  // Speed up the watchdog, then remove the stream from the remote inventory
+  await fetch(`${BASE}/api/settings`, { method: 'POST', headers, body: JSON.stringify({ watchdog_interval: '1' }) });
+  await fetch(`${BASE}/api/watchdog/restart`, { method: 'POST', headers });
+  mockBehavior.streamsPayload = [];
+
+  // Wait for at least one watchdog tick
+  await new Promise(r => setTimeout(r, 4000));
+  mockBehavior.streamsPayload = null;
+
+  const lc = await (await fetch(`${BASE}/api/streams/${streamId}/lifecycle`, { headers })).json();
+  const wdEvents = lc.events.filter((e: any) => (e.detail || '').startsWith('watchdog:') && e.to_state === 'offline');
+  assert.ok(wdEvents.length >= 1, `expected a watchdog offline event, got: ${JSON.stringify(lc.events)}`);
+  assert.equal(wdEvents[0].actor_id, null, 'watchdog events are system-recorded');
+
+  // Restore normal cadence
+  await fetch(`${BASE}/api/settings`, { method: 'POST', headers, body: JSON.stringify({ watchdog_interval: '5' }) });
+  await fetch(`${BASE}/api/watchdog/restart`, { method: 'POST', headers });
 });

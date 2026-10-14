@@ -148,6 +148,51 @@ export function runMigrations(db: any) {
   } catch (e) {
     console.warn('Could not create unique indexes on streams/vods:', (e as any)?.message);
   }
+
+  // Phase 2 — channel lifecycle. Runs after the streams table rebuild so the
+  // column survives migrateNullableServerId on legacy databases.
+  try {
+    db.exec("ALTER TABLE streams ADD COLUMN lifecycle_state TEXT DEFAULT 'live'");
+  } catch (e) { /* column exists */ }
+  try {
+    db.exec('ALTER TABLE streams ADD COLUMN channel_group TEXT');
+  } catch (e) { /* column exists */ }
+  try {
+    db.exec(`CREATE TABLE IF NOT EXISTS stream_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      stream_id INTEGER NOT NULL,
+      from_state TEXT,
+      to_state TEXT NOT NULL,
+      actor_id INTEGER,
+      detail TEXT,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY(stream_id) REFERENCES streams(id) ON DELETE CASCADE,
+      FOREIGN KEY(actor_id) REFERENCES users(id) ON DELETE SET NULL
+    )`);
+    db.exec('CREATE INDEX IF NOT EXISTS idx_stream_events_stream ON stream_events(stream_id, created_at)');
+  } catch (e) { /* table exists */ }
+
+  // Phase 2 — assignment expiry and session limits
+  for (const col of [
+    'ALTER TABLE user_stream_assignments ADD COLUMN expires_at DATETIME',
+    'ALTER TABLE user_stream_assignments ADD COLUMN max_sessions INTEGER',
+  ]) {
+    try { db.exec(col); } catch (e) { /* column exists */ }
+  }
+
+  // Phase 2 — channel templates for bulk provisioning
+  try {
+    db.exec(`CREATE TABLE IF NOT EXISTS channel_templates (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL UNIQUE,
+      inputs TEXT NOT NULL DEFAULT '[]',
+      push_urls TEXT NOT NULL DEFAULT '[]',
+      vod_path TEXT,
+      created_by INTEGER,
+      created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+      FOREIGN KEY(created_by) REFERENCES users(id) ON DELETE SET NULL
+    )`);
+  } catch (e) { /* table exists */ }
 }
 
 function migrateNullableServerId(db: any, tableName: string) {
