@@ -247,3 +247,20 @@ User requested consecutive development phases with Devin staging verification af
 **Gate:** lint clean, build 120.8 kB, audit = 2 (esbuild low dev-only, qs moderate transitive).
 
 **Remaining:** frontend health-surface UI not yet wired; WS per-user scoping and syncServerVods N+1 still open; per-server sync interval config deferred.
+
+## Devin status — Phase 1B continued — 2026-10-14
+
+**Commit:** `060c01d` on `feature/phase-1b-multiserver`
+
+**Implemented (second batch)**
+- `GET /api/servers/:id/health` — authenticated admin endpoint: live probe + persisted record (latency_ms, last_seen_at, last_attempt_at, last_error, consecutive_failures, in_backoff)
+- Servers dashboard cards now show latency, last-seen, consecutive failures, last error, and per-server sync interval; add-server form accepts optional `sync_interval_secs` (10–86400)
+- WebSocket `STREAMS_UPDATE` scoped per user: JWT payload attached at upgrade; client roles receive only assigned streams (`user_stream_assignments`), admins get the full list. Verified live over WS
+- `syncServerVods` N+1 removed: string-array VODs no longer trigger a per-VOD detail request
+- Auto-sync honors per-server `sync_interval_secs` + `last_synced_at`; skips servers not yet due
+
+**Tests:** 19/19 pass (13 integration + 6 regression). New coverage: `/health` live+persisted state, offline server accumulating failures and being skipped by sync-all via backoff, WS scoping (admin sees new stream, client doesn't, client still sees its assigned stream). 50-server slow-mock sync-all remains ~4.3s.
+
+**Gate:** lint clean, build 123.4 kB, audit = 2 unchanged (esbuild low dev-only, qs moderate transitive).
+
+**Remaining:** draft PR creation blocked — token lacks collaborator permission (`createPullRequest` denied). Frontend health badge could poll `/health` on demand. No production changes.
