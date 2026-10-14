@@ -31,3 +31,8 @@ test('production requires explicit JWT secret', () => {
   const source = read('src/server/config/index.ts');
   assert.match(source, /JWT_SECRET must be configured/);
 });
+
+test('watchdog restart requires an authenticated administrator', () => {
+  const source = read('server.ts');
+  assert.match(source, /app\.post\('\/api\/watchdog\/restart', authenticateToken, requireAdmin/);
+});
