@@ -220,3 +220,30 @@ User requested consecutive development phases with Devin staging verification af
 ### Phase 1B acceptance gates
 
 - Lint + all tests green; sync cycle with 50 mock servers completes < interval; a server returning `{}` never deletes local rows; client stream assignments survive sync churn; per-server health visible via API.
+
+## Devin status — Phase 1B implementation P1+P2 — 2026-10-14
+
+**Commit:** `685c9e9` on `feature/phase-1b-multiserver`
+
+**Implemented**
+
+*Safe sync (P1):*
+- Upsert-by-name: existing stream/VOD rows are UPDATEd in place — ids, user_stream_assignments, videos, telegram_alerts survive sync
+- `parseStreamsPayload`/`parseObjectMap` reject error/pagination envelopes and unrecognized shapes before reconciliation
+- Empty remote list + non-empty local state → deletions skipped (`skippedDeletions` flag, warning logged)
+- UNIQUE(server_id,name) indexes; dedupe migration keeps earliest row
+- Test caught a real hole mid-development: `{error:...}` payloads were being turned into a stream named "error" and wiping locals — fixed via ENVELOPE_KEYS rejection
+
+*Reliability (P2):*
+- `mapLimit` bounded concurrency (4) in watchdog, auto-sync, `/api/servers/sync-all`
+- Auto-sync overlap guard (`isSyncing`)
+- Per-server health columns: `last_seen_at`, `last_attempt_at`, `last_error`, `consecutive_failures`, `latency_ms` (flow through `publicServer` automatically)
+- Circuit breaker: ≥3 consecutive failures → backoff 30s doubling to 5min cap; watchdog/auto-sync/sync-all skip, manual `:id/sync` still tries
+- `flussonicRequest` retries network/5xx once with 300ms backoff; 4xx never retried
+- Watchdog Telegram alerts use `dispatchStreamAlerts()` directly (was self-HTTP POST); `POST /api/telegram-alerts/send` gained missing `authenticateToken`
+
+**Tests:** 17/17 pass. New: malformed/empty/envelope sync never deletes local rows; stream id + assignment survive re-sync; metadata refresh verified; 50-server sync-all with 120ms/server latency completes ~4.3s under bounded concurrency; health columns populated.
+
+**Gate:** lint clean, build 120.8 kB, audit = 2 (esbuild low dev-only, qs moderate transitive).
+
+**Remaining:** frontend health-surface UI not yet wired; WS per-user scoping and syncServerVods N+1 still open; per-server sync interval config deferred.
