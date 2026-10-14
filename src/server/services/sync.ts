@@ -194,38 +194,50 @@ export async function syncServerStreams(server: any, options: SyncOptions = {}):
   const updateStmt = db.prepare('UPDATE streams SET live_url = ?, playlist_url = ?, push_urls = ?, inputs = ? WHERE id = ?');
   const deleteStmt = db.prepare('DELETE FROM streams WHERE id = ?');
 
-  // Get all existing streams for this server
-  const existingStreams = db.prepare('SELECT id, name FROM streams WHERE server_id = ?').all(server.id) as any[];
-  const existingByName = new Map(existingStreams.map(s => [s.name, s.id]));
+  // Get all existing streams for this server (full row for field merge)
+  const existingStreams = db.prepare('SELECT * FROM streams WHERE server_id = ?').all(server.id) as any[];
+  const existingByName = new Map(existingStreams.map(s => [s.name, s]));
   const remoteStreamNames = new Set(streams.map((s: any) => typeof s === 'string' ? s : s.name).filter(Boolean));
 
   for (const s of streams) {
     const name = typeof s === 'string' ? s : s.name;
     if (!name) continue;
 
-    let live_url = '';
-    let playlist_url = '';
-    let push_urls: string[] = [];
-    let status = 'offline';
-    let inputs: string[] = [];
+    const existing = existingByName.get(name);
 
-    if (typeof s !== 'string') {
-      if (s.inputs && s.inputs.length > 0) {
-        inputs = s.inputs.map((i: any) => i.url).filter(Boolean);
-        live_url = inputs[0] || '';
-        playlist_url = inputs[1] || '';
+    if (typeof s === 'string') {
+      // Names-only inventory carries no metadata — never overwrite stored
+      // live_url/inputs/push_urls with empty values.
+      if (!existing) {
+        insertStmt.run(server.id, name, '', '', '[]', '[]', 'offline');
+        addedCount++;
       }
-      push_urls = s.pushes ? s.pushes.map((p: any) => p.url) : [];
-      status = (s.stats && s.stats.alive) ? 'online' : 'offline';
+      continue;
     }
 
-    const existingId = existingByName.get(name);
-    if (existingId) {
-      // Upsert: refresh metadata in place so the stream id — and all
+    // Merge: only overwrite fields the remote record actually carries.
+    const inputs = Array.isArray(s.inputs)
+      ? s.inputs.map((i: any) => i?.url).filter(Boolean)
+      : null;
+    const push_urls = Array.isArray(s.pushes)
+      ? s.pushes.map((p: any) => p?.url).filter(Boolean)
+      : null;
+    const status = (s.stats && s.stats.alive) ? 'online' : 'offline';
+
+    if (existing) {
+      // Upsert: refresh present fields in place so the stream id — and all
       // assignments/videos/alerts keyed by it — is preserved.
-      updateStmt.run(live_url, playlist_url, JSON.stringify(push_urls), JSON.stringify(inputs), existingId);
+      updateStmt.run(
+        inputs ? (inputs[0] || '') : existing.live_url,
+        inputs ? (inputs[1] || '') : existing.playlist_url,
+        push_urls ? JSON.stringify(push_urls) : existing.push_urls,
+        inputs ? JSON.stringify(inputs) : existing.inputs,
+        existing.id
+      );
     } else {
-      insertStmt.run(server.id, name, live_url, playlist_url, JSON.stringify(push_urls), JSON.stringify(inputs), status);
+      insertStmt.run(server.id, name,
+        inputs?.[0] || '', inputs?.[1] || '',
+        JSON.stringify(push_urls || []), JSON.stringify(inputs || []), status);
       addedCount++;
     }
   }

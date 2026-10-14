@@ -135,3 +135,40 @@ test('SQLite online backup produces a restorable copy of a live WAL database', a
   assert.equal((rw.prepare('SELECT COUNT(*) n FROM t').get() as any).n, 5);
   rw.close();
 });
+
+test('backup verification tolerates concurrent writes (window-bounded counts)', async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'playout-backup-race-'));
+  const srcPath = path.join(dir, 'busy.db');
+  const bakPath = path.join(dir, 'busy-backup.db');
+
+  const src = new Database(srcPath);
+  src.pragma('journal_mode = WAL');
+  src.exec('CREATE TABLE t (id INTEGER PRIMARY KEY, val TEXT)');
+  const seed = src.prepare("INSERT INTO t (val) VALUES ('x')");
+  for (let i = 0; i < 5000; i++) seed.run();
+
+  // Concurrent writer on a second connection during backup
+  const writer = new Database(srcPath);
+  writer.pragma('journal_mode = WAL');
+  const write = writer.prepare("INSERT INTO t (val) VALUES ('concurrent')");
+  let stop = false;
+  const writerLoop = (async () => {
+    while (!stop) {
+      write.run();
+      await new Promise(r => setImmediate(r));
+    }
+  })();
+
+  const countBefore = (src.prepare('SELECT COUNT(*) n FROM t').get() as any).n;
+  await src.backup(bakPath);
+  const countAfter = (src.prepare('SELECT COUNT(*) n FROM t').get() as any).n;
+  stop = true;
+  await writerLoop;
+
+  const dest = new Database(bakPath, { readonly: true });
+  assert.equal((dest.prepare('PRAGMA integrity_check').get() as any).integrity_check, 'ok');
+  const dstCount = (dest.prepare('SELECT COUNT(*) n FROM t').get() as any).n;
+  const lo = Math.min(countBefore, countAfter), hi = Math.max(countBefore, countAfter);
+  assert.ok(dstCount >= lo && dstCount <= hi, `backup count ${dstCount} must fall within [${lo}, ${hi}]`);
+  dest.close(); writer.close(); src.close();
+});

@@ -42,15 +42,27 @@ export const broadcastStreamsUpdate = () => {
     const adminMessage = JSON.stringify({ type: 'STREAMS_UPDATE', data: parsedStreams });
 
     const assignmentStmt = db.prepare('SELECT stream_id FROM user_stream_assignments WHERE user_id = ?');
+    const userStmt = db.prepare('SELECT role FROM users WHERE id = ?');
     const clientMessageCache = new Map<number, string>();
+    const roleCache = new Map<number, string | null>();
 
     clients.forEach(client => {
       if (client.readyState !== WebSocket.OPEN) return;
       const user = (client as any).user;
-      if (!user || user.role === 'admin') {
+      // Fail closed: a socket without a verified, still-existing identity
+      // receives nothing. Role is re-validated against the DB so stale or
+      // deleted sessions lose access immediately.
+      if (!user || typeof user.id !== 'number') return;
+      let role = roleCache.get(user.id);
+      if (role === undefined) {
+        role = (userStmt.get(user.id) as any)?.role ?? null;
+        roleCache.set(user.id, role);
+      }
+      if (role === 'admin') {
         client.send(adminMessage);
         return;
       }
+      if (role !== 'client') return;
       // Client roles only receive streams assigned to them
       let message = clientMessageCache.get(user.id);
       if (!message) {

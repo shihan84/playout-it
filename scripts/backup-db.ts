@@ -42,21 +42,38 @@ const stamp = new Date().toISOString().replace(/[:.]/g, '-');
 const dest = args[0] || path.join('backups', `flussonic-${stamp}.db`);
 mkdirSync(path.dirname(path.resolve(dest)), { recursive: true });
 
+const TABLES = ['users', 'servers', 'streams', 'vods'];
+
+// Snapshot source counts BEFORE backup — the backup captures a consistent
+// point-in-time state taken at some instant during the operation, so live
+// counts taken afterward can legitimately differ on a busy database.
 const db = new Database(src, { fileMustExist: true });
+const srcBefore = Object.fromEntries(
+  TABLES.map(t => [t, (db.prepare(`SELECT COUNT(*) n FROM ${t}`).get() as any).n])
+);
 await db.backup(dest);
+// Counts AFTER backup complete the window: a valid snapshot count must fall
+// within [min(before, after), max(before, after)] for each table.
+const srcAfter = Object.fromEntries(
+  TABLES.map(t => [t, (db.prepare(`SELECT COUNT(*) n FROM ${t}`).get() as any).n])
+);
 db.close();
 
-// Verify the backup opens and matches row counts on key tables
+// Verify the backup: structural integrity first, then window-bounded counts.
 const check = new Database(dest, { readonly: true });
-const srcRo = new Database(src, { readonly: true });
-for (const table of ['users', 'servers', 'streams', 'vods']) {
-  const srcCount = (srcRo.prepare(`SELECT COUNT(*) n FROM ${table}`).get() as any).n;
+const integrity = (check.prepare('PRAGMA integrity_check').get() as any)?.integrity_check;
+if (integrity !== 'ok') {
+  console.error(`Backup integrity check failed: ${integrity}`);
+  process.exit(1);
+}
+for (const table of TABLES) {
   const dstCount = (check.prepare(`SELECT COUNT(*) n FROM ${table}`).get() as any).n;
-  if (srcCount !== dstCount) {
-    console.error(`Backup verification failed: ${table} ${srcCount} != ${dstCount}`);
+  const lo = Math.min(srcBefore[table], srcAfter[table]);
+  const hi = Math.max(srcBefore[table], srcAfter[table]);
+  if (dstCount < lo || dstCount > hi) {
+    console.error(`Backup verification failed: ${table} ${dstCount} outside [${lo}, ${hi}]`);
     process.exit(1);
   }
 }
 check.close();
-srcRo.close();
 console.log(`Backup verified: ${dest}`);

@@ -810,3 +810,40 @@ test('redirect responses are never followed (credential-forwarding guard)', asyn
   assert.equal(sync.success, false, 'redirect must fail the sync, not be followed');
   mockBehavior.redirectTo = null;
 });
+
+test('names-only stream inventory preserves existing metadata', async () => {
+  const { res: loginRes } = await login('itadmin', 'it-admin-pass-12345');
+  const { token } = await loginRes.json();
+  const headers = { authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+
+  // Seed with full metadata
+  mockBehavior.streamsPayload = [
+    { name: 'meta-keep', inputs: [{ url: 'rtsp://keep-a' }, { url: 'rtsp://keep-b' }], pushes: [{ url: 'rtmp://out' }], stats: { alive: true } }
+  ];
+  const mk = await fetch(`${BASE}/api/servers`, {
+    method: 'POST', headers,
+    body: JSON.stringify({ name: 'mock-namesonly', url: `http://127.0.0.1:${remotePort}`, username: 'u', password: 'p123456' })
+  });
+  const server = await mk.json();
+
+  const idb = new Database(dbPath);
+  const before = idb.prepare("SELECT live_url, playlist_url, inputs, push_urls FROM streams WHERE server_id = ? AND name = 'meta-keep'").get(server.id) as any;
+  assert.equal(before.live_url, 'rtsp://keep-a');
+  assert.equal(JSON.parse(before.push_urls)[0], 'rtmp://out');
+
+  // Remote switches to names-only inventory → metadata must be preserved
+  mockBehavior.streamsPayload = ['meta-keep'];
+  await fetch(`${BASE}/api/servers/${server.id}/sync`, { method: 'POST', headers });
+  const after = idb.prepare("SELECT live_url, playlist_url, inputs, push_urls FROM streams WHERE server_id = ? AND name = 'meta-keep'").get(server.id) as any;
+  assert.equal(after.live_url, 'rtsp://keep-a', 'names-only sync must not clear live_url');
+  assert.equal(after.playlist_url, 'rtsp://keep-b');
+  assert.equal(JSON.parse(after.inputs)[0], 'rtsp://keep-a');
+  assert.equal(JSON.parse(after.push_urls)[0], 'rtmp://out');
+
+  // Names-only entry for a NEW stream still gets inserted (empty metadata)
+  mockBehavior.streamsPayload = ['meta-keep', 'brand-new'];
+  await fetch(`${BASE}/api/servers/${server.id}/sync`, { method: 'POST', headers });
+  assert.ok(idb.prepare("SELECT 1 FROM streams WHERE server_id = ? AND name = 'brand-new'").get(server.id), 'new names-only stream should be added');
+  idb.close();
+  mockBehavior.streamsPayload = null;
+});
