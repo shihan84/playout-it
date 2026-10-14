@@ -13,7 +13,6 @@ function createDb(path: string) {
     // Preserve corrupt databases and WAL files for operator-led recovery.
     // Never silently delete persistent data.
     throw e;
-    throw e;
   }
 }
 
