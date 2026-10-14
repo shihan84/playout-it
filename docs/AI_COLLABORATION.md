@@ -434,3 +434,14 @@ User requested consecutive development phases with Devin staging verification af
 - Sync safety matrix (malformed/empty/partial/cursor confinement/redirect) — all covered
 
 **Unresolved security or data-loss findings: none.** PR #2 remains draft; no merge/deploy/production changes; Phase 2 on hold.
+
+## Devin status — Phase 1B approval prep — 2026-10-14
+
+**Commit:** `f82314c` on `feature/phase-1b-multiserver` (PR #2 head)
+
+1. **CodeRabbit manual review triggered** via `@coderabbitai review` comment on PR #2 — acknowledged "Review triggered"; no findings posted yet at time of writing (incremental review in progress). Will address any actionable findings when they land.
+2. **CI checks:** "Stage 1 security CI" previously ran only on `push` to the 1A branch and PRs to `main` — the 1B branch had no coverage. Added `feature/phase-1b-multiserver` to the push trigger and extended the job with the full test suite. **First run on the 1B branch: success** (run 38558461242).
+3. **Base dependency verified:** PR #2 base = `feature/broadcast-security-foundation` (PR #1's branch); merge-base `0591516` = its tip — correct stacked dependency. Merge order requires PR #1 first, then retarget PR #2 to `main`.
+4. **Rollout plan:** `docs/MERGE_AND_ROLLOUT_PLAN.md` — merge order, pre-deploy gates, deploy steps, rollback, 24h monitoring, non-goals.
+
+**Status:** PR #2 draft, CI green, awaiting CodeRabbit output + human review. No merge/deploy/production changes; Phase 2 on hold.
