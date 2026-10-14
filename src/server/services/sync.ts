@@ -129,7 +129,31 @@ interface SyncResult {
   removedCount: number;
   skippedDeletions?: boolean;
   pendingRemovals?: number;
+  protectedRemovals?: number;
   error?: string;
+}
+
+// Rows with live child records (assignments, videos, alerts, files) are
+// never deleted — even by confirmed prune. Report them as protected so an
+// admin can clean up children explicitly first.
+const CHILD_TABLES: Record<string, string> = {
+  streams: `SELECT (SELECT COUNT(*) FROM user_stream_assignments WHERE stream_id = ?)
+    + (SELECT COUNT(*) FROM videos WHERE stream_id = ?)
+    + (SELECT COUNT(*) FROM telegram_alerts WHERE stream_id = ?) AS n`,
+  vods: `SELECT COUNT(*) AS n FROM vod_files WHERE vod_id = ?`
+};
+
+function partitionProtected(table: 'streams' | 'vods', candidates: any[]) {
+  const stmt = db.prepare(CHILD_TABLES[table]);
+  const free: any[] = [];
+  const prot: any[] = [];
+  for (const c of candidates) {
+    const { n } = table === 'streams'
+      ? stmt.get(c.id, c.id, c.id) as any
+      : stmt.get(c.id) as any;
+    (n > 0 ? prot : free).push(c);
+  }
+  return { free, protected: prot };
 }
 
 // Confirm candidate deletions with a second full fetch. Only names absent
@@ -213,29 +237,35 @@ export async function syncServerStreams(server: any, options: SyncOptions = {}):
   const candidates = existingStreams.filter(e => !remoteStreamNames.has(e.name));
 
   if (candidates.length === 0) return { addedCount, removedCount: 0 };
+  const { free, protected: prot } = partitionProtected('streams', candidates);
   if (streams.length === 0) {
     console.warn(`[syncServerStreams] ${server.name}: remote returned 0 streams but ${existingStreams.length} local rows exist — skipping deletions`);
-    return { addedCount, removedCount: 0, skippedDeletions: true, pendingRemovals: candidates.length };
+    return { addedCount, removedCount: 0, skippedDeletions: true, pendingRemovals: candidates.length, protectedRemovals: prot.length || undefined };
   }
   if (!options.allowDeletions) {
-    return { addedCount, removedCount: 0, skippedDeletions: true, pendingRemovals: candidates.length };
+    return { addedCount, removedCount: 0, skippedDeletions: true, pendingRemovals: candidates.length, protectedRemovals: prot.length || undefined };
   }
   if (candidates.length > MAX_AUTO_REMOVALS || candidates.length > existingStreams.length * MAX_AUTO_REMOVAL_RATIO) {
     console.warn(`[syncServerStreams] ${server.name}: ${candidates.length}/${existingStreams.length} local streams missing remotely — exceeds auto-removal limit, reporting as pendingRemovals`);
-    return { addedCount, removedCount: 0, skippedDeletions: true, pendingRemovals: candidates.length };
+    return { addedCount, removedCount: 0, skippedDeletions: true, pendingRemovals: candidates.length, protectedRemovals: prot.length || undefined };
+  }
+  if (prot.length > 0) {
+    console.warn(`[syncServerStreams] ${server.name}: ${prot.length} missing streams have live assignments/videos/alerts — protected from deletion`);
   }
 
   // Second independent fetch: only names absent in both inventories delete
-  const confirmed = await confirmAbsent(server, flussonicUrl, candidates, parseStreamsPayload);
-  for (const c of confirmed) {
-    deleteStmt.run(c.id);
-    removedCount++;
-  }
-  if (removedCount < candidates.length) {
-    console.log(`[syncServerStreams] ${server.name}: ${candidates.length - removedCount} candidate deletions rejected by second-fetch confirmation`);
+  const confirmed = await confirmAbsent(server, flussonicUrl, free, parseStreamsPayload);
+  const deleteAll = db.transaction((rows: any[]) => {
+    for (const c of rows) deleteStmt.run(c.id);
+  });
+  deleteAll(confirmed);
+  removedCount = confirmed.length;
+  console.warn(`[syncServerStreams] ${server.name}: pruned ${removedCount} streams (verified absent in two independent inventories)`);
+  if (removedCount < free.length) {
+    console.log(`[syncServerStreams] ${server.name}: ${free.length - removedCount} candidate deletions rejected by second-fetch confirmation`);
   }
 
-  return { addedCount, removedCount, pendingRemovals: candidates.length - removedCount || undefined };
+  return { addedCount, removedCount, pendingRemovals: candidates.length - removedCount || undefined, protectedRemovals: prot.length || undefined };
 }
 
 function parseVodsPayload(data: any): any[] {
@@ -326,25 +356,33 @@ export async function syncServerVods(server: any, options: SyncOptions = {}): Pr
     const candidates = existingVods.filter(e => !remoteVodNames.has(e.name));
 
     if (candidates.length === 0) return { addedCount, removedCount: 0 };
+    const { free, protected: prot } = partitionProtected('vods', candidates);
     if (vodsList.length === 0) {
       console.warn(`[syncServerVods] ${server.name}: remote returned 0 VODs but ${existingVods.length} local rows exist — skipping deletions`);
-      return { addedCount, removedCount: 0, skippedDeletions: true, pendingRemovals: candidates.length };
+      return { addedCount, removedCount: 0, skippedDeletions: true, pendingRemovals: candidates.length, protectedRemovals: prot.length || undefined };
     }
     if (!options.allowDeletions) {
-      return { addedCount, removedCount: 0, skippedDeletions: true, pendingRemovals: candidates.length };
+      return { addedCount, removedCount: 0, skippedDeletions: true, pendingRemovals: candidates.length, protectedRemovals: prot.length || undefined };
     }
     if (candidates.length > MAX_AUTO_REMOVALS || candidates.length > existingVods.length * MAX_AUTO_REMOVAL_RATIO) {
       console.warn(`[syncServerVods] ${server.name}: ${candidates.length}/${existingVods.length} local VODs missing remotely — exceeds auto-removal limit, reporting as pendingRemovals`);
-      return { addedCount, removedCount: 0, skippedDeletions: true, pendingRemovals: candidates.length };
+      return { addedCount, removedCount: 0, skippedDeletions: true, pendingRemovals: candidates.length, protectedRemovals: prot.length || undefined };
+    }
+    if (prot.length > 0) {
+      console.warn(`[syncServerVods] ${server.name}: ${prot.length} missing VODs have local vod_files — protected from deletion`);
     }
 
-    const confirmed = await confirmAbsent(server, flussonicUrl, candidates, parseVodsPayload);
-    for (const c of confirmed) {
-      deleteStmt.run(c.id);
-      removedCount++;
+    const confirmed = await confirmAbsent(server, flussonicUrl, free, parseVodsPayload);
+    const deleteAll = db.transaction((rows: any[]) => {
+      for (const c of rows) deleteStmt.run(c.id);
+    });
+    deleteAll(confirmed);
+    removedCount = confirmed.length;
+    if (removedCount > 0) {
+      console.warn(`[syncServerVods] ${server.name}: pruned ${removedCount} VODs (verified absent in two independent inventories)`);
     }
 
-    return { addedCount, removedCount, pendingRemovals: candidates.length - removedCount || undefined };
+    return { addedCount, removedCount, pendingRemovals: candidates.length - removedCount || undefined, protectedRemovals: prot.length || undefined };
   } catch (error: any) {
     console.warn(`Failed to sync VODs for server ${server.name}:`, error.message);
     // Explicit failure — callers must not treat this as "0 changes"

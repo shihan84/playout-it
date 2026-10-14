@@ -84,7 +84,11 @@ export async function flussonicRequest(
     headers: hdrs,
     timeout: timeout,
     maxContentLength: Infinity,
-    maxBodyLength: Infinity
+    maxBodyLength: Infinity,
+    // Never follow redirects — a 3xx could silently forward the Basic auth
+    // header to an arbitrary host. Fail loudly so the operator fixes the URL.
+    maxRedirects: 0,
+    validateStatus: (s: number) => s < 300
   });
 
   const key = server.api_key || '';

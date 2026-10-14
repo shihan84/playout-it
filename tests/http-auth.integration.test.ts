@@ -25,7 +25,9 @@ const mockBehavior = {
   vodFilesPayload: null as any,
   delayMs: 0,
   // Optional pagination cursor generator: (requestUrl) => nextCursor|null
-  streamsNext: null as null | ((url: string) => string | null)
+  streamsNext: null as null | ((url: string) => string | null),
+  // Optional redirect target — mock responds 302 Location to /streams
+  redirectTo: null as null | string
 };
 
 let appProcess: any;
@@ -68,6 +70,12 @@ test.before(async () => {
     if (req.method === 'DELETE') remoteDeletes.push(req.url || '');
     remoteRequests.push(`${req.method} ${req.url}`);
     const respond = () => {
+      if (req.method === 'GET' && mockBehavior.redirectTo && /\/streams/.test(req.url || '')) {
+        res.statusCode = 302;
+        res.setHeader('Location', mockBehavior.redirectTo);
+        res.end();
+        return;
+      }
       res.setHeader('Content-Type', 'application/json');
       // Test-controlled GET /streams payload override (sync tests)
       if (req.method === 'GET' && mockBehavior.streamsPayload !== null && /\/streams/.test(req.url || '')) {
@@ -740,4 +748,65 @@ test('repeated small partial inventories never delete; prune requires explicit c
   assert.equal(await count(), 18);
 
   mockBehavior.streamsPayload = null;
+});
+
+test('prune enforces admin role and never deletes rows with live children', async () => {
+  const { res: loginRes } = await login('itadmin', 'it-admin-pass-12345');
+  const { token } = await loginRes.json();
+  const headers = { authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+  const { res: clientLogin } = await login('itclient', 'it-client-pass-12345');
+  const { token: clientToken } = await clientLogin.json();
+  const clientHeaders = { authorization: `Bearer ${clientToken}`, 'Content-Type': 'application/json' };
+
+  mockBehavior.streamsPayload = Array.from({ length: 20 }, (_, i) => ({ name: `prot-${i}`, inputs: [{ url: 'fake://x' }] }));
+  const mk = await fetch(`${BASE}/api/servers`, {
+    method: 'POST', headers,
+    body: JSON.stringify({ name: 'mock-protect', url: `http://127.0.0.1:${remotePort}`, username: 'u', password: 'p123456' })
+  });
+  const server = await mk.json();
+
+  // Auth matrix on prune: anon 401, client 403
+  assert.equal((await fetch(`${BASE}/api/servers/${server.id}/prune`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{"confirm":true}' })).status, 401);
+  assert.equal((await fetch(`${BASE}/api/servers/${server.id}/prune`, { method: 'POST', headers: clientHeaders, body: '{"confirm":true}' })).status, 403);
+
+  // Remote drops prot-18 and prot-19; give prot-18 a live assignment + video
+  const idb = new Database(dbPath);
+  const row = idb.prepare("SELECT id FROM streams WHERE server_id = ? AND name = 'prot-18'").get(server.id) as any;
+  const client = idb.prepare("SELECT id FROM users WHERE username = 'itclient'").get() as any;
+  idb.prepare('INSERT INTO user_stream_assignments (user_id, stream_id) VALUES (?, ?)').run(client.id, row.id);
+  idb.prepare("INSERT INTO videos (stream_id, filename, size) VALUES (?, 'keep.mp4', 1)").run(row.id);
+  idb.close();
+
+  mockBehavior.streamsPayload = Array.from({ length: 18 }, (_, i) => ({ name: `prot-${i}`, inputs: [{ url: 'fake://x' }] }));
+  const pruned = await (await fetch(`${BASE}/api/servers/${server.id}/prune`, {
+    method: 'POST', headers, body: JSON.stringify({ confirm: true })
+  })).json();
+
+  assert.equal(pruned.success, true);
+  assert.equal(pruned.removed, 1, 'only the child-free stream should be deleted');
+  assert.equal(pruned.protectedRemovals, 1, 'stream with children must be protected');
+
+  const idb2 = new Database(dbPath);
+  assert.ok(idb2.prepare("SELECT 1 FROM streams WHERE server_id = ? AND name = 'prot-18'").get(server.id), 'protected stream must survive prune');
+  assert.ok(!idb2.prepare("SELECT 1 FROM streams WHERE server_id = ? AND name = 'prot-19'").get(server.id), 'child-free stream should be pruned');
+  assert.ok(idb2.prepare('SELECT 1 FROM user_stream_assignments WHERE stream_id = ?').get(row.id), 'assignment must survive');
+  idb2.close();
+  mockBehavior.streamsPayload = null;
+});
+
+test('redirect responses are never followed (credential-forwarding guard)', async () => {
+  const { res: loginRes } = await login('itadmin', 'it-admin-pass-12345');
+  const { token } = await loginRes.json();
+  const headers = { authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+
+  mockBehavior.redirectTo = 'http://evil.example.com/harvest';
+  const mk = await fetch(`${BASE}/api/servers`, {
+    method: 'POST', headers,
+    body: JSON.stringify({ name: 'mock-redirect', url: `http://127.0.0.1:${remotePort}`, username: 'u', password: 'p123456' })
+  });
+  const server = await mk.json();
+
+  const sync = await (await fetch(`${BASE}/api/servers/${server.id}/sync`, { method: 'POST', headers })).json();
+  assert.equal(sync.success, false, 'redirect must fail the sync, not be followed');
+  mockBehavior.redirectTo = null;
 });

@@ -4,7 +4,7 @@ import { flussonicRequest, serverInBackoff } from '../services/flussonic';
 import { mapLimit } from '../utils/concurrency';
 import { syncServerStreams, syncServerVods } from '../services/sync';
 import { broadcastStreamsUpdate } from '../websocket';
-import { authenticateToken, requireAdmin } from '../middleware/auth';
+import { authenticateToken, requireAdmin, AuthRequest } from '../middleware/auth';
 
 const router = Router();
 
@@ -226,7 +226,7 @@ router.post('/:id/sync', authenticateToken, requireAdmin, async (req, res) => {
 // endpoint requires { confirm: true } and still enforces the verified
 // deletion policy (complete inventory + second-fetch confirmation +
 // conservative limits) inside the sync service.
-router.post('/:id/prune', authenticateToken, requireAdmin, async (req, res) => {
+router.post('/:id/prune', authenticateToken, requireAdmin, async (req: AuthRequest, res) => {
   try {
     if (req.body?.confirm !== true) {
       return res.status(400).json({ error: 'Pruning requires { confirm: true } — deletions are never automatic' });
@@ -237,6 +237,9 @@ router.post('/:id/prune', authenticateToken, requireAdmin, async (req, res) => {
     const s = await syncServerStreams(server, { allowDeletions: true });
     const vodSync = await syncServerVods(server, { allowDeletions: true });
 
+    // Audit trail: prune is the only path that can delete local rows
+    console.warn(`[prune] admin=${req.user?.username ?? req.user?.id} server=${server.name} removed=${s.removedCount} vodsRemoved=${vodSync.removedCount} pending=${(s.pendingRemovals || 0) + (vodSync.pendingRemovals || 0)}`);
+
     if (s.removedCount > 0 || vodSync.removedCount > 0) {
       broadcastStreamsUpdate();
     }
@@ -246,6 +249,7 @@ router.post('/:id/prune', authenticateToken, requireAdmin, async (req, res) => {
       removed: s.removedCount,
       vodsRemoved: vodSync.removedCount,
       pendingRemovals: (s.pendingRemovals || 0) + (vodSync.pendingRemovals || 0),
+      protectedRemovals: (s.protectedRemovals || 0) + (vodSync.protectedRemovals || 0),
       ...(vodSync.error ? { error: vodSync.error } : {})
     });
   } catch (error: any) {
