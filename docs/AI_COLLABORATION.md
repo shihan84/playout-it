@@ -264,3 +264,27 @@ User requested consecutive development phases with Devin staging verification af
 **Gate:** lint clean, build 123.4 kB, audit = 2 unchanged (esbuild low dev-only, qs moderate transitive).
 
 **Remaining:** draft PR creation blocked — token lacks collaborator permission (`createPullRequest` denied). Frontend health badge could poll `/health` on demand. No production changes.
+
+## Devin status — Phase 1B final acceptance — 2026-10-14
+
+**Branch:** `feature/phase-1b-multiserver`
+
+**Diff review vs security baseline:** 13 files, +650/−186 — sync, watchdog, flussonic, websocket, servers, telegram, migrations, Servers.tsx, tests, docs. All changes accounted for; no unrelated drift.
+
+**Migration verification — found and fixed TWO latent upgrade bugs:**
+1. Dedupe + unique-index creation ran BEFORE `migrateNullableServerId`, which rebuilds the tables — indexes were silently destroyed. Reordered: rebuild → dedupe (child re-point) → index.
+2. The `streams` table rebuild omitted `input_status`/`source_type`/`uptime` — upgraded DBs lost those columns. Fixed rebuild DDL with COALESCE fallbacks.
+3. Dedupe now re-points `user_stream_assignments`, `videos`, `telegram_alerts`, `vod_files` to the kept row — verified by new `tests/migrations.test.ts` (legacy-schema fixture with FK-linked duplicates).
+
+**Acceptance results**
+- 50-server sync-all with 120ms/server latency: ~4.3s (bounded concurrency working); slow, offline and malformed-response servers all covered by tests 10–12
+- `/api/servers/:id/health` — live + persisted; offline server → offline + last_error; ≥3 failures → sync-all `skipped` list includes it (backoff verified)
+- Per-server `sync_interval_secs` honored by auto-sync
+- WS scoping verified: admin receives all streams; client receives only assigned
+- Dashboard shows latency/last-seen/failures/last-error + sync-interval field
+
+**Gate:** lint clean · 21/21 tests (13 integration + 6 regression + 2 migration) · build 124.9 kB · audit = 2 (esbuild low dev-only, qs moderate transitive — no compatible fix path)
+
+**Unresolved:** `gh pr create --draft` fails — `GraphQL: must be a collaborator (createPullRequest)`. Open manually: /pull/new/feature/phase-1b-multiserver
+
+**Phase 2 handoff:** `docs/PHASE2_CHANNEL_LIFECYCLE_HANDOFF.md` created.
