@@ -171,6 +171,11 @@ export const startWatchdog = () => {
   if (autoSyncEnabled?.value === 'true') {
     const syncIntervalSetting = db.prepare('SELECT value FROM settings WHERE key = ?').get('auto_sync_interval') as any;
     const syncIntervalSecs = parseInt(syncIntervalSetting?.value || '60', 10);
+    // Tick at the shortest configured interval so per-server overrides shorter
+    // than the global interval actually take effect (restart required if a
+    // shorter override is added later).
+    const minOverride = (db.prepare('SELECT MIN(sync_interval_secs) m FROM servers WHERE sync_interval_secs IS NOT NULL').get() as any)?.m;
+    const tickSecs = Math.max(10, Math.min(syncIntervalSecs, minOverride ?? syncIntervalSecs));
 
     autoSyncTimer = setInterval(async () => {
       if (isSyncing) {
@@ -190,11 +195,14 @@ export const startWatchdog = () => {
             console.log(`Auto-sync skipping ${server.name} (in failure backoff)`);
             return;
           }
-          // Per-server sync interval overrides the global one
-          const perServerSecs = server.sync_interval_secs || syncIntervalSecs;
-          if (server.last_synced_at) {
+          // Per-server interval override: only apply the elapsed check when
+          // an override is actually configured — the global tick already
+          // respects the global interval, and whole-second timestamp
+          // resolution would otherwise skip every other tick.
+          if (server.sync_interval_secs && server.last_synced_at) {
             const elapsed = Date.now() - new Date(`${server.last_synced_at}Z`).getTime();
-            if (elapsed < perServerSecs * 1000) return;
+            // 1s slack for timestamp rounding + tick drift
+            if (elapsed < server.sync_interval_secs * 1000 - 1000) return;
           }
           try {
             const { addedCount, removedCount } = await syncServerStreams(server);

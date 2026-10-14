@@ -43,7 +43,7 @@ Run every item before pointing the app at production Flussonic servers.
 
 - [ ] `GET /api/servers` returns server rows without `api_key`/`username`/`password`
 - [ ] `GET /api/servers/:id/health` reports live status + latency
-- [ ] Sync twice; second sync reports `pendingRemovals` (never silent deletes)
+- [ ] Remove one disposable stream on the remote, then sync — it reports `pendingRemovals: 1` and the local row remains (an unchanged inventory correctly reports 0)
 - [ ] Prune requires `{confirm:true}` and emits `[prune]` audit log
 - [ ] Watchdog: offline server accumulates `consecutive_failures`, backs off
 

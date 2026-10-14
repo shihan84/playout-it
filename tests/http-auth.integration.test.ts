@@ -847,3 +847,73 @@ test('names-only stream inventory preserves existing metadata', async () => {
   idb.close();
   mockBehavior.streamsPayload = null;
 });
+
+test('opaque Flussonic `next` cursors are echoed as ?cursor= query params', async () => {
+  const { res: loginRes } = await login('itadmin', 'it-admin-pass-12345');
+  const { token } = await loginRes.json();
+  const headers = { authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+
+  // First page returns opaque cursor; second page (cursor=tok) returns none.
+  // Real Flussonic `next` values are opaque tokens, NOT URLs.
+  mockBehavior.streamsPayload = [{ name: 'paged-stream', inputs: [{ url: 'fake://p' }] }];
+  remoteRequests.length = 0;
+  mockBehavior.streamsNext = (url) => url.includes('cursor=') ? null : 'JTI0b3BhcXVlLXRva2Vu';
+  const mk = await fetch(`${BASE}/api/servers`, {
+    method: 'POST', headers,
+    body: JSON.stringify({ name: 'mock-opaque', url: `http://127.0.0.1:${remotePort}`, username: 'u', password: 'p123456' })
+  });
+  const server = await mk.json();
+
+  const sync = await (await fetch(`${BASE}/api/servers/${server.id}/sync`, { method: 'POST', headers })).json();
+  assert.equal(sync.success, true, `opaque cursor sync should succeed: ${sync.error}`);
+  assert.ok(remoteRequests.some(u => /\/streams\?cursor=JTI0/.test(u)), 'cursor must be echoed as ?cursor= param');
+
+  // Repeated opaque cursor → loop detection
+  mockBehavior.streamsNext = () => 'same-token-forever';
+  const mk2 = await fetch(`${BASE}/api/servers`, {
+    method: 'POST', headers,
+    body: JSON.stringify({ name: 'mock-cursorloop', url: `http://127.0.0.1:${remotePort}`, username: 'u', password: 'p123456' })
+  });
+  const server2 = await mk2.json();
+  const sync2 = await (await fetch(`${BASE}/api/servers/${server2.id}/sync`, { method: 'POST', headers })).json();
+  assert.equal(sync2.success, false, 'repeating cursor must fail (loop detection)');
+
+  mockBehavior.streamsNext = null;
+  mockBehavior.streamsPayload = null;
+});
+
+test('telegram /send is admin-only (prevents alert spoofing + rate-limit abuse)', async () => {
+  const { res: clientLogin } = await login('itclient', 'it-client-pass-12345');
+  const { token: clientToken } = await clientLogin.json();
+  const clientHeaders = { authorization: `Bearer ${clientToken}`, 'Content-Type': 'application/json' };
+  const { res: adminLogin } = await login('itadmin', 'it-admin-pass-12345');
+  const { token } = await adminLogin.json();
+  const headers = { authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+  const body = JSON.stringify({ stream_id: 1, alert_type: 'test', message: 'x' });
+
+  assert.equal((await fetch(`${BASE}/api/telegram-alerts/send`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body })).status, 401);
+  assert.equal((await fetch(`${BASE}/api/telegram-alerts/send`, { method: 'POST', headers: clientHeaders, body })).status, 403, 'client must be forbidden from /send');
+  const ok = await fetch(`${BASE}/api/telegram-alerts/send`, { method: 'POST', headers, body });
+  assert.equal(ok.status, 200, 'admin /send should work');
+});
+
+test('a failed request increments consecutive_failures once, not per retry', async () => {
+  const { res: loginRes } = await login('itadmin', 'it-admin-pass-12345');
+  const { token } = await loginRes.json();
+  const headers = { authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+
+  const mk = await fetch(`${BASE}/api/servers`, {
+    method: 'POST', headers,
+    body: JSON.stringify({ name: 'mock-failcount', url: 'http://127.0.0.1:3', username: 'u', password: 'p123456' })
+  });
+  const server = await mk.json();
+
+  const idb = new Database(dbPath);
+  const before = (idb.prepare('SELECT consecutive_failures f FROM servers WHERE id = ?').get(server.id) as any).f || 0;
+  // One manual /sync → streams request fails (1 internal retry) and aborts
+  // before the VOD sync — exactly +1, not +2 from double-counting the retry
+  await fetch(`${BASE}/api/servers/${server.id}/sync`, { method: 'POST', headers });
+  const after = (idb.prepare('SELECT consecutive_failures f FROM servers WHERE id = ?').get(server.id) as any).f;
+  assert.equal(after - before, 1, `one failed request must count once despite internal retry (got +${after - before})`);
+  idb.close();
+});

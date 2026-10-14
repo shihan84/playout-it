@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { db } from '../db';
 import { sendTelegramMessage, dispatchStreamAlerts } from '../services/telegram';
-import { authenticateToken, AuthRequest } from '../middleware/auth';
+import { authenticateToken, requireAdmin, AuthRequest } from '../middleware/auth';
 
 const router = Router();
 
@@ -145,8 +145,10 @@ router.get('/:id/history', authenticateToken, (req: AuthRequest, res) => {
   res.json(history);
 });
 
-// Send alert (internal API, called by monitoring system)
-router.post('/send', authenticateToken, async (req, res) => {
+// Send alert — admin only. A client caller could otherwise push messages to
+// other users' Telegram chats and bump last_alert_sent, suppressing real
+// watchdog alerts.
+router.post('/send', authenticateToken, requireAdmin, async (req, res) => {
   const { stream_id, alert_type, message } = req.body;
 
   if (!stream_id || !alert_type || !message) {

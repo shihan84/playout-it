@@ -32,48 +32,63 @@ function parseStreamsPayload(data: any): any[] {
 }
 
 // Follow `next` pagination cursors until the full inventory is collected.
-// Security rules for cursors:
-//   - must resolve to the SAME origin as the configured server URL
-//   - must stay under the /flussonic/api path
-//   - must not repeat a previously visited URL (loop detection)
+// Flussonic returns `next` as an OPAQUE cursor token to be echoed back as
+// the `?cursor=` query parameter — not a URL. URL-shaped cursors are still
+// accepted but strictly confined: same origin, under /flussonic/api only.
+// Loop detection + page cap apply to both forms.
 // Throws if pagination never terminates — an incomplete inventory must
 // never reach deletion reconciliation.
 const ALLOWED_API_PREFIX = '/flussonic/api';
 
-function resolveNextCursor(server: any, next: string, visited: Set<string>): string {
+function buildPageUrl(server: any, endpoint: string, cursor: string, visited: Set<string>): string {
   const baseUrl = server.url.replace(/\/$/, '');
-  const base = new URL(baseUrl);
-  let resolved: URL;
-  try {
-    resolved = new URL(next, `${baseUrl}/`);
-  } catch {
-    throw new Error(`Malformed pagination cursor: ${next}`);
+
+  if (cursor.startsWith('http') || cursor.startsWith('/')) {
+    // URL-shaped cursor: confine to the configured origin + API prefix
+    const base = new URL(baseUrl);
+    let resolved: URL;
+    try {
+      resolved = new URL(cursor, `${baseUrl}/`);
+    } catch {
+      throw new Error('Malformed pagination cursor');
+    }
+    if (resolved.origin !== base.origin) {
+      throw new Error(`Rejected cross-origin pagination cursor: ${resolved.origin}`);
+    }
+    if (!resolved.pathname.startsWith(ALLOWED_API_PREFIX)) {
+      throw new Error(`Rejected pagination cursor outside ${ALLOWED_API_PREFIX}: ${resolved.pathname}`);
+    }
+    const key = resolved.toString();
+    if (visited.has(key)) throw new Error(`Pagination loop detected at ${resolved.pathname}`);
+    visited.add(key);
+    return key;
   }
-  if (resolved.origin !== base.origin) {
-    throw new Error(`Rejected cross-origin pagination cursor: ${resolved.origin}`);
-  }
-  if (!resolved.pathname.startsWith(ALLOWED_API_PREFIX)) {
-    throw new Error(`Rejected pagination cursor outside ${ALLOWED_API_PREFIX}: ${resolved.pathname}`);
-  }
-  const key = resolved.toString();
-  if (visited.has(key)) {
-    throw new Error(`Pagination loop detected at ${resolved.pathname}`);
-  }
-  visited.add(key);
-  return key;
+
+  // Opaque cursor token: echo back as ?cursor= on the same endpoint.
+  // The request URL is fully constructed by us — no SSRF surface.
+  if (cursor.length > 500) throw new Error('Oversized pagination cursor');
+  if (visited.has(`cursor:${cursor}`)) throw new Error('Pagination loop detected (repeated cursor)');
+  visited.add(`cursor:${cursor}`);
+  const sep = endpoint.includes('?') ? '&' : '?';
+  return `${endpoint}${sep}cursor=${encodeURIComponent(cursor)}`;
 }
 
 async function fetchAllPages(server: any, url: string, maxPages = 50): Promise<any[]> {
   const visited = new Set<string>();
   const pages: any[] = [];
-  let next: string | null = url;
+  let cursor: string | null = null;
   let guard = 0;
-  while (next) {
+
+  const response = await flussonicRequest('GET', url, server);
+  pages.push(response.data);
+  cursor = response.data && typeof response.data === 'object' ? (response.data.next || null) : null;
+
+  while (cursor) {
     if (guard++ >= maxPages) throw new Error(`Pagination did not complete within ${maxPages} pages`);
-    const pageUrl = resolveNextCursor(server, next, visited);
-    const response = await flussonicRequest('GET', pageUrl, server);
-    pages.push(response.data);
-    next = response.data && typeof response.data === 'object' ? (response.data.next || null) : null;
+    const pageUrl = buildPageUrl(server, url, String(cursor), visited);
+    const page = await flussonicRequest('GET', pageUrl, server);
+    pages.push(page.data);
+    cursor = page.data && typeof page.data === 'object' ? (page.data.next || null) : null;
   }
   return pages;
 }
@@ -143,15 +158,17 @@ const CHILD_TABLES: Record<string, string> = {
   vods: `SELECT COUNT(*) AS n FROM vod_files WHERE vod_id = ?`
 };
 
-function partitionProtected(table: 'streams' | 'vods', candidates: any[]) {
+function childCount(table: 'streams' | 'vods', id: number): number {
   const stmt = db.prepare(CHILD_TABLES[table]);
+  const row = (table === 'streams' ? stmt.get(id, id, id) : stmt.get(id)) as any;
+  return row?.n ?? 0;
+}
+
+function partitionProtected(table: 'streams' | 'vods', candidates: any[]) {
   const free: any[] = [];
   const prot: any[] = [];
   for (const c of candidates) {
-    const { n } = table === 'streams'
-      ? stmt.get(c.id, c.id, c.id) as any
-      : stmt.get(c.id) as any;
-    (n > 0 ? prot : free).push(c);
+    (childCount(table, c.id) > 0 ? prot : free).push(c);
   }
   return { free, protected: prot };
 }
@@ -209,7 +226,8 @@ export async function syncServerStreams(server: any, options: SyncOptions = {}):
       // Names-only inventory carries no metadata — never overwrite stored
       // live_url/inputs/push_urls with empty values.
       if (!existing) {
-        insertStmt.run(server.id, name, '', '', '[]', '[]', 'offline');
+        const info = insertStmt.run(server.id, name, '', '', '[]', '[]', 'offline');
+        existingByName.set(name, { id: info.lastInsertRowid, live_url: '', playlist_url: '', push_urls: '[]', inputs: '[]' });
         addedCount++;
       }
       continue;
@@ -235,9 +253,16 @@ export async function syncServerStreams(server: any, options: SyncOptions = {}):
         existing.id
       );
     } else {
-      insertStmt.run(server.id, name,
+      const info = insertStmt.run(server.id, name,
         inputs?.[0] || '', inputs?.[1] || '',
         JSON.stringify(push_urls || []), JSON.stringify(inputs || []), status);
+      // Keep the map current — a record repeated on a later page must update
+      // rather than violate the UNIQUE(server_id, name) constraint.
+      existingByName.set(name, {
+        id: info.lastInsertRowid,
+        live_url: inputs?.[0] || '', playlist_url: inputs?.[1] || '',
+        push_urls: JSON.stringify(push_urls || []), inputs: JSON.stringify(inputs || [])
+      });
       addedCount++;
     }
   }
@@ -265,19 +290,27 @@ export async function syncServerStreams(server: any, options: SyncOptions = {}):
     console.warn(`[syncServerStreams] ${server.name}: ${prot.length} missing streams have live assignments/videos/alerts — protected from deletion`);
   }
 
-  // Second independent fetch: only names absent in both inventories delete
+  // Second independent fetch: only names absent in both inventories delete.
+  // Child records are RE-CHECKED inside the transaction — the network fetch
+  // takes time and a candidate can gain an assignment/video/alert meanwhile.
   const confirmed = await confirmAbsent(server, flussonicUrl, free, parseStreamsPayload);
+  let protectedLate = 0;
   const deleteAll = db.transaction((rows: any[]) => {
-    for (const c of rows) deleteStmt.run(c.id);
+    let removed = 0;
+    for (const c of rows) {
+      if (childCount('streams', c.id) > 0) { protectedLate++; continue; }
+      deleteStmt.run(c.id);
+      removed++;
+    }
+    return removed;
   });
-  deleteAll(confirmed);
-  removedCount = confirmed.length;
+  removedCount = deleteAll(confirmed);
   console.warn(`[syncServerStreams] ${server.name}: pruned ${removedCount} streams (verified absent in two independent inventories)`);
   if (removedCount < free.length) {
-    console.log(`[syncServerStreams] ${server.name}: ${free.length - removedCount} candidate deletions rejected by second-fetch confirmation`);
+    console.log(`[syncServerStreams] ${server.name}: ${free.length - removedCount} candidate deletions rejected by second-fetch/late-child checks`);
   }
 
-  return { addedCount, removedCount, pendingRemovals: candidates.length - removedCount || undefined, protectedRemovals: prot.length || undefined };
+  return { addedCount, removedCount, pendingRemovals: candidates.length - removedCount || undefined, protectedRemovals: (prot.length + protectedLate) || undefined };
 }
 
 function parseVodsPayload(data: any): any[] {
@@ -359,7 +392,8 @@ export async function syncServerVods(server: any, options: SyncOptions = {}): Pr
           updateStmt.run(JSON.stringify(paths), existingId);
         }
       } else {
-        insertStmt.run(server.id, name, JSON.stringify(paths));
+        const info = insertStmt.run(server.id, name, JSON.stringify(paths));
+        existingVodByName.set(name, info.lastInsertRowid); // repeat on a later page must not violate UNIQUE
         addedCount++;
       }
     }
@@ -385,16 +419,22 @@ export async function syncServerVods(server: any, options: SyncOptions = {}): Pr
     }
 
     const confirmed = await confirmAbsent(server, flussonicUrl, free, parseVodsPayload);
+    let protectedLate = 0;
     const deleteAll = db.transaction((rows: any[]) => {
-      for (const c of rows) deleteStmt.run(c.id);
+      let removed = 0;
+      for (const c of rows) {
+        if (childCount('vods', c.id) > 0) { protectedLate++; continue; }
+        deleteStmt.run(c.id);
+        removed++;
+      }
+      return removed;
     });
-    deleteAll(confirmed);
-    removedCount = confirmed.length;
+    removedCount = deleteAll(confirmed);
     if (removedCount > 0) {
       console.warn(`[syncServerVods] ${server.name}: pruned ${removedCount} VODs (verified absent in two independent inventories)`);
     }
 
-    return { addedCount, removedCount, pendingRemovals: candidates.length - removedCount || undefined, protectedRemovals: prot.length || undefined };
+    return { addedCount, removedCount, pendingRemovals: candidates.length - removedCount || undefined, protectedRemovals: (prot.length + protectedLate) || undefined };
   } catch (error: any) {
     console.warn(`Failed to sync VODs for server ${server.name}:`, error.message);
     // Explicit failure — callers must not treat this as "0 changes"

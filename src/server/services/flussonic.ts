@@ -117,11 +117,16 @@ export async function flussonicRequest(
           lastError = e2;
         }
       }
-      if (server.id) recordServerFailure(server.id, lastError.message);
       // Never retry client errors; retry network errors and 5xx once
-      if (e.response && e.response.status < 500) throw lastError;
+      if (e.response && e.response.status < 500) {
+        if (server.id) recordServerFailure(server.id, lastError.message);
+        throw lastError;
+      }
       if (attempt < retries) await sleep(300 * (attempt + 1));
     }
   }
+  // Record one failure per request — counting each retry attempt would
+  // double-count consecutive_failures and trip the circuit breaker early.
+  if (server.id) recordServerFailure(server.id, lastError.message);
   throw lastError;
 }

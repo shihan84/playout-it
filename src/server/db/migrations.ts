@@ -113,32 +113,38 @@ export function runMigrations(db: any) {
   migrateNullableServerId(db, 'vods');
 
   // Dedupe before creating unique indexes (keep earliest row per server+name,
-  // re-pointing child rows so no assignments/videos/alerts are lost)
+  // re-pointing child rows so no assignments/videos/alerts are lost).
+  // Runs as ONE transaction — a mid-way failure rolls back rather than
+  // leaving half-merged rows without unique indexes.
+  // UNIQUE(user_id, stream_id) collisions on assignments/alerts are the only
+  // expected conflict: re-point via INSERT OR IGNORE + delete the dup's rows.
   try {
-    const streamDupes = db.prepare(
-      'SELECT server_id, name, MIN(id) as keep_id, GROUP_CONCAT(id) as ids FROM streams GROUP BY server_id, name HAVING COUNT(*) > 1'
-    ).all() as any[];
-    for (const d of streamDupes) {
-      for (const dupId of d.ids.split(',').map(Number).filter((id: number) => id !== d.keep_id)) {
-        db.prepare('INSERT OR IGNORE INTO user_stream_assignments (user_id, stream_id) SELECT user_id, ? FROM user_stream_assignments WHERE stream_id = ?').run(d.keep_id, dupId);
-        db.prepare('DELETE FROM user_stream_assignments WHERE stream_id = ?').run(dupId);
-        for (const t of ['videos', 'telegram_alerts']) {
-          try { db.prepare(`UPDATE ${t} SET stream_id = ? WHERE stream_id = ?`).run(d.keep_id, dupId); } catch {}
+    db.transaction(() => {
+      const streamDupes = db.prepare(
+        'SELECT server_id, name, MIN(id) as keep_id, GROUP_CONCAT(id) as ids FROM streams GROUP BY server_id, name HAVING COUNT(*) > 1'
+      ).all() as any[];
+      for (const d of streamDupes) {
+        for (const dupId of d.ids.split(',').map(Number).filter((id: number) => id !== d.keep_id)) {
+          db.prepare('INSERT OR IGNORE INTO user_stream_assignments (user_id, stream_id) SELECT user_id, ? FROM user_stream_assignments WHERE stream_id = ?').run(d.keep_id, dupId);
+          db.prepare('DELETE FROM user_stream_assignments WHERE stream_id = ?').run(dupId);
+          db.prepare('INSERT OR IGNORE INTO telegram_alerts (user_id, stream_id, telegram_chat_id, alert_enabled, downtime_threshold, last_alert_sent, created_at) SELECT user_id, ?, telegram_chat_id, alert_enabled, downtime_threshold, last_alert_sent, created_at FROM telegram_alerts WHERE stream_id = ?').run(d.keep_id, dupId);
+          db.prepare('DELETE FROM telegram_alerts WHERE stream_id = ?').run(dupId);
+          db.prepare('UPDATE videos SET stream_id = ? WHERE stream_id = ?').run(d.keep_id, dupId);
+          db.prepare('DELETE FROM streams WHERE id = ?').run(dupId);
         }
-        db.prepare('DELETE FROM streams WHERE id = ?').run(dupId);
       }
-    }
-    const vodDupes = db.prepare(
-      'SELECT server_id, name, MIN(id) as keep_id, GROUP_CONCAT(id) as ids FROM vods GROUP BY server_id, name HAVING COUNT(*) > 1'
-    ).all() as any[];
-    for (const d of vodDupes) {
-      for (const dupId of d.ids.split(',').map(Number).filter((id: number) => id !== d.keep_id)) {
-        try { db.prepare('UPDATE vod_files SET vod_id = ? WHERE vod_id = ?').run(d.keep_id, dupId); } catch {}
-        db.prepare('DELETE FROM vods WHERE id = ?').run(dupId);
+      const vodDupes = db.prepare(
+        'SELECT server_id, name, MIN(id) as keep_id, GROUP_CONCAT(id) as ids FROM vods GROUP BY server_id, name HAVING COUNT(*) > 1'
+      ).all() as any[];
+      for (const d of vodDupes) {
+        for (const dupId of d.ids.split(',').map(Number).filter((id: number) => id !== d.keep_id)) {
+          db.prepare('UPDATE vod_files SET vod_id = ? WHERE vod_id = ?').run(d.keep_id, dupId);
+          db.prepare('DELETE FROM vods WHERE id = ?').run(dupId);
+        }
       }
-    }
-    db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_streams_server_name ON streams(server_id, name)');
-    db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_vods_server_name ON vods(server_id, name)');
+      db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_streams_server_name ON streams(server_id, name)');
+      db.exec('CREATE UNIQUE INDEX IF NOT EXISTS idx_vods_server_name ON vods(server_id, name)');
+    })();
   } catch (e) {
     console.warn('Could not create unique indexes on streams/vods:', (e as any)?.message);
   }

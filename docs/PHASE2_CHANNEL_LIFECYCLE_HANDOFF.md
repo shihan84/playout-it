@@ -14,7 +14,7 @@ Phase 1A = `feature/broadcast-security-foundation` (PR #1, draft). Phase 1B PR p
 
 ## Known gaps carried in
 
-- **No DB backup/rollback tooling** — add `scripts/backup-db.ts` (better-sqlite3 `.backup()` or WAL checkpoint + file copy) before Phase 2 destructive schema work; document restore procedure.
+- **DB backup tooling exists** (`scripts/backup-db.ts` — online `.backup()` + `--restore --confirm`). Phase 2 prerequisite reduced to: verify a restore drill before destructive schema work and schedule backups in deployment.
 - Frontend bundle ~1 MB; WS scoping re-queries assignments per broadcast; `/health` not polled by UI (card shows persisted values only).
 
 ## Phase 2 implementation plan

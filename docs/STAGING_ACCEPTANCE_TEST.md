@@ -12,8 +12,9 @@ branch's build (`feature/phase-1b-multiserver` @ `1399b93`).
 
 ## 1. Sync acceptance
 
-- [ ] Create 3 test streams + 1 test VOD on staging Flussonic (names prefixed `stg-`)
-- [ ] `POST /api/servers/:id/sync` → `added: 4`; rows visible in `GET /api/streams`/`/api/vods`
+- [ ] Create 10 test streams + 1 test VOD on staging Flussonic (names prefixed `stg-`)
+      — enough that removing 1–2 stays within the conservative prune limits
+- [ ] `POST /api/servers/:id/sync` → `added: 11`; rows visible in `GET /api/streams`/`/api/vods`
 - [ ] Re-sync → `added: 0`, `removed: 0`, stream ids unchanged
 - [ ] Assign a stream to a client user → re-sync → assignment survives
 
@@ -29,7 +30,8 @@ branch's build (`feature/phase-1b-multiserver` @ `1399b93`).
 
 - [ ] `GET /api/servers/:id/health` → `status: online`, `latency_ms` populated
 - [ ] Stop staging Flussonic → health → `offline`, `last_error`, failures increment
-- [ ] `POST /api/servers/sync-all` while staging is down → server appears in `skipped` (backoff)
+- [ ] Trigger ≥3 consecutive failures (watchdog/sync ticks while down), then
+      `POST /api/servers/sync-all` → server appears in `skipped` (backoff needs failures first)
 - [ ] Restart Flussonic → health recovers, `consecutive_failures` resets to 0
 
 ## 4. Backup & rollback drill
