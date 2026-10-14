@@ -328,3 +328,23 @@ User requested consecutive development phases with Devin staging verification af
 **Gate:** lint clean · **26/26 tests** · build 127.7 kB · audit = 2 unchanged (esbuild low, qs moderate)
 
 **Phase 2 remains on hold** pending review of these fixes.
+
+## Devin status — Phase 1B final hardening — 2026-10-14
+
+**Commit:** `9223fe6` on `feature/phase-1b-multiserver`
+
+**1. Automatic deletions disabled by default.** Regular sync (manual, auto-sync, watchdog, sync-all) now only inserts/updates — it never deletes. Missing names are reported as `pendingRemovals`. Actual deletion requires `POST /api/servers/:id/prune` with admin auth + `{confirm:true}`, and still enforces complete-inventory + second-fetch confirmation + conservative limits inside the sync service.
+
+**2. Pagination cursor confinement.** `resolveNextCursor()` validates every `next` URL: must resolve to the configured server's origin, must stay under `/flussonic/api`, must not repeat a visited URL (loop detection), >50 pages aborts. Verified by tests: cross-origin cursor, off-path cursor (`/admin/secret`), self-loop, and non-terminating pagination all fail the sync closed.
+
+**3. Per-record validation.** `validateStreamRecord`/`validateVodRecord` run over the entire inventory before any DB write — one malformed record (bad name type, non-array inputs/pushes, arrays-as-records) fails the whole sync. Fail closed, never partial.
+
+**4. Repeated partial inventories.** Two consecutive syncs at 18/20 remote → zero deletions both times, `pendingRemovals: 2` each time. `prune` without confirm → 400; with confirm → exactly the 2 verified-missing removed.
+
+**5. SQLite backup/restore.** `scripts/backup-db.ts` uses better-sqlite3 `.backup()`; new disposable-DB test proves a WAL-mode live DB backs up completely (including WAL-resident rows) and restores to an independent writable copy.
+
+**Gate:** lint clean · **30/30 tests pass** (20 integration + 4 migration + 6 regression) · build 131.1 kB · audit = 2 unchanged (esbuild low, qs moderate — no critical/high).
+
+**Phase 2 remains on hold.** No merge, deploy, or production changes.
+
+**PR blocker (unchanged):** `gh pr create` → `GraphQL: must be a collaborator (createPullRequest)`. Manual: /pull/new/feature/phase-1b-multiserver
