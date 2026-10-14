@@ -5,7 +5,7 @@ import { authenticateToken, requireAdmin } from '../middleware/auth';
 
 const router = Router();
 
-router.get('/:id', authenticateToken, requireAdmin, async (req, res) => {
+router.get('/:id/metrics', authenticateToken, requireAdmin, async (req, res) => {
   try {
     const server = db.prepare('SELECT * FROM servers WHERE id = ?').get(req.params.id) as any;
     if (!server) return res.status(404).json({ error: 'Server not found' });

@@ -1,0 +1,25 @@
+name: Stage 1 security CI
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [feature/broadcast-security-foundation]
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - name: TypeScript check
+        run: npm run lint
+      - name: Security regression tests
+        run: npx tsx --test tests/security-regression.test.ts
+      - name: Build
+        run: npm run build

@@ -1,5 +1,9 @@
 import 'dotenv/config';
 
+if (process.env.NODE_ENV === 'production' && (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 32)) {
+  throw new Error('JWT_SECRET must be configured with at least 32 characters in production');
+}
+
 export const config = {
   port: Number(process.env.PORT || 3000),
   nodeEnv: process.env.NODE_ENV || 'development',

@@ -1,5 +1,5 @@
 import { db } from '../db';
-import { flussonicRequest } from './flussonic';
+import { flussonicRequest, resolveCompanionVodName } from './flussonic';
 
 export async function updatePlaylistFile(stream: any) {
   const videos = db.prepare('SELECT filename FROM videos WHERE stream_id = ? ORDER BY sort_order ASC, created_at ASC').all(stream.id) as any[];
@@ -7,6 +7,11 @@ export async function updatePlaylistFile(stream: any) {
   // Playlist entries are BARE filenames (e.g. video.mp4), because Flussonic resolves them
   // as <vod_storage_root>/<entry> = /storage/khabar70/video.mp4.
   // Adding the vodname/ prefix would double-resolve: /storage/khabar70/khabar70/video.mp4 (wrong).
+  const server = db.prepare('SELECT * FROM servers WHERE id = ?').get(stream.server_id) as any;
+  if (!server) return;
+
+  // Resolves `_vod` first, then the legacy same-name VOD for upgraded installs
+  const vodName = await resolveCompanionVodName(server, stream.name);
   const playlistContent = videos.map(v => {
     const fname = v.filename as string;
     // Strip any accidental streamname/ prefix that may have been stored in DB
@@ -14,23 +19,20 @@ export async function updatePlaylistFile(stream: any) {
     return fname;
   }).join('\n');
 
-  const server = db.prepare('SELECT * FROM servers WHERE id = ?').get(stream.server_id) as any;
-  if (!server) return;
-
   // 1. Upload playlist.txt to Flussonic VOD storage (standard Flussonic filename)
   const playlistFilename = 'playlist.txt';
   try {
-    const uploadUrl = `${server.url}/flussonic/api/v3/vods/${encodeURIComponent(stream.name)}/storages/0/files/${playlistFilename}`;
+    const uploadUrl = `${server.url}/flussonic/api/v3/vods/${encodeURIComponent(vodName)}/storages/0/files/${playlistFilename}`;
     await flussonicRequest('PUT', uploadUrl, server, playlistContent, 30000, { 'Content-Type': 'text/plain' });
-    console.log(`Playlist uploaded to Flussonic VOD: ${stream.name}/playlist.txt`);
+    console.log(`Playlist uploaded to Flussonic VOD: ${vodName}/playlist.txt`);
   } catch (e: any) {
     console.warn('Failed to upload playlist.txt to Flussonic VOD:', e.message);
     return;
   }
 
   // 2. Update stream inputs to use playlist:// as fallback
-  // playlist:///khabar70/playlist.txt — triple slash = Flussonic resolves via VOD named khabar70
-  const playlistInputUrl = `playlist:///${stream.name}/playlist.txt`;
+  // playlist:///devin-test_vod/playlist.txt — triple slash = Flussonic resolves via VOD named devin-test_vod
+  const playlistInputUrl = `playlist:///${vodName}/playlist.txt`;
   try {
     const flussonicStreamUrl = `${server.url}/flussonic/api/v3/streams/${encodeURIComponent(stream.name)}`;
     const streamResponse = await flussonicRequest('GET', flussonicStreamUrl, server);

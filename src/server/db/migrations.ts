@@ -91,19 +91,8 @@ export function runMigrations(db: any) {
     db.prepare('INSERT INTO settings (key, value) VALUES (?, ?)').run('auto_sync_interval', '60');
   }
 
-  // Create default admin user if not exists
-  const adminUser = db.prepare('SELECT * FROM users WHERE username = ?').get('admin');
-  if (!adminUser) {
-    const defaultPassword = 'admin123';
-    const passwordHash = bcrypt.hashSync(defaultPassword, config.saltRounds);
-    db.prepare('INSERT INTO users (username, password_hash, email, role) VALUES (?, ?, ?, ?)').run(
-      'admin',
-      passwordHash,
-      'admin@localhost',
-      'admin'
-    );
-    console.log('Default admin user created. Username: admin, Password: admin123');
-  }
+  // Explicitly provision the initial administrator using deployment tooling.
+  // Never create a known default password on startup.
 
   // Migration to make server_id nullable and add ON DELETE SET NULL
   migrateNullableServerId(db, 'streams');

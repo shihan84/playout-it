@@ -99,49 +99,12 @@ export default function VodFileManager({ vod, onClose, showNotification }: VodFi
     setUploadingFiles(selectedFiles.map(f => ({ name: f.name, progress: 0 })));
 
     try {
-      const infoRes = await axios.get(`/api/vods/${vod.id}/upload-info`);
-      const { serverUrl, vodName, authHeader, altAuthHeader } = infoRes.data;
-      const cleanServerUrl = serverUrl.replace(/\/$/, '');
-
+      // Upload through our authenticated backend. Never send Flussonic credentials to browsers.
+      let failedUploads = 0;
       for (let i = 0; i < selectedFiles.length; i++) {
         const file = selectedFiles[i];
-        
         setUploadingFiles(prev => prev.map((f, idx) => idx === i ? { ...f, progress: 0 } : f));
-
-        const uploadUrl = `${cleanServerUrl}/flussonic/api/v3/vods/${encodeURIComponent(vodName)}/storages/0/files/${file.name}`;
-        
-        const performDirectUpload = async (header: string) => {
-          return await axios.put(uploadUrl, file, {
-            headers: { 
-              'Authorization': header,
-              'Content-Type': file.type || 'application/octet-stream'
-            },
-            onUploadProgress: (progressEvent) => {
-              const percentCompleted = Math.round((progressEvent.loaded * 100) / (progressEvent.total || 1));
-              setUploadingFiles(prev => prev.map((f, idx) => idx === i ? { ...f, progress: percentCompleted } : f));
-            }
-          });
-        };
-
         try {
-          try {
-            await performDirectUpload(authHeader);
-          } catch (firstError: any) {
-            if (firstError.response?.status === 403 && altAuthHeader) {
-              await performDirectUpload(altAuthHeader);
-            } else {
-              throw firstError;
-            }
-          }
-
-          await axios.post(`/api/vods/${vod.id}/files/confirm-upload`, {
-            filename: file.name,
-            size: file.size
-          });
-        } catch (directError: any) {
-          console.error(`Direct upload failed for ${file.name}, falling back to chunked`, directError);
-          
-          try {
             const CHUNK_SIZE = 5 * 1024 * 1024; // 5MB chunks
             const totalChunks = Math.ceil(file.size / CHUNK_SIZE);
             
@@ -176,15 +139,15 @@ export default function VodFileManager({ vod, onClose, showNotification }: VodFi
               totalChunks,
               size: file.size
             });
-          } catch (chunkError: any) {
-            console.error(`Chunked upload fallback failed for ${file.name}`, chunkError);
-            showNotification(`Failed to upload ${file.name}`, 'error');
-          }
+        } catch (chunkError: any) {
+          failedUploads++;
+          console.error(`Chunked upload failed for ${file.name}`, chunkError);
+          showNotification(`Failed to upload ${file.name}`, 'error');
         }
       }
 
       fetchFiles();
-      showNotification('All files uploaded successfully!', 'success');
+      if (failedUploads === 0) showNotification('All files uploaded successfully!', 'success');
     } catch (error: any) {
       console.error('Failed to upload files', error);
       showNotification(error.response?.data?.error || error.message || 'Failed to upload files', 'error');

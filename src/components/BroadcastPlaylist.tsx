@@ -207,8 +207,8 @@ export default function BroadcastPlaylist({
   };
 
   const vodName = selectedVodLocationId
-    ? (availableVods.find(v => v.id === selectedVodLocationId)?.name || streamName)
-    : streamName;
+    ? (availableVods.find(v => v.id === selectedVodLocationId)?.name || `${streamName}_vod`)
+    : `${streamName}_vod`;
   const playlistUrl = `playlist:///${vodName}/playlist.txt`;
 
   const copyUrl = () => {

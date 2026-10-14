@@ -16,6 +16,24 @@ export function getServerAuthHeader(server: any): string {
     : basicAuth('flussonic', key);
 }
 
+// Resolve which remote VOD backs a stream's companion storage. New installs
+// create `<stream>_vod`; older installs used `<stream>` itself (shared
+// Flussonic namespace). Probe `_vod` first, fall back to the legacy name so
+// existing videos/playlists keep working after upgrade. Defaults to `_vod`
+// when neither exists (i.e. the VOD still needs to be created).
+export async function resolveCompanionVodName(server: any, streamName: string): Promise<string> {
+  const baseUrl = server.url.replace(/\/$/, '');
+  for (const candidate of [`${streamName}_vod`, streamName]) {
+    try {
+      await flussonicRequest('GET', `${baseUrl}/flussonic/api/v3/vods/${encodeURIComponent(candidate)}`, server);
+      return candidate;
+    } catch {
+      // not found (or unreachable) — try next candidate
+    }
+  }
+  return `${streamName}_vod`;
+}
+
 export async function flussonicRequest(
   method: string,
   url: string,

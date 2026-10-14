@@ -7,6 +7,11 @@ import { authenticateToken, requireAdmin } from '../middleware/auth';
 
 const router = Router();
 
+const publicServer = (server: any) => {
+  const { api_key, username, password, ...safe } = server;
+  return safe;
+};
+
 router.get('/', authenticateToken, requireAdmin, async (req, res) => {
   const servers = db.prepare(`
     SELECT s.*, 
@@ -22,7 +27,7 @@ router.get('/', authenticateToken, requireAdmin, async (req, res) => {
       const response = await flussonicRequest('GET', configUrl, server);
 
       return {
-        ...server,
+        ...publicServer(server),
         status: 'online',
         last_checked: new Date().toISOString(),
         config: response.data || null
@@ -30,7 +35,7 @@ router.get('/', authenticateToken, requireAdmin, async (req, res) => {
     } catch (error: any) {
       console.error(`Failed to check server ${server.name} status:`, error.message);
       return {
-        ...server,
+        ...publicServer(server),
         status: 'offline',
         last_checked: new Date().toISOString(),
         config: null
@@ -95,7 +100,7 @@ router.post('/', authenticateToken, requireAdmin, async (req, res) => {
     console.warn(`Failed to auto-sync new server ${name}:`, error.message);
   }
 
-  res.json(server);
+  res.json(publicServer(server));
 });
 
 // Check single server status
@@ -134,53 +139,13 @@ router.delete('/:id', authenticateToken, requireAdmin, async (req, res) => {
       return res.status(404).json({ error: 'Server not found' });
     }
 
-    // Check if there are streams or vods associated with this server
-    const streams = db.prepare('SELECT * FROM streams WHERE server_id = ?').all(serverId) as any[];
-    const vods = db.prepare('SELECT * FROM vods WHERE server_id = ?').all(serverId) as any[];
-
-    console.log(`Server ${serverId} has ${streams.length} streams and ${vods.length} VODs`);
-
-    // Look for a duplicate server (same URL) to reassign to
-    const normalizedUrl = serverToDelete.url.replace(/\/$/, '');
-    const duplicateServer = db.prepare('SELECT id FROM servers WHERE (url = ? OR url = ? OR url = ?) AND id != ?')
-      .get(normalizedUrl, normalizedUrl + '/', serverToDelete.url, serverId) as any;
-
-    if (duplicateServer) {
-      // Reassign to the duplicate server (no effect on Flussonic)
-      console.log(`Reassigning data from server ${serverId} to duplicate server ${duplicateServer.id}`);
-      db.prepare('UPDATE streams SET server_id = ? WHERE server_id = ?').run(duplicateServer.id, serverId);
-      db.prepare('UPDATE vods SET server_id = ? WHERE server_id = ?').run(duplicateServer.id, serverId);
-    } else {
-      // No duplicate, so we should effect the Flussonic server as requested
-      console.log(`No duplicate server found for ${serverId}, deleting associated data from Flussonic and local DB`);
-
-      // Delete streams from Flussonic
-      for (const stream of streams) {
-        const flussonicUrl = `${serverToDelete.url}/flussonic/api/v3/streams/${encodeURIComponent(stream.name)}`;
-        await flussonicRequest('DELETE', flussonicUrl, serverToDelete)
-          .catch(e => console.error(`Failed to delete stream ${stream.name} from Flussonic:`, e.message));
-
-        // Also try to delete the associated VOD location if it exists (Flussonic often creates one for streams)
-        const vodUrl = `${serverToDelete.url}/flussonic/api/v3/vods/${encodeURIComponent(stream.name)}`;
-        await flussonicRequest('DELETE', vodUrl, serverToDelete)
-          .catch(() => {}); // Ignore errors for this secondary delete
-      }
-
-      // Delete VOD locations from Flussonic
-      for (const vod of vods) {
-        const flussonicUrl = `${serverToDelete.url}/flussonic/api/v3/vods/${encodeURIComponent(vod.name)}`;
-        await flussonicRequest('DELETE', flussonicUrl, serverToDelete)
-          .catch(e => console.error(`Failed to delete VOD ${vod.name} from Flussonic:`, e.message));
-      }
-
-      // Delete from local DB
-      db.prepare('DELETE FROM streams WHERE server_id = ?').run(serverId);
-      db.prepare('DELETE FROM vods WHERE server_id = ?').run(serverId);
-    }
-
-    console.log(`Deleting server ${serverId} from servers table`);
-    db.prepare('DELETE FROM servers WHERE id = ?').run(serverId);
-    console.log(`Successfully deleted server ${serverId}`);
+    // Unlink only. Never delete remote Flussonic resources when removing a server.
+    // Existing stream/VOD records are retained and detached for reassignment.
+    db.transaction(() => {
+      db.prepare('UPDATE streams SET server_id = NULL WHERE server_id = ?').run(serverId);
+      db.prepare('UPDATE vods SET server_id = NULL WHERE server_id = ?').run(serverId);
+      db.prepare('DELETE FROM servers WHERE id = ?').run(serverId);
+    })();
 
     broadcastStreamsUpdate(); // Notify clients
     res.json({ success: true });
