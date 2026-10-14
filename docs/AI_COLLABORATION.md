@@ -18,6 +18,7 @@ Use `docs/AI_COLLABORATION.md` for durable status and handoffs, and PR #1 commen
 
 ## Current status
 
+- **Phase 1A ready for review.** Security foundation verified end-to-end: authenticated HTTP integration suite added (5 tests), `/api/settings` unauthenticated access found & fixed, server cred redaction verified online+offline, unlink-only delete verified against mock Flussonic, audit down to 2 non-critical vulns.
 - Stage 1 security foundation is in draft PR #1.
 - Prior contributor verification at commit `72ba965`: `npm ci`, `npm run lint`, 5/5 source regression tests, and `npm run build` passed.
 - Subsequent commits added authenticated-only VOD browser uploads and one-time admin CLI. **These later changes are not yet verified.**
@@ -41,6 +42,21 @@ Use `docs/AI_COLLABORATION.md` for durable status and handoffs, and PR #1 commen
 - Prepare merge-readiness checklist, leaving final merge/deploy to user approval.
 
 ## Status updates
+
+### 2026-10-14 — Devin (local contributor) — Phase 1A final verification
+
+- **Work done:** Added `tests/http-auth.integration.test.ts` — a real HTTP suite that spawns the app in production mode (temp DB, mock Flussonic) and exercises anon/client/admin access. Found and fixed a live vulnerability in the process.
+- **New vulnerability found & fixed:** `/api/settings` had **no auth at all** — anonymous `GET` returned all settings including `telegram_bot_token`, and anonymous `POST` could mutate watchdog/auto-sync/telegram config. Router now `authenticateToken + requireAdmin` (all frontend consumers are admin pages).
+- **Integration tests (5/5 pass, ~17s):**
+  - Anonymous → 401 on servers, vods, users, settings, watchdog restart, my-streams, blocked-ips, telegram-alerts
+  - Client role → 403 on admin routes; 200 on `/api/my-streams`
+  - Admin → 200 watchdog restart, server create
+  - Credential redaction verified for **online** (mock Flussonic) AND **offline** (unreachable) servers — no `api_key`/`username`/`password` fields
+  - Server DELETE → mock Flussonic received **zero** `DELETE` requests (unlink-only confirmed)
+- **Other checks:** `npm run lint` ✅ | `tests/security-regression.test.ts` ✅ 6/6 | `npm run build` ✅ | `npm audit` ✅ **2 vulns** (esbuild low via tsx dev, qs moderate transitive — no critical/high)
+- **Staging VOD upload test plan:** written at `docs/STAGING_VOD_UPLOAD_TEST_PLAN.md` (10 cases incl. partial-failure and credential non-disclosure) — ready to execute when staging Flussonic access is provided.
+- **Remaining risks:** WebSocket `/ws` accepts any upgrade (no auth check) — flagged for Phase 1B; mutating-route CSRF review still open; integration suite covers auth/redaction/delete but not stream/VOD write paths yet.
+- **Next owner / action:** ChatGPT contributor — Phase 1B multi-server handoff prep; user to provide staging Flussonic creds (out-of-band) to run the VOD plan. Phase 1A marked **ready for review**; merge still requires user approval.
 
 ### 2026-10-14 — Devin (local contributor) — `79e46f1`
 

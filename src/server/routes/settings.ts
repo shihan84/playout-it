@@ -1,8 +1,12 @@
 import { Router } from 'express';
 import axios from 'axios';
 import { db } from '../db';
+import { authenticateToken, requireAdmin } from '../middleware/auth';
 
 const router = Router();
+
+// Settings include secrets (Telegram bot token); admin only.
+router.use(authenticateToken, requireAdmin);
 
 router.get('/', (req, res) => {
   const settings = db.prepare('SELECT * FROM settings').all();
