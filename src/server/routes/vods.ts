@@ -3,8 +3,9 @@ import multer from 'multer';
 import os from 'os';
 import fs from 'fs';
 import path from 'path';
+import { randomBytes } from 'crypto';
 import { db } from '../db';
-import { flussonicRequest, getServerAuthHeader } from '../services/flussonic';
+import { flussonicRequest } from '../services/flussonic';
 import { syncVodFilesFromRemote } from '../services/sync';
 import { updateVodPlaylistFile } from '../services/playlist';
 import { authenticateToken, requireAdmin } from '../middleware/auth';
@@ -15,6 +16,9 @@ const upload = multer({
 });
 
 const router = Router();
+
+// VOD management is privileged; apply authorization before any upload parsing.
+router.use(authenticateToken, requireAdmin);
 
 router.get('/', authenticateToken, requireAdmin, (req, res) => {
   const vods = db.prepare(`
@@ -190,21 +194,8 @@ router.get('/:id/upload-info', (req, res) => {
     const server = db.prepare('SELECT * FROM servers WHERE id = ?').get(vod.server_id) as any;
     if (!server) return res.status(404).json({ error: 'Server not found' });
 
-    const authHeader = getServerAuthHeader(server);
-
-    // Legacy alt auth header for api_key-only servers
-    let altAuthHeader = null;
-    const key = server.api_key || '';
-    if (!server.username && key && !key.includes(':')) {
-      altAuthHeader = `Basic ${Buffer.from(`admin:${key}`).toString('base64')}`;
-    }
-
-    res.json({
-      serverUrl: server.url,
-      vodName: vod.name,
-      authHeader,
-      altAuthHeader
-    });
+    // Never disclose upstream administrator credentials to browser clients.
+    res.json({ serverUrl: server.url, vodName: vod.name, directUploadSupported: false });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
@@ -231,7 +222,8 @@ router.post('/:id/files/init-chunked', (req, res) => {
   const { filename, totalChunks } = req.body;
   if (!filename || !totalChunks) return res.status(400).json({ error: 'Missing filename or totalChunks' });
 
-  const uploadId = Math.random().toString(36).substring(2, 15);
+  if (!Number.isSafeInteger(Number(totalChunks)) || Number(totalChunks) < 1 || Number(totalChunks) > 10000 || typeof filename !== 'string' || !/^[^/\\\\]+$/.test(filename) || filename === '.' || filename === '..') return res.status(400).json({ error: 'Invalid upload parameters' });
+  const uploadId = randomBytes(16).toString('hex');
   const chunkDir = path.join(os.tmpdir(), `upload_${uploadId}`);
 
   if (!fs.existsSync(chunkDir)) {
@@ -247,6 +239,7 @@ router.post('/:id/files/chunk', upload.single('chunk'), (req, res) => {
     return res.status(400).json({ error: 'Missing uploadId, chunkIndex, or chunk file' });
   }
 
+  if (typeof uploadId !== 'string' || !/^[a-f0-9]{32}$/.test(uploadId) || !Number.isSafeInteger(Number(chunkIndex)) || Number(chunkIndex) < 0 || Number(chunkIndex) > 10000) return res.status(400).json({ error: 'Invalid chunk parameters' });
   const chunkDir = path.join(os.tmpdir(), `upload_${uploadId}`);
   if (!fs.existsSync(chunkDir)) {
     return res.status(400).json({ error: 'Upload session not found' });
@@ -264,6 +257,7 @@ router.post('/:id/files/complete-chunked', async (req, res) => {
     return res.status(400).json({ error: 'Missing required parameters' });
   }
 
+  if (typeof uploadId !== 'string' || !/^[a-f0-9]{32}$/.test(uploadId) || typeof filename !== 'string' || !/^[^/\\\\]+$/.test(filename) || filename === '.' || filename === '..' || !Number.isSafeInteger(Number(totalChunks)) || Number(totalChunks) < 1 || Number(totalChunks) > 10000) return res.status(400).json({ error: 'Invalid upload parameters' });
   const chunkDir = path.join(os.tmpdir(), `upload_${uploadId}`);
   const finalPath = path.join(os.tmpdir(), `final_${uploadId}_${filename}`);
 
