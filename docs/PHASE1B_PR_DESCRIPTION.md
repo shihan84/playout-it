@@ -1,7 +1,7 @@
 # Phase 1B — Multi-Flussonic Server Management
 
-Branch: `feature/phase-1b-multiserver` (head: `10c0f0e`)
-Base: `feature/broadcast-security-foundation`
+Branch: `feature/phase-1b-multiserver` (head: `b3d3807`)
+Base: `feature/broadcast-security-foundation` (`0591516` — merge-base verified)
 
 ## Summary
 
