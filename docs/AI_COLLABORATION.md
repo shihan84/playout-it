@@ -487,3 +487,26 @@ User requested consecutive development phases with Devin staging verification af
 - Per-server sync override shorter than global takes effect after watchdog restart
 
 **Status:** Ready for merge approval. Nothing merged or deployed.
+
+## Devin status — Post-merge verification — 2026-10-14
+
+**Merged (user-reported, confirmed in ancestry):**
+- Phase 1A: `103806f` — Merge PR #1 (`feature/broadcast-security-foundation` → `main`)
+- Phase 1B: `3872076` — Merge PR #2 (`feature/phase-1b-multiserver` → `main`)
+- `git merge-base --is-ancestor` confirms both are ancestors of `main` HEAD `3872076`.
+
+**Post-merge gate on `main` @ `3872076` (clean `npm ci`):**
+
+| Check | Result |
+|---|---|
+| Lint (`tsc --noEmit`) | clean |
+| Tests (`tsx --test tests/*.test.ts`) | **40/40 pass** (matches pre-merge baseline) |
+| Build (`npm run build`) | `dist/server.cjs` 136.2 kB (+ map 252.8 kB) |
+| `npm audit` | 2 non-critical — esbuild low (dev-only, GHSA-g7r4), qs moderate (transitive). No critical/high |
+| Working tree | clean; no stray production/config changes |
+
+**Regression sweep:** auth/CSRF/WS guards, credential redaction, companion-VOD fallback, complete-inventory sync, names-only metadata preservation (streams + VODs), malformed-payload fail-closed, cursor confinement + opaque `?cursor=` echo, redirect refusal, prune (401/403/400/confirm, transactions, audit log, child protection), health/backoff (per-request counting), per-server sync intervals, legacy+fresh migrations, online backup/restore — all passing on merged main. **No merge-sequence regressions.**
+
+**Residual risks (unchanged):** HTTPS/private path required for Flussonic Basic auth; explicit `JWT_SECRET` + admin provisioning required in production; pending/protected removals have no UI (Phase 2); backups need cron/PM2 scheduling; `qs` moderate DoS monitored; interval overrides may need watchdog restart.
+
+**Phase 2:** implementation branch `feature/phase-2-channel-lifecycle` prepared off merged `main`. Backlog + plan in `docs/PHASE2_CHANNEL_LIFECYCLE_HANDOFF.md`. **Code not started — awaiting scope approval.**
