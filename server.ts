@@ -4,6 +4,7 @@ import path from 'path';
 import fs from 'fs';
 import https from 'https';
 import cookieParser from 'cookie-parser';
+import { authenticateToken, requireAdmin } from './src/server/middleware/auth';
 
 import { config } from './src/server/config';
 import './src/server/db'; // initializes DB as side effect
@@ -49,7 +50,7 @@ app.use('/api/servers/:id/metrics', metricsRoutes);
 app.use('/api/ssl', sslRoutes);
 
 // Watchdog restart endpoint
-app.post('/api/watchdog/restart', (req, res) => {
+app.post('/api/watchdog/restart', authenticateToken, requireAdmin, (req, res) => {
   startWatchdog();
   res.json({ success: true });
 });
