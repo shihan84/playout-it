@@ -68,8 +68,9 @@ router.post('/', authenticateToken, requireAdmin, async (req, res) => {
     if (!server) return res.status(404).json({ error: 'Server not found' });
 
     const baseUrl = server.url.replace(/\/$/, '');
-    // Automatically create a VOD folder for this stream
-    const vodName = name;
+    // Automatically create a VOD folder for this stream. Flussonic shares a
+    // namespace between streams and VODs, so the VOD name must differ.
+    const vodName = `${name}_vod`;
     const vodPath = `/storage/${vodName}`;
 
     // Check if VOD already exists in DB
@@ -153,7 +154,7 @@ router.put('/:id', authenticateToken, requireAdmin, async (req, res) => {
     }
 
     // Automatically create a VOD folder for this stream if it doesn't exist
-    const vodName = name;
+    const vodName = `${name}_vod`;
     const vodPath = `/storage/${vodName}`;
     const existingVod = db.prepare('SELECT * FROM vods WHERE name = ? AND server_id = ?').get(vodName, server_id);
     if (!existingVod) {
@@ -202,14 +203,14 @@ router.delete('/:id', authenticateToken, requireAdmin, async (req, res) => {
           .catch(e => console.error('Flussonic delete error (ignored):', e.message));
 
         // Also try to delete the associated VOD location if it exists
-        const vodUrl = `${server.url}/flussonic/api/v3/vods/${encodeURIComponent(stream.name)}`;
+        const vodUrl = `${server.url}/flussonic/api/v3/vods/${encodeURIComponent(`${stream.name}_vod`)}`;
         await flussonicRequest('DELETE', vodUrl, server)
           .catch(e => console.error('Flussonic delete VOD error (ignored):', e.message));
       }
     }
     db.prepare('DELETE FROM streams WHERE id = ?').run(req.params.id);
     if (stream) {
-      db.prepare('DELETE FROM vods WHERE name = ? AND server_id = ?').run(stream.name, stream.server_id);
+      db.prepare('DELETE FROM vods WHERE name = ? AND server_id = ?').run(`${stream.name}_vod`, stream.server_id);
     }
     res.json({ success: true });
   } catch (error: any) {
@@ -358,8 +359,10 @@ router.post('/:id/videos', authenticateToken, requireStreamAccess, upload.single
     const server = db.prepare('SELECT * FROM servers WHERE id = ?').get(stream.server_id) as any;
     if (!server) throw new Error('Server not found');
 
-    // Upload video to Flussonic
-    const uploadUrl = `${server.url}/flussonic/api/v3/vods/${encodeURIComponent(stream.name)}/storages/0/files/${req.file.originalname}`;
+    // Upload video to Flussonic (VOD name differs from stream name —
+    // Flussonic shares a namespace between streams and VODs)
+    const vodName = `${stream.name}_vod`;
+    const uploadUrl = `${server.url}/flussonic/api/v3/vods/${encodeURIComponent(vodName)}/storages/0/files/${req.file.originalname}`;
     const fileBuffer = fs.readFileSync(req.file.path);
 
     try {
@@ -367,14 +370,14 @@ router.post('/:id/videos', authenticateToken, requireStreamAccess, upload.single
     } catch (uploadError: any) {
       if (uploadError.response && uploadError.response.status === 404) {
         // VOD doesn't exist, create it
-        console.log(`VOD ${stream.name} not found, creating it...`);
-        const createVodUrl = `${server.url}/flussonic/api/v3/vods/${encodeURIComponent(stream.name)}`;
+        console.log(`VOD ${vodName} not found, creating it...`);
+        const createVodUrl = `${server.url}/flussonic/api/v3/vods/${encodeURIComponent(vodName)}`;
         await flussonicRequest('PUT', createVodUrl, server, {
-          storages: [{ url: `/storage/vods/${stream.name}` }]
+          storages: [{ url: `/storage/vods/${vodName}` }]
         });
 
         // Also save it to our database so it shows up in VODs page
-        db.prepare('INSERT INTO vods (server_id, name, paths) VALUES (?, ?, ?)').run(server.id, stream.name, JSON.stringify([`/storage/vods/${stream.name}`]));
+        db.prepare('INSERT INTO vods (server_id, name, paths) VALUES (?, ?, ?)').run(server.id, vodName, JSON.stringify([`/storage/vods/${vodName}`]));
 
         // Try uploading again
         await flussonicRequest('PUT', uploadUrl, server, fileBuffer);
@@ -382,7 +385,7 @@ router.post('/:id/videos', authenticateToken, requireStreamAccess, upload.single
         throw uploadError;
       }
     }
-    console.log(`Video uploaded to Flussonic VOD: ${stream.name}/${req.file.originalname}`);
+    console.log(`Video uploaded to Flussonic VOD: ${vodName}/${req.file.originalname}`);
 
     // Insert into database
     db.prepare('INSERT INTO videos (stream_id, filename, size) VALUES (?, ?, ?)').run(stream.id, req.file.originalname, req.file.size);
@@ -412,7 +415,7 @@ router.delete('/:id/videos/:filename', authenticateToken, requireStreamAccess, a
     const server = db.prepare('SELECT * FROM servers WHERE id = ?').get(stream.server_id) as any;
     if (server) {
       // Delete video from Flussonic
-      const deleteUrl = `${server.url}/flussonic/api/v3/vods/${encodeURIComponent(stream.name)}/storages/0/files/${req.params.filename}`;
+      const deleteUrl = `${server.url}/flussonic/api/v3/vods/${encodeURIComponent(`${stream.name}_vod`)}/storages/0/files/${req.params.filename}`;
       await flussonicRequest('DELETE', deleteUrl, server).catch(e => console.warn('Failed to delete from Flussonic (ignored):', e.message));
       console.log(`Video deleted from Flussonic VOD: ${stream.name}/${req.params.filename}`);
     }
@@ -453,7 +456,7 @@ router.get('/:id/vod-files', authenticateToken, requireStreamAccess, async (req,
     if (!stream.server_url || (!stream.api_key && !stream.username)) return res.json({ files: [] });
 
     const baseUrl = stream.server_url.replace(/\/$/, '');
-    const encodedName = encodeURIComponent(stream.name);
+    const encodedName = encodeURIComponent(`${stream.name}_vod`);
     const urls = [
       `${baseUrl}/flussonic/api/v3/vods/${encodedName}/storages/0/files`,
       `${baseUrl}/flussonic/api/v3/vods/${encodedName}/files`,

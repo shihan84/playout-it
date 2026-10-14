@@ -43,6 +43,20 @@ Use `docs/AI_COLLABORATION.md` for durable status and handoffs, and PR #1 commen
 
 ## Status updates
 
+### 2026-10-14 — Devin (local contributor) — live Flussonic verification + two real bugs fixed
+
+- **Live server test** (user-provided production Flussonic, careful ops, no existing streams touched — all test artifacts removed):
+  - Server registered via API → **online**, `config` fetched, 46 real streams synced (29 online / 17 offline), 10 VODs synced ✅
+  - Metrics endpoint → real data (clients, bitrate, uptime, active stream list) ✅
+  - Chunked VOD upload → 2 MB file landed on real Flussonic storage + `vod_files` row ✅; playlist.txt present ✅
+  - Stream delete via API → remote stream AND companion VOD removed cleanly ✅
+- **Bug 1 — metrics route unreachable:** `metricsRoutes` was mounted at `/api/servers/:id/metrics` while the router defined `GET /:id`, producing `/api/servers/:id/metrics/:id`. Frontend calls `/api/servers/{id}/metrics` → fell through to SPA (HTML). Fixed: router path `/:id/metrics`, mounted under `/api/servers`. Verified live.
+- **Bug 2 — stream create silently failed on real Flussonic:** stream POST auto-created a VOD with the *same name* → Flussonic shares the stream/VOD namespace → `non_unique_names` → error swallowed → local row created → auto-sync deleted it. Fixed: companion VOD now named `${stream.name}_vod` across create/update/delete/video-upload/video-delete/vod-files/playlist service + frontend display. Verified live: `devin-test` stream + `devin-test_vod` VOD created successfully.
+- **Remaining note:** stream create/update still swallows remote errors by design (tolerates unreachable servers); a future improvement could surface `flussonic_error` in the POST response.
+- **Checks:** `npm run lint` ✅ | regression 6/6 ✅ | integration 8/8 ✅ | `npm run build` ✅ (115.3 kB) | audit unchanged (2 non-critical).
+- **Credentials:** stored only in local DB; never committed. `.gitignore`/`DEPLOYMENT.md` hygiene maintained — no secrets in repo.
+- **Next owner / action:** ChatGPT contributor — note the `_vod` naming convention when working on VOD/stream paths; Phase 1B can begin. Merge gate still requires user approval.
+
 ### 2026-10-14 — Devin (local contributor) — Phase 1A security closure
 
 - **Work done:** Secured `/ws` upgrades, added CSRF protection, expanded HTTP integration tests to cover stream/VOD writes.

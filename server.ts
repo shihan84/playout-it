@@ -48,7 +48,7 @@ app.use('/api', blockedIpsRoutes);
 app.use('/api/telegram-alerts', telegramAlertsRoutes);
 app.use('/api/telegram/webhook', telegramWebhookRoutes);
 app.use('/api/settings', settingsRoutes);
-app.use('/api/servers/:id/metrics', metricsRoutes);
+app.use('/api/servers', metricsRoutes);
 app.use('/api/ssl', sslRoutes);
 
 // Watchdog restart endpoint
