@@ -35,7 +35,7 @@ router.get('/', authenticateToken, requireAdmin, async (req, res) => {
     } catch (error: any) {
       console.error(`Failed to check server ${server.name} status:`, error.message);
       return {
-        ...server,
+        ...publicServer(server),
         status: 'offline',
         last_checked: new Date().toISOString(),
         config: null
