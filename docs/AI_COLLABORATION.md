@@ -40,6 +40,26 @@ Use `docs/AI_COLLABORATION.md` for durable status and handoffs, and PR #1 commen
 - Recheck CI and staging evidence; do not infer live success from source tests.
 - Prepare merge-readiness checklist, leaving final merge/deploy to user approval.
 
+## Status updates
+
+### 2026-10-14 — Devin (local contributor) — `ec8d2a1`
+
+- **Work done:** Pulled latest branch; verified `scripts/provision-admin.ts` and VOD upload rework; reran full checklist; triaged `npm audit`.
+- **Tests:** `npm ci` ✅ | `npm run lint` ✅ | `npx tsx --test tests/security-regression.test.ts` ✅ 5/5 | `npm run build` ✅ (`dist/server.cjs` 114.0 kB).
+- **provision-admin (disposable DBs, no prod data):**
+  - Valid run: admin row created (`testadmin`, role `admin`, bcrypt hash 60 chars) ✅
+  - Second run: refused (`user accounts already exist`), exit 1 ✅
+  - Password <16 bytes: refused, exit 1 ✅
+  - Missing `ADMIN_PASSWORD_FILE`: refused, exit 1 ✅
+  - ⚠ UX note: missing DB → unhandled `SQLITE_CANTOPEN` crash; DB without `users` table → unhandled error. Both fail safe (no writes), but a friendly message would help operators. Workflow note: `fileMustExist` means the DB must be created first (start app once, or document `sqlite3 flussonic.db ""`).
+- **VodFileManager:** direct-upload path fully removed; uploads go through authenticated backend chunked flow only — no Flussonic credentials reach the browser ✅. Failure counting added so partial failures no longer report "all uploaded".
+- **npm audit (26 total: 3 critical, 16 high, 4 moderate, 3 low):**
+  - **Runtime-reachable:** `proxy-addr` (critical, used by Express trust-proxy) — recommend `npm audit fix` or pinned upgrade. `axios` high — used for upstream Flussonic + Telegram calls; upgrade to ≥1.20/1.21. `multer` high — upload parsing path, upgrade ≥2.3. `ws` high — our `/ws` server, upgrade ≥8.21. `path-to-regexp`, `form-data` high — Express/axios transitive.
+  - **Build/dev-only:** `tar` (critical, via `@mapbox/node-pre-gyp` for bcrypt install), `vite`, `esbuild`, `postcss`, `picomatch`, `brace-expansion`, `browserslist`, `react-router`, `nanoid`, `source-map-js`, `protobufjs` (critical, transitive — likely `@google/genai`, unused at runtime).
+  - **Suggested order:** runtime packages first (proxy-addr, axios, multer, ws, body-parser, follow-redirects, qs) — several are `npm audit fix`-able without breaking changes; dev deps can follow.
+- **Blockers:** none on this branch. Integration tests (HTTP-level, authenticated) still absent — per action item 5, recommend adding before merge.
+- **Next owner / action:** ChatGPT contributor — confirm triage priorities, add integration tests or acceptance checklist for PR #1. User approval still required for merge/deploy.
+
 ## Status update format
 
 Append entries using:
