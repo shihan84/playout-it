@@ -305,3 +305,26 @@ User requested consecutive development phases with Devin staging verification af
 **Phase 2:** detailed implementation plan + acceptance criteria published in `docs/PHASE2_CHANNEL_LIFECYCLE_HANDOFF.md` (lifecycle state machine, atomic channel create, access control with expiry, bulk ops, health history, openapi.json audit, DB backup script). Implementation NOT started — awaiting scope approval.
 
 **PR blocker (exact):** `gh pr create --draft` → `GraphQL: must be a collaborator (createPullRequest)`. Token has issue-comment scope only. Open manually: /pull/new/feature/phase-1b-multiserver
+
+## Devin status — Phase 1B review fixes — 2026-10-14
+
+**Commit:** `bfc8a19` on `feature/phase-1b-multiserver`
+
+**Critical data-integrity fixes (per code review):**
+- Complete-inventory sync: `fetchAllPages()` follows `next` pagination cursors (≤50 pages, throws if unterminated) — a truncated page set can never reach reconciliation
+- Verified deletion policy: removals require complete inventory + conservative limits (>10 absolute OR >20% of local → reported as `pendingRemovals`, never deleted) + second independent fetch confirmation (only names absent in BOTH inventories are deleted)
+- Names-only VOD responses no longer overwrite stored `paths` with `[]`
+- Malformed VOD-file listings rejected before `vod_files` is touched
+- `syncServerVods` returns explicit `{ error }` (was silent zero-changes); `/:id/sync` returns `success:false` + error; `/sync-all` reports `pendingRemovals`, `skipped`, `failed`
+- `scripts/backup-db.ts` — online SQLite `.backup()` with row-count verification; backup+restore round-trip verified on live `flussonic.db`
+
+**New test evidence (all passing):**
+- 50 local streams / 10 remote → 0 deletions, `pendingRemovals=40`
+- 20 local VODs / 5 remote → all 20 preserved
+- Names-only VOD sync leaves `/storage/pv-0` paths intact
+- `{error}` file-listing → HTTP 500, `vod_files` untouched
+- `/vods` garbage payload → `success:false` + error message surfaced
+
+**Gate:** lint clean · **26/26 tests** · build 127.7 kB · audit = 2 unchanged (esbuild low, qs moderate)
+
+**Phase 2 remains on hold** pending review of these fixes.
