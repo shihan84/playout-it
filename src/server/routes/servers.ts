@@ -48,7 +48,7 @@ router.get('/', authenticateToken, requireAdmin, async (req, res) => {
 });
 
 router.post('/', authenticateToken, requireAdmin, async (req, res) => {
-  const { name, url, username, password, api_key } = req.body;
+  const { name, url, username, password, api_key, sync_interval_secs } = req.body;
 
   // Input validation
   if (!name || typeof name !== 'string' || name.trim().length === 0) {
@@ -84,8 +84,11 @@ router.post('/', authenticateToken, requireAdmin, async (req, res) => {
   // Keep api_key column populated for backward compatibility
   const apiKeyValue = `${finalUser}:${finalPass}`;
 
-  const stmt = db.prepare('INSERT INTO servers (name, url, api_key, username, password) VALUES (?, ?, ?, ?, ?)');
-  const info = stmt.run(name.trim(), url.trim(), apiKeyValue, finalUser, finalPass);
+  const syncInterval = Number.isInteger(sync_interval_secs) && sync_interval_secs >= 10 && sync_interval_secs <= 86400
+    ? sync_interval_secs : null;
+
+  const stmt = db.prepare('INSERT INTO servers (name, url, api_key, username, password, sync_interval_secs) VALUES (?, ?, ?, ?, ?, ?)');
+  const info = stmt.run(name.trim(), url.trim(), apiKeyValue, finalUser, finalPass, syncInterval);
 
   const server = { id: info.lastInsertRowid, name: name.trim(), url: url.trim(), api_key: apiKeyValue, username: finalUser, password: finalPass };
 
@@ -129,6 +132,39 @@ router.get('/:id/status', authenticateToken, requireAdmin, async (req, res) => {
   }
 });
 
+// Persisted health record + live probe for a single server
+router.get('/:id/health', authenticateToken, requireAdmin, async (req, res) => {
+  const server = db.prepare('SELECT * FROM servers WHERE id = ?').get(req.params.id) as any;
+  if (!server) return res.status(404).json({ error: 'Server not found' });
+
+  const started = Date.now();
+  try {
+    const response = await flussonicRequest('GET', `${server.url}/flussonic/api/v3/config`, server, null, 10000);
+    const fresh = db.prepare('SELECT last_seen_at, last_attempt_at, last_error, consecutive_failures, latency_ms FROM servers WHERE id = ?').get(server.id) as any;
+    res.json({
+      status: 'online',
+      latency_ms: Date.now() - started,
+      last_seen_at: fresh?.last_seen_at ?? null,
+      last_attempt_at: fresh?.last_attempt_at ?? null,
+      last_error: null,
+      consecutive_failures: 0,
+      in_backoff: false,
+      version: response.data?.version || response.data?.stats?.version || null
+    });
+  } catch (error: any) {
+    const fresh = db.prepare('SELECT last_seen_at, last_attempt_at, last_error, consecutive_failures, latency_ms FROM servers WHERE id = ?').get(server.id) as any;
+    res.json({
+      status: 'offline',
+      latency_ms: fresh?.latency_ms ?? null,
+      last_seen_at: fresh?.last_seen_at ?? null,
+      last_attempt_at: fresh?.last_attempt_at ?? null,
+      last_error: error.message,
+      consecutive_failures: fresh?.consecutive_failures ?? 0,
+      in_backoff: serverInBackoff(fresh || server)
+    });
+  }
+});
+
 router.delete('/:id', authenticateToken, requireAdmin, async (req, res) => {
   try {
     const serverId = req.params.id;
@@ -164,6 +200,7 @@ router.post('/:id/sync', authenticateToken, requireAdmin, async (req, res) => {
 
     const { addedCount, removedCount } = await syncServerStreams(server);
     const vodSync = await syncServerVods(server);
+    db.prepare('UPDATE servers SET last_synced_at = CURRENT_TIMESTAMP WHERE id = ?').run(server.id);
 
     if (addedCount > 0 || removedCount > 0) {
       broadcastStreamsUpdate();

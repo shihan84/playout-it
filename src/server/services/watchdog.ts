@@ -190,11 +190,18 @@ export const startWatchdog = () => {
             console.log(`Auto-sync skipping ${server.name} (in failure backoff)`);
             return;
           }
+          // Per-server sync interval overrides the global one
+          const perServerSecs = server.sync_interval_secs || syncIntervalSecs;
+          if (server.last_synced_at) {
+            const elapsed = Date.now() - new Date(`${server.last_synced_at}Z`).getTime();
+            if (elapsed < perServerSecs * 1000) return;
+          }
           try {
             const { addedCount, removedCount } = await syncServerStreams(server);
             const vodSync = await syncServerVods(server);
             totalAdded += addedCount + vodSync.addedCount;
             totalRemoved += removedCount + vodSync.removedCount;
+            db.prepare('UPDATE servers SET last_synced_at = CURRENT_TIMESTAMP WHERE id = ?').run(server.id);
           } catch (err: any) {
             console.error(`Auto-sync failed for server ${server.name}:`, err.message);
           }

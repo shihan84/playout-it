@@ -153,15 +153,11 @@ export async function syncServerVods(server: any) {
       let name = item.name || item.prefix;
       let paths: string[] = [];
 
-      // If Flussonic returns an array of strings (just names) instead of objects
+      // If Flussonic returns an array of strings (just names) instead of
+      // objects, store the name only — no per-VOD detail request (N+1).
+      // File listings are fetched lazily by the vod-files endpoints.
       if (typeof item === 'string') {
         name = item;
-        try {
-          const detailRes = await flussonicRequest('GET', `${flussonicUrl}/${encodeURIComponent(name)}`, server);
-          paths = detailRes.data.storages ? detailRes.data.storages.map((s: any) => s.url) : [];
-        } catch (e) {
-          console.warn(`Failed to fetch details for VOD ${name}`);
-        }
       } else if (item && (item.name || item.prefix)) {
         name = item.name || item.prefix;
         if (item.storages && Array.isArray(item.storages)) {

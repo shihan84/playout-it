@@ -98,6 +98,8 @@ export function runMigrations(db: any) {
     'ALTER TABLE servers ADD COLUMN last_error TEXT',
     'ALTER TABLE servers ADD COLUMN consecutive_failures INTEGER DEFAULT 0',
     'ALTER TABLE servers ADD COLUMN latency_ms INTEGER',
+    'ALTER TABLE servers ADD COLUMN sync_interval_secs INTEGER',
+    'ALTER TABLE servers ADD COLUMN last_synced_at DATETIME',
   ]) {
     try { db.exec(col); } catch (e) { /* column exists */ }
   }

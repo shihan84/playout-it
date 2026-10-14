@@ -429,3 +429,73 @@ test('sync-all uses bounded concurrency and records per-server health', async (t
   assert.ok(healthy.n >= 48, `expected health recorded for seeded servers, got ${healthy.n}`);
   idb2.close();
 });
+
+test('per-server health endpoint reports live + persisted state', async () => {
+  const { res: loginRes } = await login('itadmin', 'it-admin-pass-12345');
+  const { token } = await loginRes.json();
+  const headers = { authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+
+  assert.equal((await fetch(`${BASE}/api/servers/1/health`)).status, 401);
+
+  const list = await (await fetch(`${BASE}/api/servers`, { headers })).json();
+  const online = list.find((s: any) => s.name === 'mock-vod');
+  const health = await (await fetch(`${BASE}/api/servers/${online.id}/health`, { headers })).json();
+  assert.equal(health.status, 'online');
+  assert.equal(typeof health.latency_ms, 'number');
+  assert.ok(health.last_seen_at, 'last_seen_at should be persisted');
+
+  // Offline server accumulates failures and eventually enters backoff
+  const mk = await fetch(`${BASE}/api/servers`, {
+    method: 'POST', headers,
+    body: JSON.stringify({ name: 'mock-dead', url: 'http://127.0.0.1:2', username: 'u', password: 'p123456' })
+  });
+  const dead = await mk.json();
+  const deadHealth = await (await fetch(`${BASE}/api/servers/${dead.id}/health`, { headers })).json();
+  assert.equal(deadHealth.status, 'offline');
+  assert.ok(deadHealth.last_error, 'offline health should carry last_error');
+
+  for (let i = 0; i < 3; i++) {
+    await fetch(`${BASE}/api/servers/${dead.id}/sync`, { method: 'POST', headers });
+  }
+  const syncAll = await (await fetch(`${BASE}/api/servers/sync-all`, { method: 'POST', headers })).json();
+  assert.ok(syncAll.skipped?.includes('mock-dead'), `mock-dead should be skipped in backoff, got ${JSON.stringify(syncAll.skipped)}`);
+});
+
+test('WebSocket stream updates are scoped to user assignments', async () => {
+  const { res: adminLogin } = await login('itadmin', 'it-admin-pass-12345');
+  const { token: adminToken } = await adminLogin.json();
+  const { res: clientLogin } = await login('itclient', 'it-client-pass-12345');
+  const { token: clientToken } = await clientLogin.json();
+
+  const waitForUpdate = (cookie: string) => new Promise<any>((resolve, reject) => {
+    const ws = new WebSocket(`ws://localhost:${PORT}/ws`, { headers: { cookie: `token=${cookie}` } });
+    const timer = setTimeout(() => { ws.close(); reject(new Error('no STREAMS_UPDATE within 8s')); }, 8000);
+    ws.on('message', (raw) => {
+      const msg = JSON.parse(raw.toString());
+      if (msg.type === 'STREAMS_UPDATE') { clearTimeout(timer); ws.close(); resolve(msg.data); }
+    });
+    ws.on('error', reject);
+  });
+
+  const clientUpdate = waitForUpdate(clientToken);
+  const adminUpdate = waitForUpdate(adminToken);
+  await new Promise(r => setTimeout(r, 500)); // let sockets connect
+
+  // Trigger a broadcast: admin creates a stream the client is NOT assigned to
+  const headers = { authorization: `Bearer ${adminToken}`, 'Content-Type': 'application/json' };
+  const list = await (await fetch(`${BASE}/api/servers`, { headers })).json();
+  const server = list.find((s: any) => s.name === 'mock-vod');
+  const create = await fetch(`${BASE}/api/streams`, {
+    method: 'POST', headers,
+    body: JSON.stringify({ server_id: server.id, name: 'ws-scoped', inputs: ['fake://x'] })
+  });
+  assert.equal(create.status, 200);
+
+  const [clientStreams, adminStreams] = await Promise.all([clientUpdate, adminUpdate]);
+  const adminNames = adminStreams.map((s: any) => s.name);
+  const clientNames = clientStreams.map((s: any) => s.name);
+
+  assert.ok(adminNames.includes('ws-scoped'), 'admin should see the new stream');
+  assert.ok(!clientNames.includes('ws-scoped'), 'client must not see unassigned streams');
+  assert.ok(clientNames.includes('persist-stream'), 'client should see its assigned stream');
+});
