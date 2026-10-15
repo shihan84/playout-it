@@ -1368,6 +1368,68 @@ test('legacy PUT /api/streams/:id rejects on remote failure — local state and 
   assert.ok(!oldDeleted, `old remote stream 'put-test' must survive a failed rename, but DELETE was sent: ${remoteDeletes.join(', ')}`);
 });
 
+test('successful rename works end-to-end; DB failure triggers remote compensation', async () => {
+  const { res: adminLogin } = await login('itadmin', 'it-admin-pass-12345');
+  const { token } = await adminLogin.json();
+  const headers = { authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+
+  const mk = await fetch(`${BASE}/api/servers`, {
+    method: 'POST', headers,
+    body: JSON.stringify({ name: 'mock-rename-ok', url: `http://127.0.0.1:${remotePort}`, username: 'u', password: 'p123456' })
+  });
+  const server = await mk.json();
+
+  // Seed two streams: 'rename-src' will be renamed; 'rename-blocker' will
+  // cause a UNIQUE constraint violation when we try to rename to its name.
+  const idb = new Database(dbPath);
+  idb.prepare("INSERT INTO streams (server_id, name, live_url, playlist_url, inputs) VALUES (?, 'rename-src', '', '', '[\"rtsp://a\"]')").run(server.id);
+  idb.prepare("INSERT INTO streams (server_id, name, live_url, playlist_url, inputs) VALUES (?, 'rename-blocker', '', '', '[\"rtsp://b\"]')").run(server.id);
+  const srcId = (idb.prepare("SELECT id FROM streams WHERE name = 'rename-src'").get() as any).id;
+  idb.close();
+
+  // 1. Successful rename: rename-src → rename-new (no conflict)
+  remoteRequests.length = 0;
+  remoteDeletes.length = 0;
+  const ok = await fetch(`${BASE}/api/streams/${srcId}`, {
+    method: 'PUT', headers,
+    body: JSON.stringify({ server_id: server.id, name: 'rename-new', inputs: ['rtsp://a'] })
+  });
+  assert.equal(ok.status, 200, `rename should succeed, got ${ok.status}`);
+  const idb2 = new Database(dbPath);
+  const renamed = idb2.prepare('SELECT name FROM streams WHERE id = ?').get(srcId) as any;
+  assert.equal(renamed.name, 'rename-new', 'local row should have the new name');
+  idb2.close();
+  // Old remote stream should have been cleaned up
+  assert.ok(remoteDeletes.some(u => u.includes('rename-src')), 'old remote stream should be deleted on successful rename');
+
+  // 2. DB failure: rename rename-new → rename-blocker (UNIQUE constraint)
+  //    Remote PUT/DELETE succeed, but local UPDATE fails — compensation
+  //    should re-create the old remote stream and delete the new one.
+  remoteRequests.length = 0;
+  remoteDeletes.length = 0;
+  const fail = await fetch(`${BASE}/api/streams/${srcId}`, {
+    method: 'PUT', headers,
+    body: JSON.stringify({ server_id: server.id, name: 'rename-blocker', inputs: ['rtsp://a'] })
+  });
+  assert.equal(fail.status, 500, 'should fail with 500 on DB constraint violation');
+
+  // Local row must retain the pre-rename name
+  const idb3 = new Database(dbPath);
+  const still = idb3.prepare('SELECT name FROM streams WHERE id = ?').get(srcId) as any;
+  assert.equal(still.name, 'rename-new', 'local row must keep old name after DB failure');
+  idb3.close();
+
+  // Compensation: old stream re-created remotely, new stream deleted
+  assert.ok(
+    remoteRequests.some(u => u.includes('PUT') && u.includes('rename-new')),
+    'compensation should re-create old remote stream (rename-new)'
+  );
+  assert.ok(
+    remoteDeletes.some(u => u.includes('rename-blocker')),
+    'compensation should delete new remote stream (rename-blocker)'
+  );
+});
+
 test('concurrent duplicate-name channel creation is rejected', async () => {
   const { res: adminLogin } = await login('itadmin', 'it-admin-pass-12345');
   const { token } = await adminLogin.json();

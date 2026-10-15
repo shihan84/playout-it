@@ -198,7 +198,8 @@ router.put('/:id', authenticateToken, requireAdmin, async (req, res) => {
 
     // Safe cleanup: old remote stream is only deleted AFTER the new one is
     // confirmed created. If the name didn't change, skip cleanup entirely.
-    if (stream.name !== name) {
+    const isRename = stream.name !== name;
+    if (isRename) {
       const oldServer = db.prepare('SELECT * FROM servers WHERE id = ?').get(stream.server_id) as any;
       if (oldServer) {
         const oldFlussonicUrl = `${oldServer.url.replace(/\/$/, '')}/flussonic/api/v3/streams/${encodeURIComponent(stream.name)}`;
@@ -207,8 +208,27 @@ router.put('/:id', authenticateToken, requireAdmin, async (req, res) => {
       }
     }
 
-    const stmt = db.prepare('UPDATE streams SET server_id = ?, name = ?, inputs = ?, push_urls = ? WHERE id = ?');
-    stmt.run(server_id, name.trim(), JSON.stringify(inputs || []), JSON.stringify(push_urls || []), req.params.id);
+    try {
+      const stmt = db.prepare('UPDATE streams SET server_id = ?, name = ?, inputs = ?, push_urls = ? WHERE id = ?');
+      stmt.run(server_id, name.trim(), JSON.stringify(inputs || []), JSON.stringify(push_urls || []), req.params.id);
+    } catch (dbErr: any) {
+      // Local DB update failed after remote operations succeeded.
+      // Compensate: re-create the old remote stream and delete the new one
+      // so that the remote state matches the unchanged local row.
+      console.error('[streams PUT] DB update failed after remote rename — compensating:', dbErr.message);
+      if (isRename) {
+        const oldInputs = JSON.parse(stream.inputs || '[]').map((u: string) => ({ url: u }));
+        const oldPushes = JSON.parse(stream.push_urls || '[]').map((u: string) => ({ url: u }));
+        const oldPayload: any = { name: stream.name, inputs: oldInputs };
+        if (oldPushes.length > 0) oldPayload.pushes = oldPushes;
+        const oldUrl = `${server.url.replace(/\/$/, '')}/flussonic/api/v3/streams/${encodeURIComponent(stream.name)}`;
+        await flussonicRequest('PUT', oldUrl, server, oldPayload)
+          .catch(ce => console.error('[streams PUT] compensation: failed to restore old remote stream:', ce.message));
+        await flussonicRequest('DELETE', flussonicUrl, server)
+          .catch(ce => console.error('[streams PUT] compensation: failed to delete new remote stream:', ce.message));
+      }
+      return res.status(500).json({ error: `Database update failed: ${dbErr.message}` });
+    }
 
     broadcastStreamsUpdate();
     res.json({ id: req.params.id, server_id, name, inputs, push_urls });

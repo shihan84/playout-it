@@ -552,6 +552,12 @@ Branch `feature/phase-2-channel-lifecycle` off `main@38ce4ea`. All five mileston
 4. **CodeRabbit: VOD file pagination limit** — increased from default 50 pages to 500 for file listings so large VOD libraries complete pagination.
 5. **CodeRabbit: max_sessions enforcement on existing WS** — `enforceMaxSessions()` now called after assignment create/update; closes excess sockets immediately with code 4409.
 
-**Gate:** lint ✅ · **50/50 tests** ✅ · build 159.0 kB ✅ · audit 2 non-critical ✅
+### Final acceptance (PR #3)
+1. **Rename + DB failure compensation** — if the local DB UPDATE fails after a successful remote rename (e.g. UNIQUE constraint), compensation re-creates the old remote stream and deletes the new one. Regression test triggers UNIQUE violation and verifies compensation PUT/DELETE requests + local row preservation.
+2. **All 3 CodeRabbit threads resolved** — verified via GraphQL `isResolved: true` on all review threads.
+3. **Migration + backup/restore drill** — legacy DB (no lifecycle columns) migrated: `lifecycle_state` defaults to `live`, `channel_group` nullable, `stream_events`/`channel_templates`/`expires_at`/`max_sessions` added. VACUUM INTO backup, integrity check ok, file-copy restore produces identical data.
+4. **Single-process constraint** documented in `docs/DEPLOYMENT_CHECKLIST.md` (architecture section) and inline in `src/server/services/channels.ts`.
+
+**Final gate:** lint ✅ · **51/51 tests** ✅ · build 160.0 kB ✅ · audit 2 non-critical ✅
 
 - `channel_group` stored and queryable via `/lifecycle` endpoint
