@@ -4,6 +4,21 @@ Date: 2026-10-15
 Repo: `git@github.com:shihan84/playout-it.git` (branch `main`, HEAD `71edc95` — Phase 3 P0 gap analysis)
 Scope: Flussonic Media Server management dashboard (React SPA + Express + SQLite)
 
+## Progress Tracker
+
+| Milestone | Branch / PR | Status |
+|---|---|---|
+| Phase 2 — channel lifecycle | merged `11e9963` (PR #3) | ✅ Live locally |
+| Sync `/`-name fix | merged `0cd73e7` (PR #4) | ✅ Live locally |
+| Phase 3 P0 — gap analysis | `docs/PHASE3_GAP_ANALYSIS.md` on main (`71edc95`) | ✅ Done |
+| Phase 3 P1 — scheduled playout | `feature/phase-3-scheduled-playout` → PR #5 | 🔄 In review |
+| Phase 3 P2 — logo/ticker overlay (ffmpeg) | `feature/phase-3-overlay-pipeline` → PR #6 | 🔄 In review |
+| Phase 3 P3 — broadcast monitoring | `feature/phase-3-monitoring` → PR #7 (stacked on P1) | 🔄 In review |
+| Phase 3 P4 — ops dashboard UI | `feature/phase-4-ops-dashboard` → PR #9 | 🔄 In review |
+| Phase 3 P5 — release readiness | `feature/phase-5-reliability` → PR #10 | 🔄 In review |
+
+Environment notes: FFmpeg present on this Windows host (`ffmpeg`/`ffprobe` on PATH, GPL build with drawtext+freetype). FS1/FS2 are **mock test servers** — their DNS failures are expected, not blockers.
+
 ---
 
 ## 0. Current State (resume here)
@@ -13,6 +28,7 @@ Scope: Flussonic Media Server management dashboard (React SPA + Express + SQLite
 - DB: `flussonic.db` (from `.env` `DATABASE_PATH`) — 47 streams (25 online), 10 VODs, 2 users, 3 servers
 - Watchdog 15s, auto-sync 60s; CDN-ITAssist sync healthy (`/` names allowed since PR #4)
 - Last verified backup: `C:\Users\LIVE PC\playout-it-backups\release-2026-10-15T11-31-04\` (integrity ok, outside repo)
+
 
 **Phase 3 — all five milestones implemented, in stacked PRs (NOT merged):**
 

@@ -25,6 +25,8 @@ import metricsRoutes from './src/server/routes/metrics';
 import settingsRoutes from './src/server/routes/settings';
 import sslRoutes from './src/server/routes/ssl';
 import channelsRoutes from './src/server/routes/channels';
+import overlaysRoutes from './src/server/routes/overlays';
+import { recoverOverlayJobs } from './src/server/services/overlay';
 
 const app = express();
 
@@ -52,6 +54,7 @@ app.use('/api/settings', settingsRoutes);
 app.use('/api/servers', metricsRoutes);
 app.use('/api/ssl', sslRoutes);
 app.use('/api/channels', channelsRoutes);
+app.use('/api/overlays', overlaysRoutes);
 
 // Watchdog restart endpoint
 app.post('/api/watchdog/restart', authenticateToken, requireAdmin, (req, res) => {
@@ -127,6 +130,7 @@ async function startServer() {
 
 // Start background services
 startWatchdog();
+recoverOverlayJobs();
 
 startServer().catch(err => {
   console.error("Failed to start server:", err);
