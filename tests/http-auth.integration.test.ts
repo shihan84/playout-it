@@ -2003,7 +2003,6 @@ test('scheduler recovery: missed jobs skipped, stale running finalized — no st
   mockBehavior.remoteStreams.delete('sched-miss');
 });
 
-<<<<<<< HEAD
 // --- Crash-safety / failure-injection -------------------------------------
 // recoverInterruptedJobs() is boot-time logic; it runs in-process here
 // against the same WAL DB to simulate post-crash reconciliation.
