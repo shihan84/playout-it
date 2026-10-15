@@ -1327,7 +1327,7 @@ test('legacy POST /api/streams rolls back on remote failure — no phantom recor
   assert.ok(remoteDeletes.some(u => u.includes('phantom-test_vod')), 'remote VOD should be deleted on rollback');
 });
 
-test('legacy PUT /api/streams/:id rejects on remote failure — local state unchanged', async () => {
+test('legacy PUT /api/streams/:id rejects on remote failure — local state and old remote stream preserved', async () => {
   const { res: adminLogin } = await login('itadmin', 'it-admin-pass-12345');
   const { token } = await adminLogin.json();
   const headers = { authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
@@ -1344,7 +1344,8 @@ test('legacy PUT /api/streams/:id rejects on remote failure — local state unch
   const streamId = (idb.prepare("SELECT id FROM streams WHERE name = 'put-test'").get() as any).id;
   idb.close();
 
-  // Now fail the update PUT
+  // Clear deletes tracker and fail the rename PUT
+  remoteDeletes.length = 0;
   mockBehavior.failPut = /\/streams\/put-renamed/;
   const updateRes = await fetch(`${BASE}/api/streams/${streamId}`, {
     method: 'PUT', headers,
@@ -1360,6 +1361,11 @@ test('legacy PUT /api/streams/:id rejects on remote failure — local state unch
   assert.equal(s.name, 'put-test', 'name must not change on remote failure');
   assert.equal(s.inputs, '["rtsp://old"]', 'inputs must not change on remote failure');
   idb2.close();
+
+  // The old remote stream must NOT have been deleted — safe rename means
+  // provision-first, cleanup-after.
+  const oldDeleted = remoteDeletes.some(u => u.includes('put-test'));
+  assert.ok(!oldDeleted, `old remote stream 'put-test' must survive a failed rename, but DELETE was sent: ${remoteDeletes.join(', ')}`);
 });
 
 test('concurrent duplicate-name channel creation is rejected', async () => {

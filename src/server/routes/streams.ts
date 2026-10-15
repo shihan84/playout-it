@@ -160,16 +160,6 @@ router.put('/:id', authenticateToken, requireAdmin, async (req, res) => {
     const server = db.prepare('SELECT * FROM servers WHERE id = ?').get(server_id) as any;
     if (!server) return res.status(404).json({ error: 'Server not found' });
 
-    // If name changed, we might need to delete old one and create new, but for simplicity let's just update the new one
-    if (stream.name !== name) {
-      const oldServer = db.prepare('SELECT * FROM servers WHERE id = ?').get(stream.server_id) as any;
-      if (oldServer) {
-        const oldFlussonicUrl = `${oldServer.url}/flussonic/api/v3/streams/${encodeURIComponent(stream.name)}`;
-        await flussonicRequest('DELETE', oldFlussonicUrl, oldServer)
-          .catch(e => console.error('Flussonic delete error (ignored):', e.message));
-      }
-    }
-
     // Automatically create a VOD folder for this stream if it doesn't exist.
     // resolveCompanionVodName keeps legacy same-name VODs working on upgrades.
     const vodName = await resolveCompanionVodName(server, name);
@@ -198,10 +188,23 @@ router.put('/:id', authenticateToken, requireAdmin, async (req, res) => {
       payload.pushes = pushes;
     }
 
+    // Provision the new/renamed stream first — never delete the old remote
+    // stream until the replacement is confirmed working.
     try {
       await flussonicRequest('PUT', flussonicUrl, server, payload);
     } catch (e: any) {
       return res.status(502).json({ error: `Failed to update stream on Flussonic: ${e.message}` });
+    }
+
+    // Safe cleanup: old remote stream is only deleted AFTER the new one is
+    // confirmed created. If the name didn't change, skip cleanup entirely.
+    if (stream.name !== name) {
+      const oldServer = db.prepare('SELECT * FROM servers WHERE id = ?').get(stream.server_id) as any;
+      if (oldServer) {
+        const oldFlussonicUrl = `${oldServer.url.replace(/\/$/, '')}/flussonic/api/v3/streams/${encodeURIComponent(stream.name)}`;
+        await flussonicRequest('DELETE', oldFlussonicUrl, oldServer)
+          .catch(e => console.warn('Flussonic cleanup of old stream (non-fatal):', e.message));
+      }
     }
 
     const stmt = db.prepare('UPDATE streams SET server_id = ?, name = ?, inputs = ?, push_urls = ? WHERE id = ?');

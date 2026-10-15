@@ -39,6 +39,23 @@ export function maxSessionsForUser(userId: number): number | null {
   return row?.m ?? null;
 }
 
+// Reconcile existing WS connections when max_sessions changes for a user.
+// Closes excess sockets (oldest first) with code 4409.
+export function enforceMaxSessions(userId: number) {
+  const limit = maxSessionsForUser(userId);
+  if (limit === null) return;
+  const userSockets = [...clients].filter(
+    c => c.readyState === WebSocket.OPEN && (c as any).user?.id === userId
+  );
+  if (userSockets.length > limit) {
+    // Close the oldest excess sockets (set insertion order = connection order)
+    const excess = userSockets.slice(0, userSockets.length - limit);
+    for (const ws of excess) {
+      ws.close(4409, 'max_sessions reduced');
+    }
+  }
+}
+
 wss.on('connection', (ws, request: any) => {
   (ws as any).user = (request as any).wsUser || null;
   const user = (ws as any).user;

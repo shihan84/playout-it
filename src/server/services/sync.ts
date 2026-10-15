@@ -460,7 +460,9 @@ export async function syncVodFilesFromRemote(vod: any, server: any) {
   for (const url of urls) {
     try {
       console.log(`[syncVodFilesFromRemote] Trying URL: ${url}`);
-      pages = await fetchAllPages(server, url);
+      // VOD file listings can have many more pages than stream/VOD
+      // collection endpoints — use a higher limit (500 vs default 50).
+      pages = await fetchAllPages(server, url, 500);
       if (pages && pages.length > 0) break;
     } catch (e: any) {
       lastError = e;

@@ -3,6 +3,7 @@ import bcrypt from 'bcrypt';
 import { db } from '../db';
 import { config } from '../config';
 import { authenticateToken, requireAdmin } from '../middleware/auth';
+import { enforceMaxSessions } from '../websocket';
 
 const router = Router();
 
@@ -141,6 +142,10 @@ router.post('/:userId/streams', authenticateToken, requireAdmin, (req, res) => {
   try {
     db.prepare('INSERT INTO user_stream_assignments (user_id, stream_id, expires_at, max_sessions) VALUES (?, ?, ?, ?)')
       .run(userId, streamId, expiresAt, max_sessions ?? null);
+    // If a session cap was set, close excess WebSocket connections immediately
+    if (max_sessions !== undefined && max_sessions !== null) {
+      enforceMaxSessions(Number(userId));
+    }
     res.json({ success: true });
   } catch (e: any) {
     if (e.code === 'SQLITE_CONSTRAINT') {
@@ -180,6 +185,10 @@ router.patch('/:userId/streams/:streamId', authenticateToken, requireAdmin, (req
 
   db.prepare(`UPDATE user_stream_assignments SET ${updates.join(', ')} WHERE user_id = ? AND stream_id = ?`)
     .run(...values, userId, streamId);
+  // If max_sessions was changed, close excess WS connections immediately
+  if ('max_sessions' in req.body) {
+    enforceMaxSessions(Number(userId));
+  }
   res.json(db.prepare('SELECT * FROM user_stream_assignments WHERE user_id = ? AND stream_id = ?').get(userId, streamId));
 });
 

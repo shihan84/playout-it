@@ -9,6 +9,11 @@ import { recordStreamEvent } from './lifecycle';
 // In-memory lock set keyed by `serverId:channelName` — serializes concurrent
 // creations so two racing requests for the same name don't both pass the
 // preflight check. The lock is released in a finally block.
+//
+// IMPORTANT: This lock is process-local. It assumes a SINGLE-WRITER
+// deployment (one Node.js process). PM2 cluster mode or multiple containers
+// would bypass this guard — use the UNIQUE DB index as the final safety net.
+// See docs/DEPLOYMENT_CHECKLIST.md for the architecture constraint.
 const inFlightCreations = new Set<string>();
 
 export class ChannelError extends Error {

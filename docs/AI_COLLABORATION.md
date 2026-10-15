@@ -544,4 +544,14 @@ Branch `feature/phase-2-channel-lifecycle` off `main@38ce4ea`. All five mileston
 3. **VOD file pagination** — `syncVodFilesFromRemote` now uses `fetchAllPages()` to follow `next` cursors. Previously only fetched a single page. Test verifies multi-page file collection.
 4. **Concurrent duplicate-name channel creation** — in-memory lock set serializes creations per server+name. Second concurrent request gets 409. Compensation never deletes preexisting resources (only rolls back what the current request created). UNIQUE index is the final safety net.
 5. **50-channel bulk test** — 50-item batch against mock Flussonic: all 50 succeed, 50 streams + 50 companion VODs verified in DB.
+
+### PR #3 follow-up review (contributor review at abea75f + CodeRabbit)
+1. **Safe rename ordering** — legacy PUT `/api/streams/:id` now provisions the new remote stream *before* deleting the old one. Failed rename preserves the original remote stream. Regression test verifies old remote stream survives a failed rename.
+2. **Single-writer deployment constraint** — `inFlightCreations` is process-local; documented in `DEPLOYMENT_CHECKLIST.md` and inline. SQLite itself requires single-writer, so this is consistent. UNIQUE index is the final safety net for any residual race.
+3. **CodeRabbit: rename ordering** — identical to finding 1; already fixed.
+4. **CodeRabbit: VOD file pagination limit** — increased from default 50 pages to 500 for file listings so large VOD libraries complete pagination.
+5. **CodeRabbit: max_sessions enforcement on existing WS** — `enforceMaxSessions()` now called after assignment create/update; closes excess sockets immediately with code 4409.
+
+**Gate:** lint ✅ · **50/50 tests** ✅ · build 159.0 kB ✅ · audit 2 non-critical ✅
+
 - `channel_group` stored and queryable via `/lifecycle` endpoint
