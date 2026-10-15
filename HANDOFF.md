@@ -1,9 +1,28 @@
 # IBS Manager — Engineering Handoff
 
-Date: 2026-10-14
-Repo: `git@github.com:shihan84/playout-it.git` (branch `main`, latest `b668f84`)
-Active PR branch: `feature/broadcast-security-foundation` (`72ba965`) — see §12
+Date: 2026-10-15
+Repo: `git@github.com:shihan84/playout-it.git` (branch `main`, HEAD `11e9963` — Phase 2 merge, PR #3)
 Scope: Flussonic Media Server management dashboard (React SPA + Express + SQLite)
+
+---
+
+## 0. Current State (resume here)
+
+**Local deployment is LIVE on this Windows machine:**
+- `npm run dev` (`tsx server.ts`) running on `http://0.0.0.0:3000`
+- DB: `flussonic.db` (from `.env` `DATABASE_PATH`) — 47 streams (25 online), 10 VODs, 2 users, 3 servers
+- Watchdog 15s, auto-sync 60s
+- Last verified backup: `C:\Users\LIVE PC\playout-it-backups\release-2026-10-15T11-31-04\` (integrity ok, outside repo)
+
+**Uncommitted change in working tree:**
+- `src/server/services/sync.ts` — `isValidName` now allows `/` in Flussonic stream names (real server uses `folder/stream` names like `meemtv/meemtv`; 44/46 remote streams were being rejected, killing all CDN-ITAssist sync). Typecheck + 54/54 tests pass. **Needs commit.**
+
+**Open items for the operator:**
+1. Log in at localhost:3000 — new `JWT_SECRET` from deploy invalidated old sessions. Agent does not know the admin password.
+2. `FS1`/`FS2` servers point at `fs.local`/`fs2.local` — dead DNS, pre-existing. Decide: fix URLs or remove.
+3. Commit + push the sync `/` fix (or fold into next feature branch).
+
+**Architecture constraint:** single-process / single-writer. SQLite + process-local `inFlightCreations` lock in `routes/channels.ts`. No PM2 cluster, no multi-worker. See `docs/OPERATIONS_RECOVERY.md` for failure reconciliation.
 
 ---
 
@@ -11,258 +30,157 @@ Scope: Flussonic Media Server management dashboard (React SPA + Express + SQLite
 
 A single-tenant dashboard for managing one or more **Flussonic Media Server** instances:
 
-- Stream CRUD + live status monitoring (watchdog polling)
+- Stream CRUD + lifecycle state machine (Phase 2: `live`/`archived`/etc. via `stream_events` timeline)
+- Atomic channel creation with remote provisioning, collision checks, and compensation (Phase 2)
+- Assignment expiry + `max_sessions` enforcement (Phase 2)
 - VOD storage + file management (direct & chunked uploads)
 - Per-stream fallback video playlists (`playlist.txt` appended as last stream input)
 - Multi-user access (admin / client roles, per-stream assignment)
 - IP blocking synced to Flussonic `auth_backends/blacklist`
-- Telegram alerts (global watchdog notifications + per-user/per-stream alerts + bot webhook)
+- Telegram alerts (watchdog + per-user/per-stream + bot webhook)
 - Server metrics, sessions, SSL via Let's Encrypt + nginx
 - WebSocket `/ws` broadcast (`STREAMS_UPDATE`) for live UI refresh
-- Deploy target: Raspberry Pi (PM2/systemd + optional nginx), single bundled Node process
+- Deploy target: Windows local / Raspberry Pi (PM2/systemd), single bundled Node process
 
 ---
 
-## 2. Architecture (post-modularization)
+## 2. Architecture
 
-`server.ts` was a ~3,250-line monolith. It is now a **~122-line composition root**; all logic lives under `src/server/`.
+`server.ts` is a thin composition root; all logic lives under `src/server/`.
 
 ```
-server.ts                          # composition root: middleware, router mounts, /ws upgrade, start
+server.ts                          # middleware, router mounts, /ws upgrade, SPA fallback, start
 src/server/
-├── config/index.ts                # env: port, dbPath, jwtSecret, ssl*, telegramBotToken, saltRounds
+├── config/index.ts                # env: port, dbPath, jwtSecret (required ≥32 chars in prod), ssl*, telegram
 ├── db/
-│   ├── index.ts                   # better-sqlite3 open, WAL, FK pragma, corruption recovery, init
-│   ├── schema.ts                  # CREATE TABLE statements
-│   └── migrations.ts              # ALTER TABLEs, backfills, default admin, settings defaults
-├── middleware/auth.ts             # authenticateToken, requireAdmin, requireStreamAccess, AuthRequest
-├── websocket/index.ts             # WebSocketServer (noServer), wss, broadcastStreamsUpdate
+│   ├── index.ts                   # better-sqlite3 open, WAL, FK pragma, fail-closed corruption handling
+│   ├── schema.ts                  # CREATE TABLE statements (incl. stream_events, channel_templates)
+│   └── migrations.ts              # idempotent ALTERs, backfills, settings defaults
+├── middleware/
+│   ├── auth.ts                    # authenticateToken, requireAdmin, requireStreamAccess
+│   └── csrf.ts                    # CSRF protection on /api mutations
+├── websocket/index.ts             # noServer WSS, scoped broadcastStreamsUpdate
 ├── services/
-│   ├── flussonic.ts               # flussonicRequest, getServerAuthHeader (Basic auth resolution)
-│   ├── telegram.ts                # sendTelegramMessage, sendTelegramNotification
-│   ├── playlist.ts                # updatePlaylistFile, updateVodPlaylistFile
-│   ├── sync.ts                    # syncServerStreams, syncServerVods, syncVodFilesFromRemote
-│   └── watchdog.ts                # checkStreams loop, startWatchdog, auto-sync interval
+│   ├── flussonic.ts               # flussonicRequest, getServerAuthHeader (Basic auth)
+│   ├── sync.ts                    # syncServerStreams/Vods, pagination cursors, per-record validation
+│   ├── watchdog.ts                # health checks, stream status, auto-sync, failure backoff
+│   ├── channels.ts                # channel lifecycle service (Phase 2)
+│   ├── lifecycle.ts               # lifecycle transitions + stream_events writes
+│   ├── playlist.ts                # playlist.txt generation/upload
+│   └── telegram.ts                # notifications
 ├── routes/
-│   ├── auth.ts                    # POST /api/auth/login, /logout, GET /me
-│   ├── users.ts                   # /api/users CRUD, stream assignments
-│   ├── servers.ts                 # /api/servers CRUD, /:id/status, /:id/sync, /sync-all
-│   ├── streams.ts                 # /api/streams CRUD, /:id/details, videos, playlist.txt, vod-files
-│   ├── myStreams.ts               # GET /api/my-streams (per-user view)
-│   ├── vods.ts                    # /api/vods CRUD, files, playlist, chunked upload, sync
-│   ├── blockedIps.ts              # /api/blocked-ips, /api/servers/:id/sessions, /api/sessions/block-ip
-│   ├── telegramAlerts.ts          # /api/telegram-alerts CRUD, /send, /:id/history
-│   ├── telegramWebhook.ts         # POST /api/telegram/webhook (/start, /help)
-│   ├── metrics.ts                 # GET /api/servers/:id/metrics (see §8 caveat)
-│   ├── settings.ts                # GET/POST /api/settings, POST /api/settings/test-telegram
-│   └── ssl.ts                     # GET /api/ssl/status, POST /install, /renew (certbot)
+│   ├── auth.ts                    # login/logout/me
+│   ├── users.ts, servers.ts, streams.ts, myStreams.ts, vods.ts
+│   ├── channels.ts                # Phase 2: atomic create, bulk ops, templates, rename w/ compensation
+│   ├── blockedIps.ts, telegramAlerts.ts, telegramWebhook.ts
+│   ├── metrics.ts, settings.ts, ssl.ts
 └── utils/
-    ├── streams.ts                 # parseStream (JSON column decoding)
-    └── sslNginx.ts                # updateNginxConfig (writes nginx SSL block)
+    ├── streams.ts                 # parseStream
+    ├── concurrency.ts             # bounded concurrency helper
+    └── sslNginx.ts
 ```
 
-### Router mounts (`server.ts`)
-
-```ts
-app.use('/api/auth', authRoutes);
-app.use('/api/users', usersRoutes);
-app.use('/api/servers', serversRoutes);
-app.use('/api/streams', streamsRoutes);
-app.use('/api/my-streams', myStreamsRoutes);            // separate mount — do NOT move into streams.ts
-app.use('/api/vods', vodsRoutes);
-app.use('/api', blockedIpsRoutes);                      // router defines /blocked-ips, /servers/:id/sessions, /sessions/block-ip
-app.use('/api/telegram-alerts', telegramAlertsRoutes);
-app.use('/api/telegram/webhook', telegramWebhookRoutes); // webhook lives at /api/telegram/webhook
-app.use('/api/settings', settingsRoutes);
-app.use('/api/servers/:id/metrics', metricsRoutes);      // ⚠ see §8.1
-app.use('/api/ssl', sslRoutes);
-app.post('/api/watchdog/restart', ...);                  // restarts watchdog timers
-```
-
-All API paths, methods, auth rules, response shapes, WebSocket behavior, Vite dev middleware, prod static serving, optional HTTPS, and SQLite migrations are preserved.
+Router mounts in `server.ts` (~lines 42-57) — includes `/api/channels` and `/api/servers` for metrics.
 
 ---
 
-## 3. Flussonic Server Auth (current model)
+## 3. Flussonic Server Auth
 
-Flussonic v3 uses HTTP **Basic auth** with `username` + `password`.
+Flussonic v3 uses HTTP **Basic auth** (`username` + `password`).
 
-- `servers` table columns: `name`, `url`, `api_key` (legacy, kept populated as `user:pass`), `username`, `password`.
-- **Migration** (`db/migrations.ts`): adds `username`/`password` columns and backfills —
-  `api_key` containing `:` splits into user/pass; otherwise `username='flussonic'`, `password=api_key`.
-- **`getServerAuthHeader(server)`** (`services/flussonic.ts`):
-  - `username` + `password` set → `Basic user:pass`
-  - else legacy `api_key` (`user:pass` verbatim, or `flussonic:key`); on 401/403 retries `admin:key` only when no explicit creds.
-- `POST /api/servers` accepts `username` + `password` (preferred) or legacy `api_key`.
-- Frontend `Servers.tsx` add-form uses **Username** + **Password** fields.
-- `streams.ts` details/vod-files JOIN credentials, pass to `flussonicRequest`, then `delete` them before responding.
+- `servers` columns: `name`, `url`, `api_key` (legacy `user:pass`), `username`, `password`
+- `getServerAuthHeader()` prefers explicit user/pass, falls back to legacy `api_key`
+- `GET /api/servers` redacts credentials via `publicServer()`
+- Sync treats malformed remote payloads as fail-closed (never reaches reconciliation)
 
 ---
 
 ## 4. Commands
 
 ```bash
-npm run dev      # tsx server.ts  (does NOT auto-restart on backend edits — restart manually)
+npm run dev      # tsx server.ts — does NOT hot-reload backend; restart manually
 npm run lint     # tsc --noEmit
-npm run build    # vite build && esbuild → dist/server.cjs
-npm start        # node dist/server.cjs
+npm run build    # vite build && esbuild → dist/server.cjs (~162 kB)
+npm start        # node dist/server.cjs  (needs JWT_SECRET in .env for prod)
+
+# Tests — there is NO "npm test" script:
+npx tsx --test tests/*.test.ts     # 54 tests: http-auth.integration, migrations, security-regression, websocket
 ```
 
-### Env vars (`.env`)
-
-`PORT` (3000), `DATABASE_PATH` (flussonic.db), `JWT_SECRET`, `TELEGRAM_BOT_TOKEN`, `SSL_ENABLED`, `SSL_KEY_PATH`, `SSL_CERT_PATH`, `NODE_ENV`.
-
-Security defaults: `JWT_SECRET` is **required** (≥32 chars) in production — the app refuses to boot without it. No default admin is ever created; provision one with `ADMIN_PASSWORD_FILE=<path> npm run admin:provision`.
+Env vars (`.env`): `PORT` (3000), `DATABASE_PATH`, `JWT_SECRET`, `TELEGRAM_BOT_TOKEN`, `SSL_*`, `NODE_ENV`. Production refuses to boot without a ≥32-char `JWT_SECRET`. Admin provisioning: `ADMIN_PASSWORD_FILE=<path> npm run admin:provision`.
 
 ---
 
-## 5. Key Internals
+## 5. Phase 2 — Channel Lifecycle (merged via PR #3)
 
-### Flussonic client — `services/flussonic.ts`
+- **Lifecycle state machine** — `streams.lifecycle_state`, transitions logged to `stream_events` (health timeline)
+- **Atomic channel creation** — `POST /api/channels`: pre-flight local+remote collision check (409), VOD provisioning, stream PUT, local INSERT; compensation on any failure
+- **Safe rename** — new stream provisioned before old deleted; DB failure → old restored + new removed; source/destination server routing correct on cross-server moves; TOCTOU (remote name grabbed between probe and PUT) → 409
+- **Companion VOD cleanup** — orphaned remote VODs deleted when stream creation fails
+- **Assignment expiry** — `user_stream_assignments.expires_at` + `max_sessions`; WS sessions reconciled on PATCH of either field
+- **Bulk ops + templates** — `channel_templates` table
+- **Single-writer lock** — `inFlightCreations` set guards same-name concurrent creates
 
-```ts
-flussonicRequest(method, url, server, data?, timeout=30000, extraHeaders?)
-```
-
-Endpoints used: `/flussonic/api/v3/config`, `/streams`, `/streams/:name`, `/vods`, `/vods/:name`, `/vods/:name/storages/0/files(/:file)`, `/auth_backends/blacklist(/:ip)`, `/sessions`. Unlimited body limits for large VOD uploads.
-
-### Watchdog — `services/watchdog.ts`
-
-- `checkStreams()`: groups streams by server → `GET /flussonic/api/v3/streams` → updates `status`, `input_status`, `source_type`, `uptime`, `push_status` → consolidated Telegram notifications on transitions → per-alert POST `/api/telegram-alerts/send` on offline → `broadcastStreamsUpdate()` when DB changed.
-- `startWatchdog()`: two intervals driven by `settings` — `watchdog_interval` (default 5s) and auto-sync (`auto_sync_enabled`, `auto_sync_interval` default 60s).
-- `POST /api/watchdog/restart` restarts timers after settings change.
-- `isChecking` flag prevents concurrent runs.
-
-### Playlist fallback — `services/playlist.ts`
-
-- `updatePlaylistFile(stream)`: regenerates `playlist.txt` from `videos` (sorted by `sort_order`), uploads to `vods/{streamName}/storages/0/files/playlist.txt`, appends `playlist:///{name}/playlist.txt` as the stream's last input on Flussonic.
-- `updateVodPlaylistFile(vod)`: same pattern for standalone VOD locations using `vod_files`.
-
-### Sync — `services/sync.ts`
-
-- `syncServerStreams` / `syncServerVods`: pull `/streams` + `/vods`, add missing, delete stale; tolerant of array / keyed / wrapped response shapes.
-- `syncVodFilesFromRemote`: reconciles `vod_files` with the live file listing.
-- Runs on server add, manual sync (`/:id/sync`, `/sync-all`), and auto-sync interval.
-
-### WebSocket — `websocket/index.ts`
-
-`WebSocketServer({ noServer: true })`; `server.ts` upgrades only `/ws`. `broadcastStreamsUpdate()` → `{ type: 'STREAMS_UPDATE', data }` to all clients; frontend polls every 30s as fallback.
+Review artifacts: `docs/PHASE2_CHANNEL_LIFECYCLE_HANDOFF.md`, `docs/OPERATIONS_RECOVERY.md`, `docs/DEPLOYMENT_CHECKLIST.md`, `docs/AI_COLLABORATION.md`.
 
 ---
 
 ## 6. Database
 
-SQLite (`flussonic.db`), WAL mode, foreign keys ON. On corruption it deletes db + `-wal`/`-shm` and recreates (**destructive**).
+SQLite (`flussonic.db`), WAL mode, FKs ON. Corruption → fail-closed (files preserved for operator recovery, startup throws).
 
-Tables: `servers`, `streams`, `vods`, `videos`, `vod_files`, `settings`, `users`, `user_stream_assignments`, `blocked_ips`, `telegram_alerts`, `telegram_alert_history`.
+Tables: `servers`, `streams`, `vods`, `videos`, `vod_files`, `settings`, `users`, `user_stream_assignments`, `blocked_ips`, `telegram_alerts`, `telegram_alert_history`, `stream_events`, `channel_templates`.
 
-Migrations are idempotent (try/catch ALTERs). Latest: `servers.username`/`password` + backfill.
+Phase 2 columns: `streams.lifecycle_state`, `streams.channel_group`, `user_stream_assignments.expires_at`, `user_stream_assignments.max_sessions`.
 
-**Plaintext in DB:** Flussonic `api_key`/`username`/`password`, `settings.telegram_bot_token`, `telegram_chat_id`.
+**Plaintext in DB:** Flussonic creds, `telegram_bot_token`, `telegram_chat_id` — never print or commit.
 
 ---
 
-## 7. Verified (smoke-tested)
+## 7. Sync Internals (`services/sync.ts`)
 
-| Area | Result |
+- Response shapes: array, `{streams:[...]}` envelope (with `next`/`prev`/`estimated_count`/`timing`), or object-map → `parseObjectMap` (envelope keys rejected)
+- **Pagination**: `next` cursors are opaque tokens echoed as `?cursor=`; URL-shaped cursors confined to same-origin `/flussonic/api/*`; loop detection + 50-page cap; non-terminating pagination throws
+- **Validation**: `isValidName` — non-empty string, ≤200 chars, no NUL. **`/` IS allowed** (real Flussonic uses `folder/name`; all remote URLs are `encodeURIComponent`'d)
+- Malformed record → whole sync for that server fails closed; local data preserved
+- Auto-sync deletes nothing automatically; deletions need explicit admin-confirmed pruning
+
+---
+
+## 8. Known Issues
+
+1. **FS1/FS2 dead DNS** — `fs.local`/`fs2.local` don't resolve. Pre-existing; fix URLs or remove servers.
+2. **Admin password unknown to agent** — `admin` user exists; login endpoint verified functional (401 on bad creds). Owner must log in or request reset.
+3. **npm audit**: 2 non-critical transitive vulns (`esbuild`, `qs`).
+4. **Heavy `any`** typing in server code; frontend bundle ~991 kB warning.
+5. **Stale untracked `backups/` dir in repo** — keep, don't delete.
+
+---
+
+## 9. Deployment / Ops
+
+- **Windows local**: `npm run dev` or `npm start` (after `npm run build`)
+- **Backups**: `scripts/backup-db.ts` uses `VACUUM INTO` (SQLite-consistent); verified via `PRAGMA integrity_check` + row counts
+- **Rollback**: restore DB file copy + `.env` + `git checkout <prev-sha>` — additive schema is backward-tolerant. Full procedure: `docs/OPERATIONS_RECOVERY.md`
+- **Pi**: `scripts/setup-raspbian.sh`, `scripts/deploy-raspbian.sh`, `scripts/flussonic-manager.service`; `nginx.conf` proxies `/` + `/ws`
+
+---
+
+## 10. Continuing Implementation — Next Steps
+
+| Priority | Item |
 |---|---|
-| Auth login/logout/me | 200, JWT via cookie + body |
-| Servers list/create/status/delete/sync | 200/404 correct; graceful offline on unreachable |
-| Streams list, my-streams, details, videos, playlist.txt, vod-files | 200/404 correct |
-| VODs + files/playlist/sync routes | 200 |
-| Users CRUD + assignments | 200 |
-| Blocked IPs CRUD | 200 |
-| Telegram alerts CRUD + history | 200 |
-| Settings GET/POST | 200, persists |
-| SSL status | 200 (`not_configured`) |
-| Watchdog restart | 200 |
-| SPA routes + Vite dev | 200 |
-| `npm run lint` / `npm run build` | clean; `dist/server.cjs` ~114 kB |
+| 1 | Commit `sync.ts` `/`-name fix; consider syncing local DB names that were previously skipped |
+| 2 | Confirm owner login works; if not, provision/reset admin via `ADMIN_PASSWORD_FILE` |
+| 3 | Resolve FS1/FS2 (update URL or remove — ask owner first) |
+| 4 | Phase 3 candidates (discuss with owner): client-role VOD access review, metrics endpoint verification, `VodFileManager` direct-upload skip, Telegram alert self-call → direct service call |
+| 5 | Consider moving stream_events pruning/retention policy into settings |
 
----
+### Rules for the next agent
 
-## 8. Known Issues / Loose Ends
-
-1. **Metrics mount may be wrong**: `metricsRoutes` mounted at `/api/servers/:id/metrics` with router path `GET /:id` → effective path may be `/api/servers/:id/metrics/:id` while frontend calls `/api/servers/{id}/metrics`. Verify/fix.
-2. **`GET /api/servers` returns `password`/`api_key`** to admins — fixed on `feature/broadcast-security-foundation` via `publicServer()` redaction.
-3. **Unauthenticated VOD file routes** (`files`, chunked-upload, `upload-info` which leaks Basic auth header, playlist routes) — fixed on `feature/broadcast-security-foundation` (router-wide admin guard, headers removed).
-4. **Watchdog calls its own HTTP API** for telegram alerts (`axios` to `localhost:${port}`) — brittle; could call the service directly.
-5. **No tests** — lint + build + smoke only.
-6. **Heavy `any`** typing across server code.
-7. Frontend bundle ~991 kB (warning only).
-8. **Local-only untracked files** (gitignored, contain creds): `DEPLOYMENT.md`, `check-*.cjs`, `check-stream*.js`.
-
----
-
-## 9. Security Status
-
-- ✅ `deploy-windows.ps1` now reads `PI_HOST`/`PI_USER`/`PI_PASSWORD` from env vars (commit `7930785`).
-- ✅ Pi SSH password rotated by owner; old value remains in git history but is harmless.
-- ⚠ Git history still contains the old password — if it was ever reused elsewhere, rotate those too.
-- ⚠ Still to do for production: set real `JWT_SECRET` (enforced ≥32 chars on the security branch), change default `admin123` (default-user creation removed on the security branch — needs a provisioning path).
-- ✅ `feature/broadcast-security-foundation` addresses: server-credential masking, VOD route auth, upload-info credential leak, SameSite cookie, production JWT enforcement, fail-closed DB recovery.
-
----
-
-## 10. Deployment (Raspberry Pi)
-
-- `scripts/setup-raspbian.sh` — Node 20, PM2, build tools, 2GB swap.
-- `scripts/deploy-raspbian.sh` — deps install, native module rebuild, build, PM2 start (512 MB limit).
-- `scripts/flussonic-manager.service` — systemd alternative.
-- `deploy.sh`, `deploy-setup.sh`, `deploy-windows.ps1` (env-var creds).
-- `nginx.conf` — proxies `/` and `/ws` to `localhost:3000`, `client_max_body_size 1000G`; HTTPS block optional. In-app `/api/ssl/*` manages certbot + nginx SSL config.
-
----
-
-## 12. Contributor Branch Review — `feature/broadcast-security-foundation`
-
-Security hardening branch (9 commits ahead of `main`). Reviewed and smoke-verified 2026-10-14.
-
-### Changes
-
-- **JWT hardening**: production refuses to boot unless `JWT_SECRET` ≥32 chars (`config/index.ts`); auth cookie gains `sameSite: 'lax'`; login debug logs removed.
-- **Credential redaction**: `publicServer()` strips `api_key`/`username`/`password` from `GET /api/servers` and POST responses.
-- **Safer server delete**: `DELETE /api/servers/:id` now only unlinks (`server_id → NULL` on streams/vods) — never deletes remote Flussonic resources or reassigns to duplicates.
-- **VOD lockdown**: `router.use(authenticateToken, requireAdmin)` guards the entire `/api/vods` router; `upload-info` no longer returns Basic auth headers (`directUploadSupported: false`); chunked uploads use `randomBytes(16)` IDs + filename/chunk validation.
-- **DB fail-closed**: corrupted DB files are preserved for operator recovery instead of silently deleted/recreated; startup throws.
-- **No default admin**: migration no longer creates `admin/admin123`.
-- **CI**: `.github/workflows/security-ci.yml` — lint + regression tests + build.
-- **Tests**: `tests/security-regression.test.ts` — 5 source-level checks (VOD auth, credential redaction, unlink-only delete, no DB unlink, no default password, JWT requirement).
-
-### Verification results
-
-| Check | Result |
-|---|---|
-| `npm ci` | ✅ (kill running dev server first — native module locks) |
-| `npm run lint` | ✅ clean |
-| `npx tsx --test tests/security-regression.test.ts` | ✅ 5/5 pass |
-| `npm run build` | ✅ `dist/server.cjs` ~114 kB |
-
-### Open concerns before merge
-
-1. **Fresh install has no admin user.** The migration no longer creates `admin/admin123` and no provisioning tooling exists yet — a new deployment cannot log in. Needs a bootstrap path: e.g. `ADMIN_USERNAME`/`ADMIN_PASSWORD` env vars consumed by the migration, or a CLI provisioning script.
-2. **`VodFileManager` ignores `directUploadSupported`**. Frontend still calls `/api/vods/:id/upload-info` then attempts `performDirectUpload(authHeader)` with `authHeader === undefined` → guaranteed failure → falls back to chunked upload. Works, but wastes a request per file. Fix: skip the direct-upload attempt when `directUploadSupported !== true`.
-3. **npm audit**: 26 vulns (3 critical) in existing deps — pre-existing, unrelated to this branch.
-4. **Behavior changes to note**: server delete no longer removes remote Flussonic resources (unlink-only); all `/api/vods/*` routes now require admin (client-role users lose VOD playlist/content endpoints).
-
-### Suggested response to contributor
-
-- ✅ Approach and regression tests are solid — mergeable after concerns 1–2 are addressed.
-- Provide an admin provisioning path (env-driven) before merge, or document it as a follow-up.
-- Optionally update `VodFileManager.tsx` to honor `directUploadSupported`.
-
----
-
-## 11. Quick Reference
-
-| Task | File(s) |
-|---|---|
-| New API route group | `src/server/routes/<x>.ts` + mount in `server.ts` |
-| Flussonic call | `services/flussonic.ts` |
-| Server creds | `db/migrations.ts`, `services/flussonic.ts`, `routes/servers.ts`, `Servers.tsx` |
-| Stream status logic | `services/watchdog.ts` |
-| Playlist/fallback | `services/playlist.ts` |
-| Real-time push | `websocket/index.ts` |
-| Auth/roles | `middleware/auth.ts` |
-| New DB column | `db/schema.ts` + `db/migrations.ts` |
-| SSL/nginx | `routes/ssl.ts` + `utils/sslNginx.ts` |
+- **Never mutate Flussonic** during validation — GET-only checks. No create/rename/delete/restart on existing streams.
+- **Never delete/recreate `flussonic.db`** — additive idempotent migrations only.
+- **Single process** — no clustering.
+- **Tests before push**: `npm run lint`, `npx tsx --test tests/*.test.ts`, `npm run build`.
+- **No secrets in output**: `.env`, DB creds, JWT secret, Flussonic passwords.
+- Git work needs explicit owner direction for push/merge/deploy.
