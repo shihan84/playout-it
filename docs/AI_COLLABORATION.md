@@ -572,6 +572,12 @@ Branch `feature/phase-2-channel-lifecycle` off `main@38ce4ea`. All five mileston
 4. **Compensation logging** — failures now include stream name, server name, and recovery instructions (e.g. "manual cleanup needed: delete stream 'X' on server 'Y'").
 5. **Second mock Flussonic** — `remoteStreams2` set on port 36200 for cross-server move tests.
 
-**Final gate:** lint ✅ · **54/54 tests** ✅ · build 162.4 kB ✅ · audit 2 non-critical ✅
+### Release candidate (CodeRabbit round 3, commit 186e6e1+)
+1. **Name normalization** — `trimmedName` used everywhere (isRename, dup check, remote probe, payload, UPDATE) instead of mixing trimmed/untrimmed `name`.
+2. **Source DELETE moved after local UPDATE** — old remote stream is now only deleted after the local row is committed. DB failure only requires cleaning up the new remote stream (old one still intact). No restoration needed.
+3. **enforceMaxSessions on expires_at changes** — PATCH to assignment now reconciles WS sockets when either `max_sessions` or `expires_at` changes (cap may activate/deactivate via expiry).
+4. **VOD rollback** — already implemented in `186e6e1`; confirmed by CodeRabbit as correct pattern.
+
+**Final gate:** lint ✅ · **54/54 tests** ✅ · build 161.6 kB ✅ · audit 2 non-critical ✅
 
 - `channel_group` stored and queryable via `/lifecycle` endpoint

@@ -185,8 +185,9 @@ router.patch('/:userId/streams/:streamId', authenticateToken, requireAdmin, (req
 
   db.prepare(`UPDATE user_stream_assignments SET ${updates.join(', ')} WHERE user_id = ? AND stream_id = ?`)
     .run(...values, userId, streamId);
-  // If max_sessions was changed, close excess WS connections immediately
-  if ('max_sessions' in req.body) {
+  // If the effective session cap may have changed (max_sessions OR expires_at
+  // can activate/deactivate a cap), close excess WS connections immediately
+  if ('max_sessions' in req.body || 'expires_at' in req.body) {
     enforceMaxSessions(Number(userId));
   }
   res.json(db.prepare('SELECT * FROM user_stream_assignments WHERE user_id = ? AND stream_id = ?').get(userId, streamId));
