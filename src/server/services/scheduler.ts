@@ -143,18 +143,37 @@ function normalizeInputs(raw: any): { url: string }[] {
   return arr.map((i: any) => ({ url: typeof i === 'string' ? i : i.url })).filter((i: any) => !!i.url);
 }
 
-async function swapStreamInputs(stream: any, server: any, inputs: { url: string }[]) {
+// Remote helpers are split so the original inputs can be PERSISTED before
+// any mutating PUT. A crash must never leave a channel switched without
+// durable restoration data.
+async function getRemoteStreamConfig(stream: any, server: any): Promise<{ inputs: any[]; pushes: any[] | undefined }> {
   const baseUrl = server.url.replace(/\/$/, '');
-  const streamUrl = `${baseUrl}/flussonic/api/v3/streams/${encodeURIComponent(stream.name)}`;
-  const current = await flussonicRequest('GET', streamUrl, server);
-  const fData = current.data;
-  const existingInputs = fData.config_on_disk?.inputs || fData.inputs || [];
-  await flussonicRequest('PUT', streamUrl, server, {
+  const res = await flussonicRequest('GET', `${baseUrl}/flussonic/api/v3/streams/${encodeURIComponent(stream.name)}`, server);
+  const fData = res.data;
+  return {
+    inputs: fData.config_on_disk?.inputs || fData.inputs || [],
+    pushes: fData.config_on_disk?.pushes,
+  };
+}
+
+async function putStreamInputs(stream: any, server: any, inputs: { url: string }[], pushes?: any[]) {
+  const baseUrl = server.url.replace(/\/$/, '');
+  await flussonicRequest('PUT', `${baseUrl}/flussonic/api/v3/streams/${encodeURIComponent(stream.name)}`, server, {
     name: stream.name,
     inputs,
-    ...(fData.config_on_disk?.pushes ? { pushes: fData.config_on_disk.pushes } : {}),
+    ...(pushes ? { pushes } : {}),
   });
-  return existingInputs;
+}
+
+async function swapStreamInputs(stream: any, server: any, inputs: { url: string }[]) {
+  const remote = await getRemoteStreamConfig(stream, server);
+  await putStreamInputs(stream, server, inputs, remote.pushes);
+  return remote.inputs;
+}
+
+function sameInputs(a: { url: string }[], b: { url: string }[]): boolean {
+  if (a.length !== b.length) return false;
+  return a.every((x, i) => x.url === b[i]?.url);
 }
 
 async function executeJob(job: any) {
@@ -163,24 +182,44 @@ async function executeJob(job: any) {
   if (!stream || !server) throw new SchedulerError('stream or server no longer exists');
   const inputs = normalizeInputs(JSON.parse(job.inputs));
   if (inputs.length === 0) throw new SchedulerError('job has no inputs');
-  const previous = await swapStreamInputs(stream, server, inputs);
-  db.prepare('UPDATE playout_jobs SET previous_inputs = ? WHERE id = ?').run(JSON.stringify(normalizeInputs(previous)), job.id);
+
+  // 1. Read original remote inputs and PERSIST them first — durable
+  //    restoration data must exist before the remote PUT.
+  const remote = await getRemoteStreamConfig(stream, server);
+  const previous = normalizeInputs(remote.inputs);
+  db.prepare('UPDATE playout_jobs SET previous_inputs = ? WHERE id = ?').run(JSON.stringify(previous), job.id);
+
+  // 2. Only now mutate the remote stream.
+  await putStreamInputs(stream, server, inputs, remote.pushes);
+
+  // 3. Mark fully running and mirror inputs locally.
+  db.prepare(`UPDATE playout_jobs SET status = 'running' WHERE id = ?`).run(job.id);
   db.prepare('UPDATE streams SET inputs = ? WHERE id = ?').run(JSON.stringify(inputs.map(i => i.url)), stream.id);
   recordStreamEvent(stream.id, stream.lifecycle_state, stream.lifecycle_state, null,
     `playout job #${job.id} started: inputs -> ${JSON.stringify(inputs.map(i => i.url))}`);
 }
 
-async function restoreJob(job: any): Promise<boolean> {
+// 'ok' — restored or nothing to restore; 'failed' — restore attempt errored;
+// 'unverified' — no restoration data existed to prove the channel is back
+// on its original inputs (operator must reconcile).
+async function restoreJob(job: any): Promise<'ok' | 'failed' | 'unverified'> {
   const stream = db.prepare('SELECT * FROM streams WHERE id = ?').get(job.stream_id) as any;
   const server = stream?.server_id ? db.prepare('SELECT * FROM servers WHERE id = ?').get(stream.server_id) as any : null;
   const previous = normalizeInputs(job.previous_inputs ? JSON.parse(job.previous_inputs) : []);
-  if (!stream || !server || previous.length === 0) return true; // nothing restorable — job completes cleanly
+  if (!stream || !server) return 'ok'; // nothing exists to restore to
+  if (previous.length === 0) {
+    recordStreamEvent(stream.id, stream.lifecycle_state, stream.lifecycle_state, null,
+      `playout job #${job.id} ended WITHOUT captured previous inputs — restoration NOT verified. Manual check required on server '${server.name}'.`);
+    db.prepare('UPDATE playout_jobs SET last_error = ? WHERE id = ?')
+      .run('restoration unverified: no previous_inputs captured (manual check required)', job.id);
+    return 'unverified';
+  }
   try {
-    await swapStreamInputs(stream, server, previous);
+    await putStreamInputs(stream, server, previous, (await getRemoteStreamConfig(stream, server)).pushes);
     db.prepare('UPDATE streams SET inputs = ? WHERE id = ?').run(JSON.stringify(previous.map(i => i.url)), stream.id);
     recordStreamEvent(stream.id, stream.lifecycle_state, stream.lifecycle_state, null,
       `playout job #${job.id} completed: inputs restored`);
-    return true;
+    return 'ok';
   } catch (e: any) {
     // Restore is best-effort — the job ends regardless, but the failure is
     // surfaced via a DISTINCT status ('restore_failed') + last_error + a
@@ -189,7 +228,7 @@ async function restoreJob(job: any): Promise<boolean> {
       `playout job #${job.id} ended but input restore FAILED: ${e.message} — manual check required on server '${server.name}'`);
     db.prepare('UPDATE playout_jobs SET last_error = ? WHERE id = ?')
       .run(`restore failed: ${e.message} (manual check required)`, job.id);
-    return false;
+    return 'failed';
   }
 }
 
@@ -220,6 +259,58 @@ export function recoverOnBoot() {
   }
 }
 
+// Reconciles jobs interrupted mid-claim ('swapping'). The remote stream may or
+// may not have received the PUT — compare remote inputs against the job's
+// desired inputs and captured previous inputs to decide. Idempotent: it only
+// reads remote state and writes local job status + (when provable) a restore.
+export async function recoverInterruptedJobs() {
+  const now = new Date().toISOString();
+  const stuck = db.prepare(`SELECT * FROM playout_jobs WHERE status = 'swapping'`).all() as any[];
+  for (const job of stuck) {
+    const stream = db.prepare('SELECT * FROM streams WHERE id = ?').get(job.stream_id) as any;
+    const server = stream?.server_id ? db.prepare('SELECT * FROM servers WHERE id = ?').get(stream.server_id) as any : null;
+    if (!stream || !server) {
+      db.prepare(`UPDATE playout_jobs SET status = 'failed', last_error = 'stream or server no longer exists' WHERE id = ?`).run(job.id);
+      continue;
+    }
+    const desired = normalizeInputs(JSON.parse(job.inputs));
+    const previous = normalizeInputs(job.previous_inputs ? JSON.parse(job.previous_inputs) : []);
+    let remoteInputs: { url: string }[] | null = null;
+    try {
+      remoteInputs = normalizeInputs((await getRemoteStreamConfig(stream, server)).inputs);
+    } catch {
+      // Cannot determine remote state — flag for operator reconciliation.
+      db.prepare(`UPDATE playout_jobs SET status = 'restore_unverified', last_error = ? WHERE id = ?`)
+        .run('interrupted swap and remote inputs could not be read (manual check required)', job.id);
+      continue;
+    }
+    if (sameInputs(remoteInputs, desired)) {
+      // PUT landed. If the window is still open, adopt as running so normal
+      // tick logic restores at end; otherwise restore immediately.
+      if (job.end_at_utc > now) {
+        db.prepare(`UPDATE playout_jobs SET status = 'running' WHERE id = ?`).run(job.id);
+        recordStreamEvent(stream.id, stream.lifecycle_state, stream.lifecycle_state, null,
+          `playout job #${job.id} recovered: swap had completed before interruption`);
+      } else {
+        const restored = await restoreJob({ ...job, previous_inputs: job.previous_inputs });
+        db.prepare(`UPDATE playout_jobs SET status = ? WHERE id = ?`).run(
+          restored === 'ok' ? 'completed' : restored === 'failed' ? 'restore_failed' : 'restore_unverified', job.id);
+      }
+    } else if (previous.length > 0 && sameInputs(remoteInputs, previous)) {
+      // PUT never landed — channel still on original inputs. Safe to fail.
+      db.prepare(`UPDATE playout_jobs SET status = 'failed', last_error = 'interrupted before remote swap completed' WHERE id = ?`).run(job.id);
+      recordStreamEvent(stream.id, stream.lifecycle_state, stream.lifecycle_state, null,
+        `playout job #${job.id} recovered: swap never reached the server — channel unchanged`);
+    } else {
+      // Remote matches neither side — someone/something else touched it.
+      db.prepare(`UPDATE playout_jobs SET status = 'restore_unverified', last_error = ? WHERE id = ?`)
+        .run('interrupted swap and remote inputs match neither job nor captured originals (manual check required)', job.id);
+      recordStreamEvent(stream.id, stream.lifecycle_state, stream.lifecycle_state, null,
+        `playout job #${job.id} interrupted and remote state is AMBIGUOUS — manual check required on server '${server.name}'`);
+    }
+  }
+}
+
 export async function tick() {
   const now = new Date().toISOString();
 
@@ -231,7 +322,8 @@ export async function tick() {
   ).all(now) as any[];
   for (const job of ending) {
     const restored = await restoreJob(job);
-    db.prepare(`UPDATE playout_jobs SET status = ? WHERE id = ?`).run(restored ? 'completed' : 'restore_failed', job.id);
+    const finalStatus = restored === 'ok' ? 'completed' : restored === 'failed' ? 'restore_failed' : 'restore_unverified';
+    db.prepare(`UPDATE playout_jobs SET status = ? WHERE id = ?`).run(finalStatus, job.id);
   }
 
   // 2. Expire scheduled jobs whose window has fully elapsed.
@@ -245,8 +337,11 @@ export async function tick() {
     `SELECT * FROM playout_jobs WHERE status = 'scheduled' AND start_at_utc <= ? AND end_at_utc > ? ORDER BY start_at_utc LIMIT 50`
   ).all(now, now) as any[];
   for (const job of due) {
+    // 'swapping' marks the crash-sensitive window: previous_inputs must be
+    // persisted before the remote PUT inside executeJob. Boot recovery knows
+    // how to reconcile jobs left in this state.
     const claim = db.prepare(
-      `UPDATE playout_jobs SET status = 'running', claimed_at = ? WHERE id = ? AND status = 'scheduled'`
+      `UPDATE playout_jobs SET status = 'swapping', claimed_at = ? WHERE id = ? AND status = 'scheduled'`
     ).run(now, job.id);
     if (claim.changes !== 1) continue; // claimed concurrently — not ours
     try {
@@ -265,7 +360,9 @@ export function startScheduler(intervalMs = TICK_MS) {
     return;
   }
   recoverOnBoot();
-  tick().catch(e => console.error('[scheduler] initial tick failed:', e.message));
+  recoverInterruptedJobs()
+    .then(() => tick())
+    .catch(e => console.error('[scheduler] initial recovery/tick failed:', e.message));
   tickTimer = setInterval(() => {
     if (isTicking || !schedulerEnabled()) return;
     isTicking = true;

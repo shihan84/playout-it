@@ -39,6 +39,9 @@ const mockBehavior = {
   // Simulated remote stream inventory — GET /streams/{name} returns 404
   // unless the name is in this set. PUTs add, DELETEs remove.
   remoteStreams: new Set<string>(),
+  // Stateful remote inputs per stream — PUTs update, GETs reflect. Lets
+  // scheduler tests simulate arbitrary remote state (crash scenarios).
+  remoteInputs: new Map<string, { url: string }[]>(),
   // Second server inventory for cross-server move tests
   remoteStreams2: new Set<string>()
 };
@@ -89,6 +92,14 @@ test.before(async () => {
       const sName = decodeURIComponent(streamNameMatch[1]);
       if (req.method === 'PUT' && !(mockBehavior.failPut && mockBehavior.failPut.test(req.url || ''))) {
         mockBehavior.remoteStreams.add(sName);
+        let body = '';
+        req.on('data', c => { body += c; });
+        req.on('end', () => {
+          try {
+            const parsed = JSON.parse(body);
+            if (Array.isArray(parsed.inputs)) mockBehavior.remoteInputs.set(sName, parsed.inputs);
+          } catch { /* non-JSON PUT — ignore */ }
+        });
       }
       if (req.method === 'DELETE') {
         mockBehavior.remoteStreams.delete(sName);
@@ -124,7 +135,10 @@ test.before(async () => {
           res.end(JSON.stringify({ error: 'not_found' }));
           return;
         }
-        res.end(JSON.stringify({ name: sName, inputs: [{ url: 'udp://mock-default-input' }] }));
+        res.end(JSON.stringify({
+          name: sName,
+          inputs: mockBehavior.remoteInputs.get(sName) || [{ url: 'udp://mock-default-input' }]
+        }));
         return;
       }
       if (req.method === 'GET' && mockBehavior.vodsPayload !== null && /\/vods$/.test(req.url || '')) {
@@ -1987,4 +2001,200 @@ test('scheduler recovery: missed jobs skipped, stale running finalized — no st
   assert.equal(stale.status, 'completed', `stale running job must be finalized (got '${stale.status}')`);
   assert.ok(miss.last_error, 'skipped job should carry an explanatory error');
   mockBehavior.remoteStreams.delete('sched-miss');
+});
+
+// --- Crash-safety / failure-injection -------------------------------------
+// recoverInterruptedJobs() is boot-time logic; it runs in-process here
+// against the same WAL DB to simulate post-crash reconciliation.
+
+async function importScheduler() {
+  process.env.DATABASE_PATH = dbPath;
+  return import('../src/server/services/scheduler.ts');
+}
+
+function seedStream(idb: any, serverId: number, name: string) {
+  idb.prepare('INSERT INTO streams (server_id, name, live_url, playlist_url) VALUES (?, ?, \'\', \'\')').run(serverId, name);
+  return (idb.prepare('SELECT id FROM streams WHERE name = ?').get(name) as any).id;
+}
+
+test('crash recovery: swap never landed -> failed, channel untouched', async () => {
+  const server = (await (await fetch(`${BASE}/api/servers`, {
+    headers: { authorization: `Bearer ${(await (await login('itadmin', 'it-admin-pass-12345')).res.json()).token}` }
+  })).json()).find((s: any) => s.name === 'mock-vod');
+
+  const idb = new Database(dbPath);
+  const sId = seedStream(idb, server.id, 'sched-crash-noput');
+  // Claimed but crashed before the remote PUT: previous_inputs persisted,
+  // remote still on originals.
+  idb.prepare(`INSERT INTO playout_jobs (stream_id, kind, inputs, start_at_utc, duration_sec, end_at_utc, status, previous_inputs)
+    VALUES (?, 'inputs', '[{"url":"playlist:///x/a.txt"}]', ?, 60, ?, 'swapping', '[{"url":"udp://mock-default-input"}]')`)
+    .run(sId, new Date(Date.now() - 1000).toISOString(), new Date(Date.now() + 300e3).toISOString());
+  const jobId = (idb.prepare("SELECT id FROM playout_jobs WHERE stream_id = ? AND status = 'swapping'").get(sId) as any).id;
+  idb.close();
+  mockBehavior.remoteStreams.add('sched-crash-noput'); // remote = default input
+
+  const { recoverInterruptedJobs } = await importScheduler();
+  await recoverInterruptedJobs();
+
+  const c = new Database(dbPath);
+  const job = c.prepare('SELECT * FROM playout_jobs WHERE id = ?').get(jobId) as any;
+  c.close();
+  assert.equal(job.status, 'failed', `un-landed swap must fail safely, got '${job.status}'`);
+  assert.match(job.last_error, /before remote swap/);
+  mockBehavior.remoteStreams.delete('sched-crash-noput');
+});
+
+test('crash recovery: swap landed mid-window -> resumes running then restores', async () => {
+  const server = (await (await fetch(`${BASE}/api/servers`, {
+    headers: { authorization: `Bearer ${(await (await login('itadmin', 'it-admin-pass-12345')).res.json()).token}` }
+  })).json()).find((s: any) => s.name === 'mock-vod');
+
+  const idb = new Database(dbPath);
+  const sId = seedStream(idb, server.id, 'sched-crash-put');
+  // Crashed AFTER the remote PUT, inside the window: remote shows desired.
+  idb.prepare(`INSERT INTO playout_jobs (stream_id, kind, inputs, start_at_utc, duration_sec, end_at_utc, status, previous_inputs)
+    VALUES (?, 'inputs', '[{"url":"playlist:///x/b.txt"}]', ?, 60, ?, 'swapping', '[{"url":"udp://mock-default-input"}]')`)
+    .run(sId, new Date(Date.now() - 1000).toISOString(), new Date(Date.now() + 5e3).toISOString()); // 5s left
+  const jobId = (idb.prepare("SELECT id FROM playout_jobs WHERE stream_id = ? AND status = 'swapping'").get(sId) as any).id;
+  idb.close();
+  mockBehavior.remoteStreams.add('sched-crash-put');
+  mockBehavior.remoteInputs.set('sched-crash-put', [{ url: 'playlist:///x/b.txt' }]);
+
+  const { recoverInterruptedJobs } = await importScheduler();
+  await recoverInterruptedJobs();
+
+  const c = new Database(dbPath);
+  const adopted = c.prepare('SELECT * FROM playout_jobs WHERE id = ?').get(jobId) as any;
+  c.close();
+  assert.equal(adopted.status, 'running', `landed swap mid-window must resume running, got '${adopted.status}'`);
+
+  // App tick restores at end (previous = mock-default-input)
+  const deadline = Date.now() + 10000;
+  let fin: any;
+  while (Date.now() < deadline) {
+    const d = new Database(dbPath);
+    fin = d.prepare('SELECT * FROM playout_jobs WHERE id = ?').get(jobId);
+    d.close();
+    if (fin.status === 'completed') break;
+    await new Promise(r => setTimeout(r, 300));
+  }
+  assert.equal(fin.status, 'completed', `adopted job must restore + complete, got '${fin.status}'`);
+  assert.deepEqual(mockBehavior.remoteInputs.get('sched-crash-put'), [{ url: 'udp://mock-default-input' }],
+    'remote must be restored to captured originals');
+  mockBehavior.remoteStreams.delete('sched-crash-put');
+  mockBehavior.remoteInputs.delete('sched-crash-put');
+});
+
+test('crash recovery: ambiguous remote state -> restore_unverified, not silently completed', async () => {
+  const server = (await (await fetch(`${BASE}/api/servers`, {
+    headers: { authorization: `Bearer ${(await (await login('itadmin', 'it-admin-pass-12345')).res.json()).token}` }
+  })).json()).find((s: any) => s.name === 'mock-vod');
+
+  const idb = new Database(dbPath);
+  const sId = seedStream(idb, server.id, 'sched-crash-ambig');
+  idb.prepare(`INSERT INTO playout_jobs (stream_id, kind, inputs, start_at_utc, duration_sec, end_at_utc, status, previous_inputs)
+    VALUES (?, 'inputs', '[{"url":"playlist:///x/c.txt"}]', ?, 60, ?, 'swapping', '[{"url":"udp://orig"}]')`)
+    .run(sId, new Date(Date.now() - 1000).toISOString(), new Date(Date.now() + 300e3).toISOString());
+  const jobId = (idb.prepare("SELECT id FROM playout_jobs WHERE stream_id = ? AND status = 'swapping'").get(sId) as any).id;
+  idb.close();
+  mockBehavior.remoteStreams.add('sched-crash-ambig');
+  mockBehavior.remoteInputs.set('sched-crash-ambig', [{ url: 'udp://something-else-entirely' }]);
+
+  const { recoverInterruptedJobs } = await importScheduler();
+  await recoverInterruptedJobs();
+
+  const c = new Database(dbPath);
+  const job = c.prepare('SELECT * FROM playout_jobs WHERE id = ?').get(jobId) as any;
+  c.close();
+  assert.equal(job.status, 'restore_unverified', `ambiguous remote must flag operator, got '${job.status}'`);
+  assert.match(job.last_error, /AMBIGUOUS|match neither/i);
+  mockBehavior.remoteStreams.delete('sched-crash-ambig');
+  mockBehavior.remoteInputs.delete('sched-crash-ambig');
+});
+
+test('missing restoration data -> restore_unverified, never silent success', async () => {
+  const server = (await (await fetch(`${BASE}/api/servers`, {
+    headers: { authorization: `Bearer ${(await (await login('itadmin', 'it-admin-pass-12345')).res.json()).token}` }
+  })).json()).find((s: any) => s.name === 'mock-vod');
+
+  const idb = new Database(dbPath);
+  const sId = seedStream(idb, server.id, 'sched-noprev');
+  // Running past end WITHOUT previous_inputs (pre-fix data or capture failure)
+  idb.prepare(`INSERT INTO playout_jobs (stream_id, kind, inputs, start_at_utc, duration_sec, end_at_utc, status, previous_inputs)
+    VALUES (?, 'inputs', '[{"url":"playlist:///x/d.txt"}]', ?, 60, ?, 'running', NULL)`)
+    .run(sId, new Date(Date.now() - 600e3).toISOString(), new Date(Date.now() - 60e3).toISOString());
+  const jobId = (idb.prepare("SELECT id FROM playout_jobs WHERE stream_id = ? AND status = 'running'").get(sId) as any).id;
+  idb.close();
+  mockBehavior.remoteStreams.add('sched-noprev');
+
+  const deadline = Date.now() + 8000;
+  let job: any;
+  while (Date.now() < deadline) {
+    const d = new Database(dbPath);
+    job = d.prepare('SELECT * FROM playout_jobs WHERE id = ?').get(jobId);
+    d.close();
+    if (job.status === 'restore_unverified') break;
+    await new Promise(r => setTimeout(r, 300));
+  }
+  assert.equal(job.status, 'restore_unverified', `missing restore data must flag, got '${job.status}'`);
+  assert.match(job.last_error, /unverified|no previous_inputs/i);
+  mockBehavior.remoteStreams.delete('sched-noprev');
+});
+
+test('failure injection: restore PUT fails -> restore_failed + operator event', async () => {
+  const server = (await (await fetch(`${BASE}/api/servers`, {
+    headers: { authorization: `Bearer ${(await (await login('itadmin', 'it-admin-pass-12345')).res.json()).token}` }
+  })).json()).find((s: any) => s.name === 'mock-vod');
+
+  const idb = new Database(dbPath);
+  const sId = seedStream(idb, server.id, 'sched-restorefail');
+  idb.prepare(`INSERT INTO playout_jobs (stream_id, kind, inputs, start_at_utc, duration_sec, end_at_utc, status, previous_inputs)
+    VALUES (?, 'inputs', '[{"url":"playlist:///x/e.txt"}]', ?, 60, ?, 'running', '[{"url":"udp://orig"}]')`)
+    .run(sId, new Date(Date.now() - 600e3).toISOString(), new Date(Date.now() - 60e3).toISOString());
+  const jobId = (idb.prepare("SELECT id FROM playout_jobs WHERE stream_id = ? AND status = 'running'").get(sId) as any).id;
+  idb.close();
+  mockBehavior.remoteStreams.add('sched-restorefail');
+  mockBehavior.failPut = /sched-restorefail/;
+
+  const deadline = Date.now() + 8000;
+  let job: any;
+  while (Date.now() < deadline) {
+    const d = new Database(dbPath);
+    job = d.prepare('SELECT * FROM playout_jobs WHERE id = ?').get(jobId);
+    d.close();
+    if (job.status === 'restore_failed') break;
+    await new Promise(r => setTimeout(r, 300));
+  }
+  mockBehavior.failPut = null;
+  assert.equal(job.status, 'restore_failed', `failed restore must be distinct, got '${job.status}'`);
+  assert.match(job.last_error, /restore failed/i);
+
+  const e = new Database(dbPath);
+  const evt = e.prepare("SELECT * FROM stream_events WHERE stream_id = ? AND detail LIKE '%restore FAILED%'").get(sId) as any;
+  e.close();
+  assert.ok(evt, 'expected a stream event flagging the failed restore');
+  mockBehavior.remoteStreams.delete('sched-restorefail');
+});
+
+test('concurrency: swapping job cannot be cancelled mid-flight (409)', async () => {
+  const { res: adminRes } = await login('itadmin', 'it-admin-pass-12345');
+  const { token } = await adminRes.json();
+  const headers = { authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+
+  const server = (await (await fetch(`${BASE}/api/servers`, { headers })).json()).find((s: any) => s.name === 'mock-vod');
+  const idb = new Database(dbPath);
+  const sId = seedStream(idb, server.id, 'sched-swapcancel');
+  idb.prepare(`INSERT INTO playout_jobs (stream_id, kind, inputs, start_at_utc, duration_sec, end_at_utc, status)
+    VALUES (?, 'inputs', '[]', ?, 60, ?, 'swapping')`)
+    .run(sId, new Date(Date.now() - 1000).toISOString(), new Date(Date.now() + 300e3).toISOString());
+  const jobId = (idb.prepare("SELECT id FROM playout_jobs WHERE stream_id = ? AND status = 'swapping'").get(sId) as any).id;
+  idb.close();
+
+  const del = await fetch(`${BASE}/api/schedules/jobs/${jobId}`, { method: 'DELETE', headers });
+  assert.equal(del.status, 409, 'swapping job must not be cancellable mid-flight');
+
+  // Clean up
+  const c = new Database(dbPath);
+  c.prepare(`UPDATE playout_jobs SET status = 'failed' WHERE id = ?`).run(jobId);
+  c.close();
 });
