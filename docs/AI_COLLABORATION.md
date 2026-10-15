@@ -528,13 +528,20 @@ Branch `feature/phase-2-channel-lifecycle` off `main@38ce4ea`. All five mileston
 
 **P4 — Health timeline** — watchdog records real status transitions into `stream_events` (actor NULL, `watchdog:` detail); unreachable-server offline marks recorded. Unknown baselines skipped to avoid noise.
 
-**P5 — OpenAPI audit** — `docs/FLUSSONIC_API_COMPATIBILITY.md`. Fixed: `stats.input_alive` not in spec → `stats.inputs[].active` fallback; `client_count` → `online_clients` preference. Documented: `storage` singular fallback is legacy-only; VOD file-list `next` pagination not yet followed (truncation-only risk); `config_on_disk` undocumented but optional.
+**P5 — OpenAPI audit** — `docs/FLUSSONIC_API_COMPATIBILITY.md`. Fixed: `stats.input_alive` not in spec → `stats.inputs[].active` fallback; `client_count` → `online_clients` preference. Documented: `storage` singular fallback is legacy-only; VOD file-list `next` pagination now followed (was single-page only); `config_on_disk` undocumented but optional.
 
-**Gate on branch:** lint ✅ · **45/45 tests** ✅ · build 156.4 kB ✅ · audit 2 non-critical ✅
+**Gate on branch:** lint ✅ · **50/50 tests** ✅ · build 158.3 kB ✅ · audit 2 non-critical ✅
 
 ### Contract alignment fixes (post-rebase onto f4ae2e1)
 - Added `streams.channel_group TEXT` (nullable) — schema + migration + verified in legacy + fresh fixture tests
 - Concurrent conflicting transitions guarded: state re-read inside `db.transaction()` → 409 on race
 - Explicit tests: `provisioned→retired` ✅, `suspended→retired` ✅, same-state dup → 409, missing stream → 404
 - No remote side effects on suspend/retire: verified zero remote requests during `live→suspended→retired`
+
+### PR #3 review findings (contributor review at 4f0869b)
+1. **max_sessions semantics** — documented as dashboard (WS) session cap, not Flussonic playback sessions. `flussonic_sessions` field added to stream details for visibility. Flussonic playback limits must be configured on Flussonic directly.
+2. **Legacy POST/PUT /api/streams hardened** — remote Flussonic PUT failures now return 502; local rows are never created/updated on failure. POST also rolls back the companion VOD row + remote VOD when stream PUT fails. Regression tests verify no phantom records.
+3. **VOD file pagination** — `syncVodFilesFromRemote` now uses `fetchAllPages()` to follow `next` cursors. Previously only fetched a single page. Test verifies multi-page file collection.
+4. **Concurrent duplicate-name channel creation** — in-memory lock set serializes creations per server+name. Second concurrent request gets 409. Compensation never deletes preexisting resources (only rolls back what the current request created). UNIQUE index is the final safety net.
+5. **50-channel bulk test** — 50-item batch against mock Flussonic: all 50 succeed, 50 streams + 50 companion VODs verified in DB.
 - `channel_group` stored and queryable via `/lifecycle` endpoint

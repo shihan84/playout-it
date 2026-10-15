@@ -17,7 +17,7 @@ Audited against `docs/flussonic/references/media-server.openapi.json` (Flussonic
 ## Pagination
 
 - Spec defines `cursor` query param + `next` field in `collection_response` ("properly encoded equivalent of offset"). Our opaque-cursor echo as `?cursor=` is spec-correct; URL-shaped `next` values remain confined to the configured origin + `/flussonic/api`.
-- **Gap:** `/vods/{prefix}/storages/{i}/files` responses are also paginated (`disk_files_list` includes `next`). `syncVodFilesFromRemote` does not follow `next` — a large VOD library could show a truncated file list. Filed as a follow-up; no deletion risk (listings only replace rows on successful fetch).
+- `/vods/{prefix}/storages/{i}/files` responses are also paginated (`disk_files_list` includes `next`). `syncVodFilesFromRemote` now follows `next` cursors via `fetchAllPages()` — large VOD libraries are fully enumerated.
 
 ## Stats fields
 
@@ -37,5 +37,4 @@ Audited against `docs/flussonic/references/media-server.openapi.json` (Flussonic
 
 ## Remaining risk
 
-- File-list pagination (`next` on `disk_files_list`) not followed — see above.
-- `client_count` vs `online_clients` naming drift — display field only.
+- `client_count` vs `online_clients` naming drift — display field only (both handled via fallback).

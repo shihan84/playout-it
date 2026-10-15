@@ -25,7 +25,11 @@ export function verifyWsAuth(request: any): any | null {
 }
 
 // Lowest max_sessions across the user's active assignments, or null when
-// unconstrained. Counted against concurrent WS connections for that user.
+// unconstrained. max_sessions caps concurrent *dashboard* (WebSocket)
+// connections per user — it does NOT enforce Flussonic HLS/RTMP playback
+// session limits, which must be configured on Flussonic directly.
+// The stream details endpoint exposes Flussonic's online_clients count
+// for visibility.
 export function maxSessionsForUser(userId: number): number | null {
   const row = db.prepare(`
     SELECT MIN(max_sessions) AS m FROM user_stream_assignments

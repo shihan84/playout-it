@@ -29,7 +29,9 @@ const mockBehavior = {
   // Optional redirect target — mock responds 302 Location to /streams
   redirectTo: null as null | string,
   // Optional PUT failure — mock responds 500 when the URL matches
-  failPut: null as null | RegExp
+  failPut: null as null | RegExp,
+  // Optional paginated VOD file listing
+  vodFilesNext: null as null | ((url: string) => string | null)
 };
 
 let appProcess: any;
@@ -96,8 +98,11 @@ test.before(async () => {
         res.end(JSON.stringify(mockBehavior.vodsPayload));
         return;
       }
-      if (req.method === 'GET' && mockBehavior.vodFilesPayload !== null && /\/vods\/[^/]+\/(storages\/0\/)?files$/.test(req.url || '')) {
-        res.end(JSON.stringify(mockBehavior.vodFilesPayload));
+      if (req.method === 'GET' && mockBehavior.vodFilesPayload !== null && /\/vods\/[^/]+\/(storages\/0\/)?files/.test(req.url || '')) {
+        const body = mockBehavior.vodFilesNext
+          ? { files: mockBehavior.vodFilesPayload, next: mockBehavior.vodFilesNext(req.url || '') }
+          : mockBehavior.vodFilesPayload;
+        res.end(JSON.stringify(body));
         return;
       }
       // Companion-VOD fixtures:
@@ -105,8 +110,13 @@ test.before(async () => {
     //    convention); `legacy-stream_vod` 404s
     //  - new-stream: VOD exists only under `new-stream_vod` (current convention)
     if (req.url?.startsWith('/flussonic/api/v3/vods/legacy-stream_vod')) {
-      res.statusCode = 404;
-      res.end(JSON.stringify({ error: 'not_found' }));
+      // GET 404 simulates "legacy VOD not found"; PUT succeeds (creating it)
+      if (req.method === 'GET') {
+        res.statusCode = 404;
+        res.end(JSON.stringify({ error: 'not_found' }));
+      } else {
+        res.end(JSON.stringify({ ok: true }));
+      }
     } else if (req.url?.startsWith('/flussonic/api/v3/vods/legacy-stream')) {
       if (req.method === 'GET' && req.url.includes('/files')) {
         res.end(JSON.stringify({ files: [{ name: 'legacy-clip.mp4', size: 123 }] }));
@@ -1278,4 +1288,195 @@ test('watchdog records health timeline events into stream_events', async () => {
   // Restore normal cadence
   await fetch(`${BASE}/api/settings`, { method: 'POST', headers, body: JSON.stringify({ watchdog_interval: '5' }) });
   await fetch(`${BASE}/api/watchdog/restart`, { method: 'POST', headers });
+});
+
+// ---- PR #3 review findings regression tests ----
+
+test('legacy POST /api/streams rolls back on remote failure — no phantom records', async () => {
+  const { res: adminLogin } = await login('itadmin', 'it-admin-pass-12345');
+  const { token } = await adminLogin.json();
+  const headers = { authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+
+  const mk = await fetch(`${BASE}/api/servers`, {
+    method: 'POST', headers,
+    body: JSON.stringify({ name: 'mock-phantom', url: `http://127.0.0.1:${remotePort}`, username: 'u', password: 'p123456' })
+  });
+  const server = await mk.json();
+
+  // Make stream PUT fail (VOD PUT succeeds first, so the stream PUT is the
+  // failure point for the POST endpoint)
+  mockBehavior.failPut = /\/streams\/phantom-test/;
+  const createRes = await fetch(`${BASE}/api/streams`, {
+    method: 'POST', headers,
+    body: JSON.stringify({ server_id: server.id, name: 'phantom-test', inputs: ['rtsp://cam/1'] })
+  });
+  mockBehavior.failPut = null;
+
+  assert.equal(createRes.status, 502, 'should fail with 502 when Flussonic rejects stream');
+
+  // Verify no phantom local stream exists
+  const idb = new Database(dbPath);
+  const phantom = idb.prepare("SELECT id FROM streams WHERE name = 'phantom-test'").get();
+  assert.equal(phantom, undefined, 'no phantom stream row should exist after remote failure');
+  // The companion VOD row must also be rolled back
+  const phantomVod = idb.prepare("SELECT id FROM vods WHERE name = 'phantom-test_vod' AND server_id = ?").get(server.id);
+  assert.equal(phantomVod, undefined, 'companion VOD row should be rolled back');
+  idb.close();
+
+  // Verify the remote orphan VOD was cleaned up
+  assert.ok(remoteDeletes.some(u => u.includes('phantom-test_vod')), 'remote VOD should be deleted on rollback');
+});
+
+test('legacy PUT /api/streams/:id rejects on remote failure — local state unchanged', async () => {
+  const { res: adminLogin } = await login('itadmin', 'it-admin-pass-12345');
+  const { token } = await adminLogin.json();
+  const headers = { authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+
+  const mk = await fetch(`${BASE}/api/servers`, {
+    method: 'POST', headers,
+    body: JSON.stringify({ name: 'mock-put-harden', url: `http://127.0.0.1:${remotePort}`, username: 'u', password: 'p123456' })
+  });
+  const server = await mk.json();
+
+  // Create a stream that succeeds
+  const idb = new Database(dbPath);
+  idb.prepare("INSERT INTO streams (server_id, name, live_url, playlist_url, inputs) VALUES (?, 'put-test', '', '', '[\"rtsp://old\"]')").run(server.id);
+  const streamId = (idb.prepare("SELECT id FROM streams WHERE name = 'put-test'").get() as any).id;
+  idb.close();
+
+  // Now fail the update PUT
+  mockBehavior.failPut = /\/streams\/put-renamed/;
+  const updateRes = await fetch(`${BASE}/api/streams/${streamId}`, {
+    method: 'PUT', headers,
+    body: JSON.stringify({ server_id: server.id, name: 'put-renamed', inputs: ['rtsp://new'] })
+  });
+  mockBehavior.failPut = null;
+
+  assert.equal(updateRes.status, 502, 'should fail on remote error');
+
+  // Verify local state is unchanged
+  const idb2 = new Database(dbPath);
+  const s = idb2.prepare('SELECT name, inputs FROM streams WHERE id = ?').get(streamId) as any;
+  assert.equal(s.name, 'put-test', 'name must not change on remote failure');
+  assert.equal(s.inputs, '["rtsp://old"]', 'inputs must not change on remote failure');
+  idb2.close();
+});
+
+test('concurrent duplicate-name channel creation is rejected', async () => {
+  const { res: adminLogin } = await login('itadmin', 'it-admin-pass-12345');
+  const { token } = await adminLogin.json();
+  const headers = { authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+
+  const mk = await fetch(`${BASE}/api/servers`, {
+    method: 'POST', headers,
+    body: JSON.stringify({ name: 'mock-race', url: `http://127.0.0.1:${remotePort}`, username: 'u', password: 'p123456' })
+  });
+  const server = await mk.json();
+
+  // Add delay so the first request is still in-flight when the second arrives
+  mockBehavior.delayMs = 500;
+
+  const [r1, r2] = await Promise.all([
+    fetch(`${BASE}/api/channels`, {
+      method: 'POST', headers,
+      body: JSON.stringify({ server_id: server.id, name: 'race-chan', inputs: ['rtsp://a'] })
+    }),
+    // Short delay to ensure the first request is in-flight
+    new Promise(r => setTimeout(r, 50)).then(() =>
+      fetch(`${BASE}/api/channels`, {
+        method: 'POST', headers,
+        body: JSON.stringify({ server_id: server.id, name: 'race-chan', inputs: ['rtsp://b'] })
+      })
+    )
+  ]);
+  mockBehavior.delayMs = 0;
+
+  const statuses = [r1.status, r2.status].sort();
+  assert.ok(statuses.includes(200) || statuses.includes(201), 'one request should succeed');
+  assert.ok(statuses.includes(409), `one request should be rejected with 409, got ${statuses}`);
+
+  // Exactly one local stream + one VOD
+  const idb = new Database(dbPath);
+  const count = (idb.prepare("SELECT COUNT(*) c FROM streams WHERE name = 'race-chan'").get() as any).c;
+  assert.equal(count, 1, 'exactly one stream should exist after concurrent race');
+  idb.close();
+});
+
+test('VOD file sync follows paginated next cursors', async () => {
+  const { res: adminLogin } = await login('itadmin', 'it-admin-pass-12345');
+  const { token } = await adminLogin.json();
+  const headers = { authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+
+  const mk = await fetch(`${BASE}/api/servers`, {
+    method: 'POST', headers,
+    body: JSON.stringify({ name: 'mock-vodpages', url: `http://127.0.0.1:${remotePort}`, username: 'u', password: 'p123456' })
+  });
+  const server = await mk.json();
+
+  // Insert a VOD directly
+  const idb = new Database(dbPath);
+  idb.prepare('INSERT INTO vods (server_id, name, paths) VALUES (?, ?, ?)').run(server.id, 'paged-vod', '[]');
+  const vodId = (idb.prepare("SELECT id FROM vods WHERE name = 'paged-vod'").get() as any).id;
+  idb.close();
+
+  // First page returns files + a next cursor, second page returns more files.
+  // The mock returns vodFilesPayload for all file listing requests.
+  let callCount = 0;
+  mockBehavior.vodFilesPayload = [{ name: 'page1.mp4', size: 100 }];
+  mockBehavior.vodFilesNext = (_url) => {
+    callCount++;
+    if (callCount <= 1) return 'page2cursor';
+    return null;
+  };
+
+  // Trigger VOD file sync directly via POST /api/vods/:id/files/sync
+  const syncRes = await fetch(`${BASE}/api/vods/${vodId}/files/sync`, { method: 'POST', headers });
+  mockBehavior.vodFilesPayload = null;
+  mockBehavior.vodFilesNext = null;
+
+  assert.equal(syncRes.status, 200, `VOD file sync should succeed, got ${syncRes.status}`);
+
+  // Verify that vod_files contains entries from both pages (paginated fetch)
+  const idb2 = new Database(dbPath);
+  const fileCount = (idb2.prepare('SELECT COUNT(*) c FROM vod_files WHERE vod_id = ?').get(vodId) as any).c;
+  // Two pages, each with the same file (mock returns same payload for both
+  // pages), but the second page's INSERT uses the same name so there will be 2 rows
+  assert.ok(fileCount >= 2, `VOD files should have entries from 2 pages, got ${fileCount}`);
+  idb2.close();
+});
+
+test('50-channel bulk create against mocks', async () => {
+  const { res: adminLogin } = await login('itadmin', 'it-admin-pass-12345');
+  const { token } = await adminLogin.json();
+  const headers = { authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+
+  const mk = await fetch(`${BASE}/api/servers`, {
+    method: 'POST', headers,
+    body: JSON.stringify({ name: 'mock-bulk50', url: `http://127.0.0.1:${remotePort}`, username: 'u', password: 'p123456' })
+  });
+  const server = await mk.json();
+
+  // Build 50 channels
+  const items = Array.from({ length: 50 }, (_, i) => ({
+    name: `bulk50-ch-${String(i).padStart(3, '0')}`,
+    inputs: [`rtsp://cam/${i}`]
+  }));
+
+  const res = await fetch(`${BASE}/api/channels/bulk`, {
+    method: 'POST', headers,
+    body: JSON.stringify({ server_id: server.id, action: 'create', items })
+  });
+  assert.equal(res.status, 200, 'bulk create should succeed');
+  const body = await res.json();
+  assert.equal(body.results.length, 50, `should return 50 results, got ${body.results.length}`);
+  const succeeded = body.results.filter((r: any) => r.ok).length;
+  assert.equal(succeeded, 50, `all 50 should succeed, got ${succeeded} success / ${50 - succeeded} failures`);
+
+  // Verify all exist locally
+  const idb = new Database(dbPath);
+  const count = (idb.prepare("SELECT COUNT(*) c FROM streams WHERE name LIKE 'bulk50-ch-%' AND server_id = ?").get(server.id) as any).c;
+  assert.equal(count, 50, `50 streams should exist in DB, got ${count}`);
+  const vodCount = (idb.prepare("SELECT COUNT(*) c FROM vods WHERE name LIKE 'bulk50-ch-%_vod' AND server_id = ?").get(server.id) as any).c;
+  assert.equal(vodCount, 50, `50 companion VODs should exist in DB, got ${vodCount}`);
+  idb.close();
 });
