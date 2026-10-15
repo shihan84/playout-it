@@ -2003,6 +2003,7 @@ test('scheduler recovery: missed jobs skipped, stale running finalized — no st
   mockBehavior.remoteStreams.delete('sched-miss');
 });
 
+<<<<<<< HEAD
 // --- Crash-safety / failure-injection -------------------------------------
 // recoverInterruptedJobs() is boot-time logic; it runs in-process here
 // against the same WAL DB to simulate post-crash reconciliation.
@@ -2197,4 +2198,55 @@ test('concurrency: swapping job cannot be cancelled mid-flight (409)', async () 
   const c = new Database(dbPath);
   c.prepare(`UPDATE playout_jobs SET status = 'failed' WHERE id = ?`).run(jobId);
   c.close();
+});
+
+// ============================================================================
+// Phase 3 P3 — Broadcast monitoring
+// ============================================================================
+
+test('monitoring: channel summary aggregates status, playout progress, next job', async () => {
+  const { res: adminRes } = await login('itadmin', 'it-admin-pass-12345');
+  const { token } = await adminRes.json();
+  const headers = { authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+  const { res: clientRes } = await login('itclient', 'it-client-pass-12345');
+  const { token: clientToken } = await clientRes.json();
+
+  // Client forbidden
+  const denied = await fetch(`${BASE}/api/monitoring/channels`, {
+    headers: { authorization: `Bearer ${clientToken}` }
+  });
+  assert.equal(denied.status, 403);
+
+  const list = await (await fetch(`${BASE}/api/servers`, { headers })).json();
+  const server = list.find((s: any) => s.name === 'mock-vod');
+  const idb = new Database(dbPath);
+  idb.prepare("INSERT INTO streams (server_id, name, live_url, playlist_url, status, lifecycle_state) VALUES (?, 'mon-ch', '', '', 'online', 'live')").run(server.id);
+  const sId = (idb.prepare("SELECT id FROM streams WHERE name = 'mon-ch'").get() as any).id;
+
+  // Running job mid-window + upcoming job
+  const now = Date.now();
+  idb.prepare(`INSERT INTO playout_jobs (stream_id, kind, inputs, start_at_utc, duration_sec, end_at_utc, status)
+    VALUES (?, 'inputs', '[{"url":"udp://a"}]', ?, 3600, ?, 'running')`)
+    .run(sId, new Date(now - 1800e3).toISOString(), new Date(now + 1800e3).toISOString());
+  idb.prepare(`INSERT INTO playout_jobs (stream_id, kind, inputs, start_at_utc, duration_sec, end_at_utc, status)
+    VALUES (?, 'inputs', '[{"url":"udp://b"}]', ?, 600, ?, 'scheduled')`)
+    .run(sId, new Date(now + 7200e3).toISOString(), new Date(now + 7800e3).toISOString());
+  idb.close();
+
+  const channels = await (await fetch(`${BASE}/api/monitoring/channels`, { headers })).json();
+  const ch = channels.find((c: any) => c.name === 'mon-ch');
+  assert.ok(ch, 'channel present in summary');
+  assert.equal(ch.status, 'online');
+  assert.equal(ch.playout.running.progress_pct, 50, 'mid-window job reports ~50% progress');
+  assert.equal(ch.playout.next.status, 'scheduled');
+
+  // Detail endpoint includes event history
+  const detail = await (await fetch(`${BASE}/api/monitoring/channels/${sId}`, { headers })).json();
+  assert.ok(Array.isArray(detail.events));
+
+  // Global events feed + failures feed return arrays
+  const events = await (await fetch(`${BASE}/api/monitoring/events?stream_id=${sId}`, { headers })).json();
+  assert.ok(Array.isArray(events));
+  const fails = await (await fetch(`${BASE}/api/monitoring/jobs/failures`, { headers })).json();
+  assert.ok(Array.isArray(fails));
 });
