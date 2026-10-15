@@ -578,6 +578,15 @@ Branch `feature/phase-2-channel-lifecycle` off `main@38ce4ea`. All five mileston
 3. **enforceMaxSessions on expires_at changes** — PATCH to assignment now reconciles WS sockets when either `max_sessions` or `expires_at` changes (cap may activate/deactivate via expiry).
 4. **VOD rollback** — already implemented in `186e6e1`; confirmed by CodeRabbit as correct pattern.
 
+### Release gate — final safety verification
+
+1. **Reconciliation procedures** documented in `docs/OPERATIONS_RECOVERY.md` — covers rename partial failure, VOD orphans, old-stream cleanup failure, channel creation rollback, WS session caps, and periodic reconciliation drill.
+2. **Old remote stream always recoverable** — with the final ordering (provision new → update local → delete old), the old remote stream is never touched until local state is committed. If cleanup fails, the stream is fully intact on the source server.
+3. **CodeRabbit round-3** — all 4 findings confirmed resolved by CodeRabbit auto-responses.
+4. **Gate verified** — 54/54 tests, lint clean, build 161.6 kB, audit 2 non-critical.
+5. **Migrations + backup** — verified on disposable DBs; legacy streams preserved, Phase 2 columns added, backup/restore intact.
+6. **Single-process constraint** — documented in `DEPLOYMENT_CHECKLIST.md` and inline in `channels.ts`.
+
 **Final gate:** lint ✅ · **54/54 tests** ✅ · build 161.6 kB ✅ · audit 2 non-critical ✅
 
 - `channel_group` stored and queryable via `/lifecycle` endpoint
