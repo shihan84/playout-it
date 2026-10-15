@@ -1,5 +1,7 @@
 import { spawn, ChildProcess } from 'child_process';
 import { execSync } from 'child_process';
+import fs from 'node:fs';
+import path from 'node:path';
 import { db } from '../db';
 import { recordStreamEvent } from './lifecycle';
 
@@ -25,6 +27,84 @@ export class OverlayError extends Error {
 
 const FFMPEG = process.env.FFMPEG_PATH || 'ffmpeg';
 const FFPROBE = process.env.FFPROBE_PATH || 'ffprobe';
+
+// Overlay rendering is DISABLED by default — it spawns ffmpeg against real
+// channels, so it must be explicitly armed (mirrors the scheduler gate).
+// Enable via settings.overlay_enabled = '1' or OVERLAY_ENABLED=1.
+export function overlayEnabled(): boolean {
+  const s = db.prepare("SELECT value FROM settings WHERE key = 'overlay_enabled'").get() as any;
+  if (s) return s.value === '1';
+  return process.env.OVERLAY_ENABLED === '1';
+}
+
+// Logo assets are confined to a single approved directory. Default:
+// <cwd>/assets/overlay. Override with OVERLAY_ASSET_DIR (tests, deployments).
+export function overlayAssetDir(): string {
+  return path.resolve(process.env.OVERLAY_ASSET_DIR || path.join(process.cwd(), 'assets', 'overlay'));
+}
+
+function resolveLogoPathParts(logoPath: string) {
+  const root = overlayAssetDir();
+  const resolved = path.resolve(root, logoPath);
+  const inside = resolved === root || resolved.startsWith(root + path.sep);
+  return { root, resolved, inside };
+}
+
+// Lightweight containment check used at profile create/update — rejects
+// traversal and outside-absolute paths without requiring the file to exist
+// yet (assets may be uploaded after the profile is created).
+export function assertLogoPathAllowed(logoPath: string) {
+  const r = resolveLogoPathParts(logoPath);
+  if (!r.inside) {
+    throw new OverlayError(`logo_path must be inside the overlay asset dir (${r.root})`, 400);
+  }
+}
+
+// Full check used at job start — containment, existence, and symlink escape.
+// Returns the canonical absolute path for ffmpeg.
+export function resolveLogoPath(logoPath: string): string {
+  const { root, resolved } = resolveLogoPathParts(logoPath);
+  if (!fs.existsSync(resolved)) {
+    throw new OverlayError(`logo file not found in overlay asset dir: ${logoPath}`, 400);
+  }
+  const real = fs.realpathSync(resolved);
+  const realRoot = fs.realpathSync(root);
+  if (real !== realRoot && !real.startsWith(realRoot + path.sep)) {
+    throw new OverlayError('logo_path resolves outside the overlay asset dir (symlink rejected)', 400);
+  }
+  return real;
+}
+
+// Canonicalize a URL for equality checks: lowercase scheme+host, strip the
+// default port and trailing slashes. Throws on unparseable input.
+function canonUrl(raw: string): string | null {
+  try {
+    const u = new URL(raw);
+    const port = u.port && !((u.protocol === 'http:' && u.port === '80') || (u.protocol === 'https:' && u.port === '443'))
+      ? `:${u.port}` : '';
+    return `${u.protocol}//${u.hostname.toLowerCase()}${port}${u.pathname.replace(/\/+$/, '')}${u.search}`;
+  } catch {
+    // udp:// rtmp:// srt:// parse fine via URL; anything unparseable is
+    // compared literally after lowercasing + trailing-slash strip.
+    return String(raw).toLowerCase().replace(/\/+$/, '');
+  }
+}
+
+// True when `out` targets the given stream on the given server — i.e. ffmpeg
+// would publish back onto the source channel or an endpoint the source
+// consumes. Covers publish paths, stream API paths, and any URL that has the
+// stream name as a path segment on the same host.
+function urlTargetsStream(out: string, serverUrl: string, streamName: string): boolean {
+  try {
+    const o = new URL(out);
+    const s = new URL(serverUrl);
+    if (o.hostname.toLowerCase() !== s.hostname.toLowerCase()) return false;
+    const segs = o.pathname.split('/').map(decodeURIComponent).filter(Boolean);
+    return segs.includes(streamName);
+  } catch {
+    return false;
+  }
+}
 
 // ---- Binary detection ------------------------------------------------------
 
@@ -203,8 +283,9 @@ export function runningJobs() {
 }
 
 export async function startOverlay(profileId: number): Promise<any> {
-  // Policy validation runs BEFORE the ffmpeg capability check -- a 409
-  // isolation violation must be reported even when ffmpeg is absent.
+  // Policy validation runs BEFORE capability checks (ffmpeg presence, global
+  // enable gate) -- a 409 isolation violation must be reported even when
+  // ffmpeg is absent or the feature is not yet armed.
   const profile = db.prepare('SELECT * FROM overlay_profiles WHERE id = ?').get(profileId) as any;
   if (!profile) throw new OverlayError('Profile not found', 404);
   if (!profile.enabled) throw new OverlayError('Profile is disabled', 409);
@@ -213,12 +294,40 @@ export async function startOverlay(profileId: number): Promise<any> {
   if (!stream) throw new OverlayError('Stream not found', 404);
   const server = stream.server_id ? db.prepare('SELECT * FROM servers WHERE id = ?').get(stream.server_id) as any : null;
 
-  // Isolation rule: overlay output must not overwrite the source channel.
+  // Resolve the intended input and output BEFORE any checks so every output
+  // destination (named stream OR explicit output_url) is validated.
+  const inputUrl = stream.live_url || (server ? `${server.url.replace(/\/$/, '')}/${encodeURIComponent(stream.name)}/index.m3u8` : null);
+  if (!inputUrl) throw new OverlayError('No playable input URL for this stream', 400);
+
   const outputName = profile.output_stream || `${stream.name}_ovr`;
+  const outputUrl = profile.output_url
+    || (server ? `${server.url.replace(/\/$/, '')}/flussonic/publish/${encodeURIComponent(outputName)}` : null);
+  if (!outputUrl) throw new OverlayError('No output_url and stream has no server to derive one from', 400);
+
+  // Isolation rule A: a named output stream must not be the source channel.
   if (outputName === stream.name && !profile.output_url) {
     throw new OverlayError(
       `output_stream '${outputName}' equals the source stream -- overlay output must be an isolated stream. ` +
       `Set output_stream (e.g. '${stream.name}_ovr') or an explicit output_url.`, 409);
+  }
+
+  // Isolation rule B: an explicit output_url gets the SAME scrutiny —
+  // canonicalized and rejected if it equals the input URL, targets the
+  // source stream on the same server, or points at any endpoint the source
+  // already consumes as an input (feedback loop).
+  if (canonUrl(outputUrl) === canonUrl(inputUrl)) {
+    throw new OverlayError(
+      `output_url equals the source input URL — overlay output must not feed back into the channel it reads`, 409);
+  }
+  if (server && urlTargetsStream(outputUrl, server.url, stream.name)) {
+    throw new OverlayError(
+      `output_url targets the source stream '${stream.name}' on its own server — overlay output must be isolated`, 409);
+  }
+  const srcInputs: string[] = (() => { try { return JSON.parse(stream.inputs || '[]'); } catch { return []; } })();
+  const outCanon = canonUrl(outputUrl);
+  if (srcInputs.some(i => canonUrl(i) === outCanon)) {
+    throw new OverlayError(
+      `output_url matches one of the source channel's inputs — publishing there creates a feedback loop`, 409);
   }
 
   // Recursion guard: reject a cycle where our OUTPUT stream is itself the
@@ -235,6 +344,17 @@ export async function startOverlay(profileId: number): Promise<any> {
       `Chained overlays must not form cycles.`, 409);
   }
 
+  // Logo assets: full path resolution (containment + existence + symlink).
+  if (profile.logo_path) {
+    profile.logo_path = resolveLogoPath(profile.logo_path);
+  }
+
+  // Global gate: overlay workers must be explicitly armed (mirrors the
+  // scheduler). Prevents accidental ffmpeg runs against real channels.
+  if (!overlayEnabled()) {
+    throw new OverlayError('Overlay rendering is disabled — set settings.overlay_enabled=1 or OVERLAY_ENABLED=1', 409);
+  }
+
   if (!detectFfmpeg()) {
     throw new OverlayError('ffmpeg not found on PATH (set FFMPEG_PATH). Overlay rendering requires FFmpeg.', 503);
   }
@@ -245,13 +365,6 @@ export async function startOverlay(profileId: number): Promise<any> {
   if (running.n >= MAX_PER_STREAM) {
     throw new OverlayError('An overlay job is already running for this stream -- stop it first', 409);
   }
-
-  const inputUrl = stream.live_url || (server ? `${server.url.replace(/\/$/, '')}/${encodeURIComponent(stream.name)}/index.m3u8` : null);
-  if (!inputUrl) throw new OverlayError('No playable input URL for this stream', 400);
-
-  const outputUrl = profile.output_url
-    || (server ? `${server.url.replace(/\/$/, '')}/flussonic/publish/${encodeURIComponent(outputName)}` : null);
-  if (!outputUrl) throw new OverlayError('No output_url and stream has no server to derive one from', 400);
 
   const info = db.prepare(
     `INSERT INTO overlay_jobs (profile_id, stream_id, status) VALUES (?, ?, 'starting')`

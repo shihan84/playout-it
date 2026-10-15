@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { db } from '../db';
 import {
   OverlayError, validateProfileSpec, startOverlay, stopOverlay, detectFfmpeg,
+  assertLogoPathAllowed, overlayAssetDir,
 } from '../services/overlay';
 import { authenticateToken, requireAdmin, AuthRequest } from '../middleware/auth';
 
@@ -14,7 +15,7 @@ function err(e: any, res: any) {
 // ---- Capabilities --------------------------------------------------------
 
 router.get('/capabilities', authenticateToken, (_req, res) => {
-  res.json({ ffmpeg: detectFfmpeg() });
+  res.json({ ffmpeg: detectFfmpeg(), asset_dir: overlayAssetDir() });
 });
 
 // ---- Profiles ------------------------------------------------------------
@@ -31,6 +32,7 @@ router.get('/', authenticateToken, requireAdmin, (_req, res) => {
 router.post('/', authenticateToken, requireAdmin, (req: AuthRequest, res) => {
   try {
     const spec = validateProfileSpec(req.body);
+    if (spec.logo_path) assertLogoPathAllowed(spec.logo_path);
     const streamId = Number(req.body?.stream_id);
     const stream = db.prepare('SELECT id FROM streams WHERE id = ?').get(streamId);
     if (!stream) throw new OverlayError('Stream not found', 404);
@@ -54,6 +56,7 @@ router.patch('/:id', authenticateToken, requireAdmin, (req, res) => {
     if (!profile) throw new OverlayError('Profile not found', 404);
     const merged = { ...profile, ...req.body };
     const spec = validateProfileSpec(merged);
+    if (spec.logo_path) assertLogoPathAllowed(spec.logo_path);
     const cols = Object.keys(spec);
     db.prepare(
       `UPDATE overlay_profiles SET ${cols.map(c => `${c} = ?`).join(', ')} WHERE id = ?`

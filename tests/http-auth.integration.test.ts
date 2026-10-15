@@ -211,6 +211,8 @@ test.before(async () => {
       PORT: String(PORT),
       DATABASE_PATH: dbPath,
       JWT_SECRET: 'test-secret-key-for-integration-tests-only-0123456789',
+      OVERLAY_ENABLED: '1',
+      OVERLAY_ASSET_DIR: path.join(tmpDir, 'overlay-assets'),
     },
     cwd: process.cwd(),
     stdio: ['ignore', 'pipe', 'pipe'],

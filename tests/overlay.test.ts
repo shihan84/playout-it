@@ -2,14 +2,20 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import os from 'node:os';
 import path from 'node:path';
+import fs from 'node:fs';
 
 // Redirect the DB singleton to a disposable file BEFORE importing the service
 // (importing ../db opens DATABASE_PATH at module load).
 const tmpDb = path.join(os.tmpdir(), `overlay-test-${process.pid}-${Date.now()}.db`);
 process.env.DATABASE_PATH = tmpDb;
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'overlay-test-secret-0123456789abcdef';
+// Isolated asset dir for logo-path confinement tests.
+const assetDir = path.join(os.tmpdir(), `overlay-assets-${process.pid}-${Date.now()}`);
+fs.mkdirSync(assetDir, { recursive: true });
+process.env.OVERLAY_ASSET_DIR = assetDir;
 
-const { buildArgs, validateProfileSpec, escapeDrawtext, OverlayError, startOverlay } =
+const { buildArgs, validateProfileSpec, escapeDrawtext, OverlayError, startOverlay,
+  assertLogoPathAllowed, resolveLogoPath } =
   await import('../src/server/services/overlay');
 const { db } = await import('../src/server/db');
 
@@ -70,9 +76,10 @@ test('validateProfileSpec accepts a full valid profile', () => {
 
 // startOverlay policy ordering: isolation + recursion must reject (409)
 // regardless of whether ffmpeg is installed. Uses the disposable temp DB.
-function seedStream(name: string) {
-  db.prepare("INSERT OR IGNORE INTO servers (id, name, url, api_key) VALUES (1, 't', 'http://x', 'u:p')").run();
-  db.prepare("INSERT INTO streams (server_id, name, live_url, playlist_url) VALUES (1, ?, '', '')").run(name);
+function seedStream(name: string, opts: { live_url?: string; inputs?: string[] } = {}) {
+  db.prepare("INSERT OR IGNORE INTO servers (id, name, url, api_key) VALUES (1, 't', 'http://fs.example', 'u:p')").run();
+  db.prepare("INSERT INTO streams (server_id, name, live_url, playlist_url, inputs) VALUES (1, ?, ?, '', ?)")
+    .run(name, opts.live_url || '', JSON.stringify(opts.inputs || []));
   return (db.prepare('SELECT id FROM streams WHERE name = ?').get(name) as any).id;
 }
 
@@ -94,4 +101,78 @@ test('startOverlay rejects A->B / B->A recursion cycles', async () => {
     "INSERT INTO overlay_profiles (stream_id, name, output_stream) VALUES (?, 'a-to-b', 'cyc-b')"
   ).run(aId).lastInsertRowid;
   await assert.rejects(() => startOverlay(Number(pid)), (e: any) => e.status === 409 && /[Rr]ecursive/.test(e.message));
+});
+
+// ---- Review: output_url must NOT bypass isolation ----------------------------
+
+test('startOverlay rejects output_url equal to the source input URL', async () => {
+  const sid = seedStream('fb-in', { live_url: 'http://fs.example/fb-in/index.m3u8' });
+  const pid = db.prepare(
+    "INSERT INTO overlay_profiles (stream_id, name, output_url) VALUES (?, 'selfloop', 'http://fs.example/fb-in/index.m3u8')"
+  ).run(sid).lastInsertRowid;
+  await assert.rejects(() => startOverlay(Number(pid)),
+    (e: any) => e.status === 409 && /feed back|equals the source input/i.test(e.message));
+});
+
+test('startOverlay rejects output_url targeting the source stream on its server', async () => {
+  const sid = seedStream('fb-target', { live_url: 'http://cdn.other.example/fb-target/index.m3u8' });
+  for (const out of [
+    'http://fs.example/flussonic/publish/fb-target',
+    'http://fs.example/flussonic/api/v3/streams/fb-target',
+    'http://fs.example/fb-target/index.m3u8',
+  ]) {
+    const pid = db.prepare(
+      'INSERT INTO overlay_profiles (stream_id, name, output_url) VALUES (?, ?, ?)'
+    ).run(sid, `t-${out.length}`, out).lastInsertRowid;
+    await assert.rejects(() => startOverlay(Number(pid)),
+      (e: any) => e.status === 409 && /source stream|equals the source input/i.test(e.message),
+      `expected 409 for ${out}`);
+  }
+});
+
+test('startOverlay rejects output_url matching a configured source input (feedback)', async () => {
+  const sid = seedStream('fb-srcin', {
+    live_url: 'http://fs.example/fb-srcin/index.m3u8',
+    inputs: ['udp://239.0.0.1:1234'],
+  });
+  const pid = db.prepare(
+    "INSERT INTO overlay_profiles (stream_id, name, output_url) VALUES (?, 'fb', 'udp://239.0.0.1:1234/')"
+  ).run(sid).lastInsertRowid;
+  await assert.rejects(() => startOverlay(Number(pid)),
+    (e: any) => e.status === 409 && /feedback/i.test(e.message));
+});
+
+// ---- Review: logo paths confined to the approved asset dir -------------------
+
+test('assertLogoPathAllowed rejects traversal and outside absolute paths', () => {
+  assert.throws(() => assertLogoPathAllowed('../../etc/passwd'), OverlayError);
+  assert.throws(() => assertLogoPathAllowed('..\\..\\windows\\system.ini'), OverlayError);
+  assert.throws(() => assertLogoPathAllowed(path.join(os.tmpdir(), 'outside.png')), OverlayError);
+  assert.doesNotThrow(() => assertLogoPathAllowed('ok/logo.png'));
+});
+
+test('resolveLogoPath: inside file ok; missing file and symlink escape rejected', () => {
+  fs.writeFileSync(path.join(assetDir, 'in.png'), 'x');
+  assert.ok(resolveLogoPath('in.png').endsWith('in.png'));
+  assert.throws(() => resolveLogoPath('nope.png'), OverlayError);
+
+  const outside = path.join(os.tmpdir(), `outside-${process.pid}-${Date.now()}.png`);
+  fs.writeFileSync(outside, 'x');
+  const link = path.join(assetDir, 'escape.png');
+  let linked = false;
+  try { fs.symlinkSync(outside, link); linked = true; } catch { /* platform lacks symlink permission */ }
+  if (linked) {
+    assert.throws(() => resolveLogoPath('escape.png'), OverlayError);
+  }
+});
+
+// ---- Review: overlay workers gated off by default ----------------------------
+
+test('startOverlay requires the overlay_enabled gate (off by default)', async () => {
+  const sid = seedStream('gated', { live_url: 'http://fs.example/gated/index.m3u8' });
+  const pid = db.prepare(
+    "INSERT INTO overlay_profiles (stream_id, name, output_stream) VALUES (?, 'g', 'gated_ovr')"
+  ).run(sid).lastInsertRowid;
+  await assert.rejects(() => startOverlay(Number(pid)),
+    (e: any) => e.status === 409 && /disabled/i.test(e.message));
 });
