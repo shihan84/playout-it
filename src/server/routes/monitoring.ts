@@ -29,8 +29,9 @@ function jobProgress(job: any, nowMs: number) {
 }
 
 function channelSummary(stream: any, nowMs: number) {
+  // 'swapping' = claimed, remote PUT in flight — counts as the current job.
   const running = db.prepare(
-    `SELECT * FROM playout_jobs WHERE stream_id = ? AND status = 'running' ORDER BY start_at_utc DESC LIMIT 1`
+    `SELECT * FROM playout_jobs WHERE stream_id = ? AND status IN ('running','swapping') ORDER BY start_at_utc DESC LIMIT 1`
   ).get(stream.id) as any;
   const next = db.prepare(
     `SELECT * FROM playout_jobs WHERE stream_id = ? AND status = 'scheduled' AND start_at_utc > ? ORDER BY start_at_utc LIMIT 1`
@@ -39,7 +40,7 @@ function channelSummary(stream: any, nowMs: number) {
     `SELECT id, status, pid, last_error FROM overlay_jobs WHERE stream_id = ? AND status IN ('starting','running') LIMIT 1`
   ).get(stream.id) as any : null;
   const failures24h = db.prepare(
-    `SELECT COUNT(*) n FROM playout_jobs WHERE stream_id = ? AND status IN ('failed','skipped') AND created_at > datetime('now', '-1 day')`
+    `SELECT COUNT(*) n FROM playout_jobs WHERE stream_id = ? AND status IN ('failed','skipped','restore_failed','restore_unverified') AND created_at > datetime('now', '-1 day')`
   ).get(stream.id) as any;
 
   return {
@@ -102,7 +103,7 @@ router.get('/jobs/failures', authenticateToken, requireAdmin, (req, res) => {
   const playout = db.prepare(
     `SELECT 'playout' AS type, j.id, j.stream_id, s.name AS stream_name, j.status, j.last_error, j.start_at_utc AS at
      FROM playout_jobs j LEFT JOIN streams s ON s.id = j.stream_id
-     WHERE j.status IN ('failed','skipped') ORDER BY j.created_at DESC LIMIT ?`
+     WHERE j.status IN ('failed','skipped','restore_failed','restore_unverified') ORDER BY j.created_at DESC LIMIT ?`
   ).all(limit);
   const overlay = hasOverlayJobs() ? db.prepare(
     `SELECT 'overlay' AS type, j.id, j.stream_id, s.name AS stream_name, j.status, j.last_error, j.stopped_at AS at
