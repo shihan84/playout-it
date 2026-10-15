@@ -1,7 +1,7 @@
 # IBS Manager — Engineering Handoff
 
 Date: 2026-10-15
-Repo: `git@github.com:shihan84/playout-it.git` (branch `main`, HEAD `71edc95` — Phase 3 P0 docs)
+Repo: `git@github.com:shihan84/playout-it.git` (branch `main`, HEAD `71edc95` — Phase 3 P0 gap analysis)
 Scope: Flussonic Media Server management dashboard (React SPA + Express + SQLite)
 
 ## Progress Tracker
@@ -13,9 +13,9 @@ Scope: Flussonic Media Server management dashboard (React SPA + Express + SQLite
 | Phase 3 P0 — gap analysis | `docs/PHASE3_GAP_ANALYSIS.md` on main (`71edc95`) | ✅ Done |
 | Phase 3 P1 — scheduled playout | `feature/phase-3-scheduled-playout` → PR #5 | 🔄 In review |
 | Phase 3 P2 — logo/ticker overlay (ffmpeg) | `feature/phase-3-overlay-pipeline` → PR #6 | 🔄 In review |
-| Phase 3 P3 — broadcast monitoring | `feature/phase-3-monitoring` (stacked on P1) | ⏳ In progress |
-| Phase 3 P4 — ops dashboard UI | — | ⏳ Pending |
-| Phase 3 P5 — release readiness | — | ⏳ Pending |
+| Phase 3 P3 — broadcast monitoring | `feature/phase-3-monitoring` → PR #7 (stacked on P1) | 🔄 In review |
+| Phase 3 P4 — ops dashboard UI | `feature/phase-4-ops-dashboard` → PR #9 | 🔄 In review |
+| Phase 3 P5 — release readiness | `feature/phase-5-reliability` → PR #10 | 🔄 In review |
 
 Environment notes: FFmpeg present on this Windows host (`ffmpeg`/`ffprobe` on PATH, GPL build with drawtext+freetype). FS1/FS2 are **mock test servers** — their DNS failures are expected, not blockers.
 
@@ -26,18 +26,35 @@ Environment notes: FFmpeg present on this Windows host (`ffmpeg`/`ffprobe` on PA
 **Local deployment is LIVE on this Windows machine:**
 - `npm run dev` (`tsx server.ts`) running on `http://0.0.0.0:3000`
 - DB: `flussonic.db` (from `.env` `DATABASE_PATH`) — 47 streams (25 online), 10 VODs, 2 users, 3 servers
-- Watchdog 15s, auto-sync 60s
+- Watchdog 15s, auto-sync 60s; CDN-ITAssist sync healthy (`/` names allowed since PR #4)
 - Last verified backup: `C:\Users\LIVE PC\playout-it-backups\release-2026-10-15T11-31-04\` (integrity ok, outside repo)
 
-**Recently landed on main:**
-- `980b57c` — `isValidName` allows `/` in Flussonic stream names (real server uses `folder/stream`; 44/46 remote streams were being rejected). Merged via PR #4.
-- `4c50547` + `71edc95` — refreshed HANDOFF + Phase 3 gap analysis.
+
+**Phase 3 — all five milestones implemented, in stacked PRs (NOT merged):**
+
+| PR | Branch | Scope | Status |
+|---|---|---|---|
+| #5 | `feature/phase-3-scheduled-playout` | P1 scheduler (jobs, crash-safe swap+restore, `swapping`/`restore_unverified`, enable gate) | OPEN, CI green, review fixes in `1785897` |
+| #6 | `feature/phase-3-overlay-pipeline` | P2 ffmpeg logo/ticker → isolated output; URL/feedback/symlink guards; enable gate | OPEN, review fixes in `28658bc`+`0ea6e22` |
+| #7 | `feature/phase-3-monitoring` | P3 monitoring API; rebased on #5 tip, tracks new statuses | OPEN, stacked on #5 |
+| #8 | `docs/phase-3-p4-p5-plan` | P4/P5 planning doc | OPEN, independent |
+| #9 | `feature/phase-4-ops-dashboard` | P4 UI: playout editor, monitoring board, overlay editor | OPEN, stacked on #7 |
+| #10 | `feature/phase-5-reliability` | P5 reliability tests + runbook | OPEN, stacked on #9 |
+
+**Merge order when approved:** #5 → (retarget #7 to main) → #7 → #6 anytime → (retarget #9) → #9 → (retarget #10) → #10 → #8 anytime. See `docs/PHASE3_P5_RELIABILITY.md`.
+
+**Safety gates (both OFF by default — production channels cannot be armed accidentally):**
+- `settings.scheduler_enabled=1` or `SCHEDULER_ENABLED=1` — required before any input swap executes
+- `settings.overlay_enabled=1` or `OVERLAY_ENABLED=1` — required before any ffmpeg worker spawns
+- Logo files confined to `OVERLAY_ASSET_DIR` (default `<cwd>/assets/overlay`)
 
 **Open items for the operator:**
-1. Log in at localhost:3000 — new `JWT_SECRET` from deploy invalidated old sessions. Agent does not know the admin password.
-2. FS1/FS2 are mock test servers (`fs.local`/`fs2.local` DNS failures expected — not a blocker).
+1. Log in at localhost:3000 — new `JWT_SECRET` from deploy invalidated old sessions.
+2. `FS1`/`FS2` servers point at `fs.local`/`fs2.local` — dead DNS, expected mock failures. Decide: fix URLs or remove.
+3. GitHub token lacks `workflow` scope — CI on stacked-PR bases needs the manual `on:` trigger diff (see PR #5 comment or `.github/workflows/security-ci.yml`).
+4. Review + approve the PR stack; nothing merges without approval.
 
-**Architecture constraint:** single-process / single-writer. SQLite + process-local `inFlightCreations` lock in `routes/channels.ts`. No PM2 cluster, no multi-worker. See `docs/OPERATIONS_RECOVERY.md` for failure reconciliation.
+**Architecture constraint:** single-process / single-writer. SQLite + process-local locks. No PM2 cluster. See `docs/OPERATIONS_RECOVERY.md` + `docs/PHASE3_P5_RELIABILITY.md` for failure reconciliation and rollback.
 
 ---
 
