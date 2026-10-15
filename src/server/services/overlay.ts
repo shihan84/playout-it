@@ -45,7 +45,11 @@ export function overlayAssetDir(): string {
 
 function resolveLogoPathParts(logoPath: string) {
   const root = overlayAssetDir();
-  const resolved = path.resolve(root, logoPath);
+  // Normalize '\' to '/' so Windows-style traversal (..\..) is rejected on
+  // every platform — on POSIX, a literal backslash is a valid filename char
+  // and would otherwise slip past the containment check.
+  const normalized = logoPath.replace(/\\/g, '/');
+  const resolved = path.resolve(root, normalized);
   const inside = resolved === root || resolved.startsWith(root + path.sep);
   return { root, resolved, inside };
 }
