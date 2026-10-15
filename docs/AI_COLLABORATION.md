@@ -558,6 +558,13 @@ Branch `feature/phase-2-channel-lifecycle` off `main@38ce4ea`. All five mileston
 3. **Migration + backup/restore drill** — legacy DB (no lifecycle columns) migrated: `lifecycle_state` defaults to `live`, `channel_group` nullable, `stream_events`/`channel_templates`/`expires_at`/`max_sessions` added. VACUUM INTO backup, integrity check ok, file-copy restore produces identical data.
 4. **Single-process constraint** documented in `docs/DEPLOYMENT_CHECKLIST.md` (architecture section) and inline in `src/server/services/channels.ts`.
 
-**Final gate:** lint ✅ · **51/51 tests** ✅ · build 160.0 kB ✅ · audit 2 non-critical ✅
+### Channel safety fix (blocking review at 51db15f)
+1. **Pre-flight duplicate check** — `PUT /api/streams/:id` now checks both local DB (`SELECT ... WHERE server_id = ? AND name = ? AND id != ?`) and remote Flussonic (`GET /streams/{name}` → 404 required) before any remote changes. Returns 409 on collision.
+2. **No overwrite of preexisting channels** — pre-flight ensures the target name is free; compensation only deletes streams the current request created (confirmed by the successful pre-flight probe).
+3. **Cross-server move** — uses correct source server credentials for old-stream cleanup/restoration, destination server for new-stream creation.
+4. **Compensation safety** — if DB update fails after remote rename, restores old stream on the source server and deletes new stream on the destination server. Compensation failures are logged but best-effort (non-fatal).
+5. **Mock Flussonic stream inventory** — `remoteStreams` set tracks PUTs/DELETEs for realistic individual-stream GET probes (404 when absent, 200 when present).
+
+**Final gate:** lint ✅ · **52/52 tests** ✅ · build 161.0 kB ✅ · audit 2 non-critical ✅
 
 - `channel_group` stored and queryable via `/lifecycle` endpoint

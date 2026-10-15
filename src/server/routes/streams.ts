@@ -157,21 +157,51 @@ router.put('/:id', authenticateToken, requireAdmin, async (req, res) => {
     const stream = db.prepare('SELECT * FROM streams WHERE id = ?').get(req.params.id) as any;
     if (!stream) return res.status(404).json({ error: 'Stream not found' });
 
-    const server = db.prepare('SELECT * FROM servers WHERE id = ?').get(server_id) as any;
-    if (!server) return res.status(404).json({ error: 'Server not found' });
+    const dstServer = db.prepare('SELECT * FROM servers WHERE id = ?').get(server_id) as any;
+    if (!dstServer) return res.status(404).json({ error: 'Server not found' });
 
-    // Automatically create a VOD folder for this stream if it doesn't exist.
-    // resolveCompanionVodName keeps legacy same-name VODs working on upgrades.
-    const vodName = await resolveCompanionVodName(server, name);
+    // Resolve old (source) server — may differ from destination on cross-server moves
+    const srcServer = stream.server_id !== server_id
+      ? db.prepare('SELECT * FROM servers WHERE id = ?').get(stream.server_id) as any
+      : dstServer;
+
+    const isRename = stream.name !== name;
+    const isCrossServer = stream.server_id !== server_id;
+    const dstBaseUrl = dstServer.url.replace(/\/$/, '');
+
+    // ---- Pre-flight: reject collisions BEFORE any remote changes -----------
+    if (isRename || isCrossServer) {
+      // Local collision: another stream already owns this name on the destination server
+      const localDup = db.prepare(
+        'SELECT id FROM streams WHERE server_id = ? AND name = ? AND id != ?'
+      ).get(server_id, name, req.params.id) as any;
+      if (localDup) {
+        return res.status(409).json({ error: `Stream '${name}' already exists on this server (local)` });
+      }
+
+      // Remote collision: the name already exists on the destination Flussonic
+      const probeUrl = `${dstBaseUrl}/flussonic/api/v3/streams/${encodeURIComponent(name)}`;
+      try {
+        await flussonicRequest('GET', probeUrl, dstServer);
+        // 200 means the name is taken on Flussonic
+        return res.status(409).json({ error: `Stream '${name}' already exists on Flussonic` });
+      } catch (probeErr: any) {
+        if (probeErr.response?.status !== 404) {
+          // Unexpected error — fail closed
+          return res.status(502).json({ error: `Cannot verify target availability on Flussonic: ${probeErr.message}` });
+        }
+        // 404 = name is free — proceed
+      }
+    }
+
+    // ---- Companion VOD provisioning ----------------------------------------
+    const vodName = await resolveCompanionVodName(dstServer, name);
     const vodPath = `/storage/${vodName}`;
     const existingVod = db.prepare('SELECT * FROM vods WHERE name IN (?, ?) AND server_id = ?').get(vodName, name, server_id);
     if (!existingVod) {
-      const vodPayload = {
-        storages: [{ url: vodPath }]
-      };
-      const flussonicVodUrl = `${server.url}/flussonic/api/v3/vods/${encodeURIComponent(vodName)}`;
+      const flussonicVodUrl = `${dstBaseUrl}/flussonic/api/v3/vods/${encodeURIComponent(vodName)}`;
       try {
-        await flussonicRequest('PUT', flussonicVodUrl, server, vodPayload);
+        await flussonicRequest('PUT', flussonicVodUrl, dstServer, { storages: [{ url: vodPath }] });
       } catch (e: any) {
         console.warn('Flussonic create VOD error:', e.message);
         return res.status(502).json({ error: `Failed to create companion VOD on Flussonic: ${e.message}` });
@@ -179,53 +209,51 @@ router.put('/:id', authenticateToken, requireAdmin, async (req, res) => {
       db.prepare('INSERT INTO vods (server_id, name, paths) VALUES (?, ?, ?)').run(server_id, vodName, JSON.stringify([vodPath]));
     }
 
-    const flussonicUrl = `${server.url}/flussonic/api/v3/streams/${encodeURIComponent(name)}`;
-    const payload: any = {
-      name,
-      inputs: streamInputs
-    };
-    if (pushes.length > 0) {
-      payload.pushes = pushes;
-    }
+    // ---- Create new remote stream ------------------------------------------
+    const newStreamUrl = `${dstBaseUrl}/flussonic/api/v3/streams/${encodeURIComponent(name)}`;
+    const payload: any = { name, inputs: streamInputs };
+    if (pushes.length > 0) payload.pushes = pushes;
 
-    // Provision the new/renamed stream first — never delete the old remote
-    // stream until the replacement is confirmed working.
     try {
-      await flussonicRequest('PUT', flussonicUrl, server, payload);
+      await flussonicRequest('PUT', newStreamUrl, dstServer, payload);
     } catch (e: any) {
-      return res.status(502).json({ error: `Failed to update stream on Flussonic: ${e.message}` });
+      return res.status(502).json({ error: `Failed to create stream on Flussonic: ${e.message}` });
     }
 
-    // Safe cleanup: old remote stream is only deleted AFTER the new one is
-    // confirmed created. If the name didn't change, skip cleanup entirely.
-    const isRename = stream.name !== name;
-    if (isRename) {
-      const oldServer = db.prepare('SELECT * FROM servers WHERE id = ?').get(stream.server_id) as any;
-      if (oldServer) {
-        const oldFlussonicUrl = `${oldServer.url.replace(/\/$/, '')}/flussonic/api/v3/streams/${encodeURIComponent(stream.name)}`;
-        await flussonicRequest('DELETE', oldFlussonicUrl, oldServer)
-          .catch(e => console.warn('Flussonic cleanup of old stream (non-fatal):', e.message));
+    // ---- Clean up old remote stream (rename / cross-server) ----------------
+    // Only delete if name or server changed; use the SOURCE server credentials.
+    if (isRename || isCrossServer) {
+      if (srcServer) {
+        const srcBaseUrl = srcServer.url.replace(/\/$/, '');
+        const oldStreamUrl = `${srcBaseUrl}/flussonic/api/v3/streams/${encodeURIComponent(stream.name)}`;
+        await flussonicRequest('DELETE', oldStreamUrl, srcServer)
+          .catch(e => console.warn('[streams PUT] cleanup of old remote stream (non-fatal):', e.message));
       }
     }
 
+    // ---- Persist locally ---------------------------------------------------
     try {
-      const stmt = db.prepare('UPDATE streams SET server_id = ?, name = ?, inputs = ?, push_urls = ? WHERE id = ?');
-      stmt.run(server_id, name.trim(), JSON.stringify(inputs || []), JSON.stringify(push_urls || []), req.params.id);
+      db.prepare('UPDATE streams SET server_id = ?, name = ?, inputs = ?, push_urls = ? WHERE id = ?')
+        .run(server_id, name.trim(), JSON.stringify(inputs || []), JSON.stringify(push_urls || []), req.params.id);
     } catch (dbErr: any) {
-      // Local DB update failed after remote operations succeeded.
-      // Compensate: re-create the old remote stream and delete the new one
-      // so that the remote state matches the unchanged local row.
-      console.error('[streams PUT] DB update failed after remote rename — compensating:', dbErr.message);
-      if (isRename) {
-        const oldInputs = JSON.parse(stream.inputs || '[]').map((u: string) => ({ url: u }));
-        const oldPushes = JSON.parse(stream.push_urls || '[]').map((u: string) => ({ url: u }));
-        const oldPayload: any = { name: stream.name, inputs: oldInputs };
-        if (oldPushes.length > 0) oldPayload.pushes = oldPushes;
-        const oldUrl = `${server.url.replace(/\/$/, '')}/flussonic/api/v3/streams/${encodeURIComponent(stream.name)}`;
-        await flussonicRequest('PUT', oldUrl, server, oldPayload)
-          .catch(ce => console.error('[streams PUT] compensation: failed to restore old remote stream:', ce.message));
-        await flussonicRequest('DELETE', flussonicUrl, server)
-          .catch(ce => console.error('[streams PUT] compensation: failed to delete new remote stream:', ce.message));
+      // DB failed after remote ops — compensate by restoring old remote stream
+      // on the SOURCE server and deleting the NEW remote stream we just created
+      // (which passed the pre-flight probe, so we know we created it).
+      console.error('[streams PUT] DB update failed — compensating:', dbErr.message);
+      if (isRename || isCrossServer) {
+        if (srcServer) {
+          const srcBaseUrl = srcServer.url.replace(/\/$/, '');
+          const restoreUrl = `${srcBaseUrl}/flussonic/api/v3/streams/${encodeURIComponent(stream.name)}`;
+          const oldInputs = JSON.parse(stream.inputs || '[]').map((u: string) => ({ url: u }));
+          const oldPushes = JSON.parse(stream.push_urls || '[]').map((u: string) => ({ url: u }));
+          const restorePayload: any = { name: stream.name, inputs: oldInputs };
+          if (oldPushes.length > 0) restorePayload.pushes = oldPushes;
+          await flussonicRequest('PUT', restoreUrl, srcServer, restorePayload)
+            .catch(ce => console.error('[streams PUT] compensation: restore old stream failed:', ce.message));
+        }
+        // Delete the new stream we created (safe — pre-flight confirmed it didn't exist)
+        await flussonicRequest('DELETE', newStreamUrl, dstServer)
+          .catch(ce => console.error('[streams PUT] compensation: delete new stream failed:', ce.message));
       }
       return res.status(500).json({ error: `Database update failed: ${dbErr.message}` });
     }
