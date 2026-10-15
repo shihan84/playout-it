@@ -42,11 +42,21 @@ export const requireStreamAccess = (req: AuthRequest, res: express.Response, nex
 
   const assignment = db.prepare(
     'SELECT * FROM user_stream_assignments WHERE user_id = ? AND stream_id = ?'
-  ).get(req.user.id, streamId);
+  ).get(req.user.id, streamId) as any;
 
   if (!assignment) {
     return res.status(403).json({ error: 'Access denied to this stream.' });
   }
 
+  // Assignment expiry is enforced server-side (Phase 2 P2)
+  if (assignment.expires_at && new Date(assignment.expires_at).getTime() <= Date.now()) {
+    return res.status(403).json({ error: 'Stream assignment has expired.' });
+  }
+
   next();
 };
+
+// SQL predicate for "assignment still valid". Use with the appropriate table
+// alias — datetime() normalizes both ISO-8601 and SQLite timestamp formats.
+export const assignmentActiveSql = (alias: string) =>
+  `(${alias}.expires_at IS NULL OR datetime(${alias}.expires_at) > datetime('now'))`;

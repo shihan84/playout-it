@@ -454,14 +454,16 @@ export async function syncVodFilesFromRemote(vod: any, server: any) {
     `${baseUrl}/flussonic/api/v3/vods/${vod.name}/files`
   ];
 
-  let response;
+  let pages: any[] | null = null;
   let lastError;
 
   for (const url of urls) {
     try {
       console.log(`[syncVodFilesFromRemote] Trying URL: ${url}`);
-      response = await flussonicRequest('GET', url, server);
-      if (response && response.data) break;
+      // VOD file listings can have many more pages than stream/VOD
+      // collection endpoints — use a higher limit (500 vs default 50).
+      pages = await fetchAllPages(server, url, 500);
+      if (pages && pages.length > 0) break;
     } catch (e: any) {
       lastError = e;
       console.warn(`[syncVodFilesFromRemote] Failed for ${url}:`, e.message);
@@ -473,20 +475,23 @@ export async function syncVodFilesFromRemote(vod: any, server: any) {
     }
   }
 
-  if (!response) {
+  if (!pages || pages.length === 0) {
     throw lastError || new Error('Failed to fetch VOD files from any known endpoint');
   }
 
   try {
-    // Reject malformed responses BEFORE touching vod_files — an
-    // unrecognized shape must never be treated as "zero files".
-    let remoteFiles: any[];
-    if (Array.isArray(response.data)) {
-      remoteFiles = response.data;
-    } else if (response.data && Array.isArray(response.data.files)) {
-      remoteFiles = response.data.files;
-    } else {
-      throw new Error('Unrecognized VOD file listing response format');
+    // Collect files from all pages. Each page may be a raw array or an
+    // envelope with a `files` key. Reject any page with an unrecognized
+    // shape BEFORE touching vod_files.
+    const remoteFiles: any[] = [];
+    for (const pageData of pages) {
+      if (Array.isArray(pageData)) {
+        remoteFiles.push(...pageData);
+      } else if (pageData && Array.isArray(pageData.files)) {
+        remoteFiles.push(...pageData.files);
+      } else {
+        throw new Error('Unrecognized VOD file listing response format');
+      }
     }
 
     db.transaction(() => {

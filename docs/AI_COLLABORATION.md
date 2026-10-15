@@ -510,3 +510,83 @@ User requested consecutive development phases with Devin staging verification af
 **Residual risks (unchanged):** HTTPS/private path required for Flussonic Basic auth; explicit `JWT_SECRET` + admin provisioning required in production; pending/protected removals have no UI (Phase 2); backups need cron/PM2 scheduling; `qs` moderate DoS monitored; interval overrides may need watchdog restart.
 
 **Phase 2:** implementation branch `feature/phase-2-channel-lifecycle` prepared off merged `main`. Backlog + plan in `docs/PHASE2_CHANNEL_LIFECYCLE_HANDOFF.md`. **Code not started — awaiting scope approval.**
+
+## Devin status — Phase 2 P0–P5 implementation — 2026-10-14
+
+Branch `feature/phase-2-channel-lifecycle` off `main@38ce4ea`. All five milestones implemented and verified on mocks only.
+
+**P0 — Lifecycle state machine**
+- `streams.lifecycle_state` (default `live`), `stream_events` table (stream_id, from/to_state, actor_id, detail, created_at)
+- `src/server/services/lifecycle.ts`: `draft → provisioned → live ⇄ suspended → retired`; terminal `retired`; server-reachability required for provisioned/live; playlist channels require companion VOD for `live`
+- Endpoints: `POST /api/streams/:id/transition` (admin), `GET /api/streams/:id/lifecycle` (assigned/admin) — ordered events incl. creation + actor
+
+**P1 — Atomic channel creation** — `src/server/services/channels.ts` + `POST /api/channels`: pre-flight duplicate check (local DB + remote stream/vod/companion-VOD namespace), VOD-first provision with remote rollback on stream failure, transactional local insert. Fails closed on unreachable server (502).
+
+**P2 — Access enforcement** — `user_stream_assignments.expires_at` + `max_sessions`. Expiry enforced in `requireStreamAccess` (403 expired), `/api/streams`, `/api/my-streams`, WS scoping. `max_sessions` caps concurrent WS sockets (min over active assignments; close code 4409). `POST /api/users/:userId/streams` accepts both fields; `PATCH /api/users/:userId/streams/:streamId` updates them.
+
+**P3 — Bulk ops + templates** — `channel_templates` table + GET/POST/DELETE `/api/channels/templates`; `POST /api/channels/bulk` actions create/transition/delete, `template_id` expansion, bounded concurrency (4), ≤100 items, per-item results.
+
+**P4 — Health timeline** — watchdog records real status transitions into `stream_events` (actor NULL, `watchdog:` detail); unreachable-server offline marks recorded. Unknown baselines skipped to avoid noise.
+
+**P5 — OpenAPI audit** — `docs/FLUSSONIC_API_COMPATIBILITY.md`. Fixed: `stats.input_alive` not in spec → `stats.inputs[].active` fallback; `client_count` → `online_clients` preference. Documented: `storage` singular fallback is legacy-only; VOD file-list `next` pagination now followed (was single-page only); `config_on_disk` undocumented but optional.
+
+**Gate on branch:** lint ✅ · **50/50 tests** ✅ · build 158.3 kB ✅ · audit 2 non-critical ✅
+
+### Contract alignment fixes (post-rebase onto f4ae2e1)
+- Added `streams.channel_group TEXT` (nullable) — schema + migration + verified in legacy + fresh fixture tests
+- Concurrent conflicting transitions guarded: state re-read inside `db.transaction()` → 409 on race
+- Explicit tests: `provisioned→retired` ✅, `suspended→retired` ✅, same-state dup → 409, missing stream → 404
+- No remote side effects on suspend/retire: verified zero remote requests during `live→suspended→retired`
+
+### PR #3 review findings (contributor review at 4f0869b)
+1. **max_sessions semantics** — documented as dashboard (WS) session cap, not Flussonic playback sessions. `flussonic_sessions` field added to stream details for visibility. Flussonic playback limits must be configured on Flussonic directly.
+2. **Legacy POST/PUT /api/streams hardened** — remote Flussonic PUT failures now return 502; local rows are never created/updated on failure. POST also rolls back the companion VOD row + remote VOD when stream PUT fails. Regression tests verify no phantom records.
+3. **VOD file pagination** — `syncVodFilesFromRemote` now uses `fetchAllPages()` to follow `next` cursors. Previously only fetched a single page. Test verifies multi-page file collection.
+4. **Concurrent duplicate-name channel creation** — in-memory lock set serializes creations per server+name. Second concurrent request gets 409. Compensation never deletes preexisting resources (only rolls back what the current request created). UNIQUE index is the final safety net.
+5. **50-channel bulk test** — 50-item batch against mock Flussonic: all 50 succeed, 50 streams + 50 companion VODs verified in DB.
+
+### PR #3 follow-up review (contributor review at abea75f + CodeRabbit)
+1. **Safe rename ordering** — legacy PUT `/api/streams/:id` now provisions the new remote stream *before* deleting the old one. Failed rename preserves the original remote stream. Regression test verifies old remote stream survives a failed rename.
+2. **Single-writer deployment constraint** — `inFlightCreations` is process-local; documented in `DEPLOYMENT_CHECKLIST.md` and inline. SQLite itself requires single-writer, so this is consistent. UNIQUE index is the final safety net for any residual race.
+3. **CodeRabbit: rename ordering** — identical to finding 1; already fixed.
+4. **CodeRabbit: VOD file pagination limit** — increased from default 50 pages to 500 for file listings so large VOD libraries complete pagination.
+5. **CodeRabbit: max_sessions enforcement on existing WS** — `enforceMaxSessions()` now called after assignment create/update; closes excess sockets immediately with code 4409.
+
+### Final acceptance (PR #3)
+1. **Rename + DB failure compensation** — if the local DB UPDATE fails after a successful remote rename (e.g. UNIQUE constraint), compensation re-creates the old remote stream and deletes the new one. Regression test triggers UNIQUE violation and verifies compensation PUT/DELETE requests + local row preservation.
+2. **All 3 CodeRabbit threads resolved** — verified via GraphQL `isResolved: true` on all review threads.
+3. **Migration + backup/restore drill** — legacy DB (no lifecycle columns) migrated: `lifecycle_state` defaults to `live`, `channel_group` nullable, `stream_events`/`channel_templates`/`expires_at`/`max_sessions` added. VACUUM INTO backup, integrity check ok, file-copy restore produces identical data.
+4. **Single-process constraint** documented in `docs/DEPLOYMENT_CHECKLIST.md` (architecture section) and inline in `src/server/services/channels.ts`.
+
+### Channel safety fix (blocking review at 51db15f)
+1. **Pre-flight duplicate check** — `PUT /api/streams/:id` now checks both local DB (`SELECT ... WHERE server_id = ? AND name = ? AND id != ?`) and remote Flussonic (`GET /streams/{name}` → 404 required) before any remote changes. Returns 409 on collision.
+2. **No overwrite of preexisting channels** — pre-flight ensures the target name is free; compensation only deletes streams the current request created (confirmed by the successful pre-flight probe).
+3. **Cross-server move** — uses correct source server credentials for old-stream cleanup/restoration, destination server for new-stream creation.
+4. **Compensation safety** — if DB update fails after remote rename, restores old stream on the source server and deletes new stream on the destination server. Compensation failures are logged but best-effort (non-fatal).
+5. **Mock Flussonic stream inventory** — `remoteStreams` set tracks PUTs/DELETEs for realistic individual-stream GET probes (404 when absent, 200 when present).
+
+### Final safety verification (PR #3, commit 77fdebe+)
+1. **TOCTOU race handling** — if Flussonic returns 409/422 on the stream PUT (someone created it between our probe and PUT), treated as collision rather than generic failure. Companion VOD is preserved in this case (may belong to the other process).
+2. **Companion VOD orphan prevention** — if stream PUT fails after VOD provisioning succeeds, the VOD is deleted remotely and its local row removed.
+3. **Cross-server move** — two mocked Flussonic servers; verified PUT goes to destination, DELETE to source. Local `server_id` updated correctly.
+4. **Compensation logging** — failures now include stream name, server name, and recovery instructions (e.g. "manual cleanup needed: delete stream 'X' on server 'Y'").
+5. **Second mock Flussonic** — `remoteStreams2` set on port 36200 for cross-server move tests.
+
+### Release candidate (CodeRabbit round 3, commit 186e6e1+)
+1. **Name normalization** — `trimmedName` used everywhere (isRename, dup check, remote probe, payload, UPDATE) instead of mixing trimmed/untrimmed `name`.
+2. **Source DELETE moved after local UPDATE** — old remote stream is now only deleted after the local row is committed. DB failure only requires cleaning up the new remote stream (old one still intact). No restoration needed.
+3. **enforceMaxSessions on expires_at changes** — PATCH to assignment now reconciles WS sockets when either `max_sessions` or `expires_at` changes (cap may activate/deactivate via expiry).
+4. **VOD rollback** — already implemented in `186e6e1`; confirmed by CodeRabbit as correct pattern.
+
+### Release gate — final safety verification
+
+1. **Reconciliation procedures** documented in `docs/OPERATIONS_RECOVERY.md` — covers rename partial failure, VOD orphans, old-stream cleanup failure, channel creation rollback, WS session caps, and periodic reconciliation drill.
+2. **Old remote stream always recoverable** — with the final ordering (provision new → update local → delete old), the old remote stream is never touched until local state is committed. If cleanup fails, the stream is fully intact on the source server.
+3. **CodeRabbit round-3** — all 4 findings confirmed resolved by CodeRabbit auto-responses.
+4. **Gate verified** — 54/54 tests, lint clean, build 161.6 kB, audit 2 non-critical.
+5. **Migrations + backup** — verified on disposable DBs; legacy streams preserved, Phase 2 columns added, backup/restore intact.
+6. **Single-process constraint** — documented in `DEPLOYMENT_CHECKLIST.md` and inline in `channels.ts`.
+
+**Final gate:** lint ✅ · **54/54 tests** ✅ · build 161.6 kB ✅ · audit 2 non-critical ✅
+
+- `channel_group` stored and queryable via `/lifecycle` endpoint

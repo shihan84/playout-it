@@ -1,6 +1,16 @@
-# Deployment Checklist — Phase 1B
+# Deployment Checklist — Phase 2
 
 Run every item before pointing the app at production Flussonic servers.
+
+## Architecture constraint: single-writer process
+
+IBS Manager uses SQLite (single-writer by design) and in-memory locks for
+concurrent channel-creation serialization. **Run exactly one application
+process** — do NOT use PM2 cluster mode, multiple containers, or any
+multi-worker topology. If horizontal scaling is needed in the future, SQLite
+must be replaced with a networked database and the in-memory channel-creation
+lock must be replaced with a distributed claim (database advisory lock or
+similar).
 
 ## Pre-deploy
 

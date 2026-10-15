@@ -22,9 +22,25 @@ export const schema = `
     source_type TEXT DEFAULT 'unknown',
     uptime INTEGER DEFAULT 0,
     last_checked DATETIME,
+    lifecycle_state TEXT DEFAULT 'live',
+    channel_group TEXT,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY(server_id) REFERENCES servers(id) ON DELETE SET NULL
   );
+
+  CREATE TABLE IF NOT EXISTS stream_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    stream_id INTEGER NOT NULL,
+    from_state TEXT,
+    to_state TEXT NOT NULL,
+    actor_id INTEGER,
+    detail TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(stream_id) REFERENCES streams(id) ON DELETE CASCADE,
+    FOREIGN KEY(actor_id) REFERENCES users(id) ON DELETE SET NULL
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_stream_events_stream ON stream_events(stream_id, created_at);
 
   CREATE TABLE IF NOT EXISTS vods (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -71,6 +87,8 @@ export const schema = `
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     user_id INTEGER NOT NULL,
     stream_id INTEGER NOT NULL,
+    expires_at DATETIME,
+    max_sessions INTEGER,
     created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
     FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
     FOREIGN KEY(stream_id) REFERENCES streams(id) ON DELETE CASCADE,
@@ -98,6 +116,17 @@ export const schema = `
     FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
     FOREIGN KEY(stream_id) REFERENCES streams(id) ON DELETE CASCADE,
     UNIQUE(user_id, stream_id)
+  );
+
+  CREATE TABLE IF NOT EXISTS channel_templates (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    name TEXT NOT NULL UNIQUE,
+    inputs TEXT NOT NULL DEFAULT '[]',
+    push_urls TEXT NOT NULL DEFAULT '[]',
+    vod_path TEXT,
+    created_by INTEGER,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(created_by) REFERENCES users(id) ON DELETE SET NULL
   );
 
   CREATE TABLE IF NOT EXISTS telegram_alert_history (

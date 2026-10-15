@@ -24,6 +24,7 @@ import telegramWebhookRoutes from './src/server/routes/telegramWebhook';
 import metricsRoutes from './src/server/routes/metrics';
 import settingsRoutes from './src/server/routes/settings';
 import sslRoutes from './src/server/routes/ssl';
+import channelsRoutes from './src/server/routes/channels';
 
 const app = express();
 
@@ -50,6 +51,7 @@ app.use('/api/telegram/webhook', telegramWebhookRoutes);
 app.use('/api/settings', settingsRoutes);
 app.use('/api/servers', metricsRoutes);
 app.use('/api/ssl', sslRoutes);
+app.use('/api/channels', channelsRoutes);
 
 // Watchdog restart endpoint
 app.post('/api/watchdog/restart', authenticateToken, requireAdmin, (req, res) => {

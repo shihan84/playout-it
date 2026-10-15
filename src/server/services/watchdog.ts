@@ -3,6 +3,7 @@ import { config } from '../config';
 import { flussonicRequest, serverInBackoff } from './flussonic';
 import { syncServerStreams, syncServerVods } from './sync';
 import { sendTelegramNotification, dispatchStreamAlerts } from './telegram';
+import { recordStreamEvent } from './lifecycle';
 import { broadcastStreamsUpdate } from '../websocket';
 import { mapLimit } from '../utils/concurrency';
 
@@ -57,7 +58,10 @@ const checkStreams = async () => {
             const stats = remoteStream.stats;
             const isAlive = stats && stats.alive;
             newStatus = isAlive ? 'online' : 'offline';
-            newInputStatus = stats?.input_alive ? 'online' : 'offline';
+            // input_alive is not in the OpenAPI spec; per-input state lives
+            // under stats.inputs[].active. Keep input_alive for servers that
+            // do emit it, fall back to the documented field.
+            newInputStatus = (stats?.input_alive === true || stats?.inputs?.some((i: any) => i?.active === true)) ? 'online' : 'offline';
             newSourceType = stats?.source_type || 'unknown';
             newUptime = stats?.uptime || 0;
 
@@ -71,6 +75,15 @@ const checkStreams = async () => {
 
           // Notifications Consolidation
           const notifications: string[] = [];
+
+          // Health timeline (Phase 2 P4): persist real status transitions so
+          // the per-channel event history shows watchdog observations, not
+          // just admin lifecycle transitions. 'unknown' baselines are skipped
+          // to avoid a one-event-per-stream flood on first pass.
+          if (stream.status !== newStatus && stream.status !== 'unknown') {
+            recordStreamEvent(stream.id, stream.status, newStatus, null,
+              `watchdog: status ${stream.status} → ${newStatus} (input: ${stream.input_status} → ${newInputStatus}, source: ${stream.source_type} → ${newSourceType})`);
+          }
 
           if (stream.status !== newStatus && stream.status !== 'unknown') {
             const emoji = newStatus === 'online' ? '✅' : '❌';
@@ -142,6 +155,9 @@ const checkStreams = async () => {
 
           for (const stream of affectedStreams) {
             db.prepare('UPDATE streams SET status = ?, push_status = ?, last_checked = CURRENT_TIMESTAMP WHERE id = ?').run('offline', '[]', stream.id);
+            if (stream.status !== 'unknown' && stream.status !== 'offline') {
+              recordStreamEvent(stream.id, stream.status, 'offline', null, `watchdog: server '${server.name}' unreachable — marked offline`);
+            }
             hasUpdates = true;
           }
         }

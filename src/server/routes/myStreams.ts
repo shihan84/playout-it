@@ -24,6 +24,7 @@ router.get('/', authenticateToken, (req: AuthRequest, res) => {
     JOIN user_stream_assignments ON streams.id = user_stream_assignments.stream_id
     LEFT JOIN servers ON streams.server_id = servers.id
     WHERE user_stream_assignments.user_id = ?
+      AND (user_stream_assignments.expires_at IS NULL OR datetime(user_stream_assignments.expires_at) > datetime('now'))
   `).all(req.user.id);
 
   console.log('Client user, returning assigned streams:', streams.length);
