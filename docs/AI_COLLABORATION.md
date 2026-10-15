@@ -565,6 +565,13 @@ Branch `feature/phase-2-channel-lifecycle` off `main@38ce4ea`. All five mileston
 4. **Compensation safety** — if DB update fails after remote rename, restores old stream on the source server and deletes new stream on the destination server. Compensation failures are logged but best-effort (non-fatal).
 5. **Mock Flussonic stream inventory** — `remoteStreams` set tracks PUTs/DELETEs for realistic individual-stream GET probes (404 when absent, 200 when present).
 
-**Final gate:** lint ✅ · **52/52 tests** ✅ · build 161.0 kB ✅ · audit 2 non-critical ✅
+### Final safety verification (PR #3, commit 77fdebe+)
+1. **TOCTOU race handling** — if Flussonic returns 409/422 on the stream PUT (someone created it between our probe and PUT), treated as collision rather than generic failure. Companion VOD is preserved in this case (may belong to the other process).
+2. **Companion VOD orphan prevention** — if stream PUT fails after VOD provisioning succeeds, the VOD is deleted remotely and its local row removed.
+3. **Cross-server move** — two mocked Flussonic servers; verified PUT goes to destination, DELETE to source. Local `server_id` updated correctly.
+4. **Compensation logging** — failures now include stream name, server name, and recovery instructions (e.g. "manual cleanup needed: delete stream 'X' on server 'Y'").
+5. **Second mock Flussonic** — `remoteStreams2` set on port 36200 for cross-server move tests.
+
+**Final gate:** lint ✅ · **54/54 tests** ✅ · build 162.4 kB ✅ · audit 2 non-critical ✅
 
 - `channel_group` stored and queryable via `/lifecycle` endpoint

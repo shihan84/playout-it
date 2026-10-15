@@ -15,9 +15,13 @@ const TSX_CLI = path.join(process.cwd(), 'node_modules/tsx/dist/cli.mjs');
 
 // Minimal mock Flussonic v3 API. Records DELETE calls to assert unlink-only delete.
 let mockServer: any;
+let mockServer2: any;
 const remoteDeletes: string[] = [];
 const remoteRequests: string[] = [];
+const remoteDeletes2: string[] = [];
+const remoteRequests2: string[] = [];
 const remotePort = 36198;
+const remotePort2 = 36200; // must not collide with PORT (36199)
 // Test-controlled mock behavior: override GET /streams payload and add latency
 const mockBehavior = {
   streamsPayload: null as any,
@@ -34,7 +38,9 @@ const mockBehavior = {
   vodFilesNext: null as null | ((url: string) => string | null),
   // Simulated remote stream inventory — GET /streams/{name} returns 404
   // unless the name is in this set. PUTs add, DELETEs remove.
-  remoteStreams: new Set<string>()
+  remoteStreams: new Set<string>(),
+  // Second server inventory for cross-server move tests
+  remoteStreams2: new Set<string>()
 };
 
 let appProcess: any;
@@ -170,6 +176,33 @@ test.before(async () => {
   });
   await new Promise(r => mockServer.listen(remotePort, '127.0.0.1', r));
 
+  // Second mock Flussonic server for cross-server move tests
+  mockServer2 = createServer((req, res) => {
+    if (req.method === 'DELETE') remoteDeletes2.push(req.url || '');
+    remoteRequests2.push(`${req.method} ${req.url}`);
+    const streamNameMatch = (req.url || '').match(/\/flussonic\/api\/v3\/streams\/([^/?]+)$/);
+    if (streamNameMatch) {
+      const sName = decodeURIComponent(streamNameMatch[1]);
+      if (req.method === 'PUT') mockBehavior.remoteStreams2.add(sName);
+      if (req.method === 'DELETE') mockBehavior.remoteStreams2.delete(sName);
+    }
+    res.setHeader('Content-Type', 'application/json');
+    if (req.method === 'GET' && streamNameMatch) {
+      const sName = decodeURIComponent(streamNameMatch[1]);
+      if (!mockBehavior.remoteStreams2.has(sName)) {
+        res.statusCode = 404;
+        res.end(JSON.stringify({ error: 'not_found' }));
+      } else {
+        res.end(JSON.stringify({ name: sName }));
+      }
+    } else if (req.url?.includes('/config')) {
+      res.end(JSON.stringify({ stats: { total_clients: 0, uptime: 1 } }));
+    } else {
+      res.end(req.method === 'GET' ? '[]' : '{}');
+    }
+  });
+  await new Promise(r => mockServer2.listen(remotePort2, '127.0.0.1', r));
+
   // Spawn real app server in production mode (serves dist/, enforces JWT_SECRET requirement)
   appProcess = spawn(process.execPath, [TSX_CLI, 'server.ts'], {
     env: {
@@ -183,6 +216,8 @@ test.before(async () => {
     stdio: ['ignore', 'pipe', 'pipe'],
   });
   appProcess.stderr.on('data', d => process.stderr.write(`[app] ${d}`));
+  appProcess.stdout.on('data', d => process.stderr.write(`[app-out] ${d}`));
+  appProcess.on('exit', (code: any) => process.stderr.write(`[app] exited with code ${code}\n`));
 
   await waitForServer();
 
@@ -204,6 +239,7 @@ test.after(async () => {
     await Promise.race([exited, new Promise(r => setTimeout(r, 5000))]);
   }
   if (mockServer) await new Promise(r => mockServer.close(r));
+  if (mockServer2) await new Promise(r => mockServer2.close(r));
   for (let i = 0; i < 5; i++) {
     try { fs.rmSync(tmpDir, { recursive: true, force: true }); break; }
     catch { await new Promise(r => setTimeout(r, 500)); }
@@ -1643,4 +1679,110 @@ test('50-channel bulk create against mocks', async () => {
   const vodCount = (idb.prepare("SELECT COUNT(*) c FROM vods WHERE name LIKE 'bulk50-ch-%_vod' AND server_id = ?").get(server.id) as any).c;
   assert.equal(vodCount, 50, `50 companion VODs should exist in DB, got ${vodCount}`);
   idb.close();
+});
+
+test('cross-server move: uses correct source/destination servers for remote ops', async () => {
+  const { res: adminLogin } = await login('itadmin', 'it-admin-pass-12345');
+  const { token } = await adminLogin.json();
+  const headers = { authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+
+  // Create two servers pointing to different mock Flussonic instances
+  const mk1 = await fetch(`${BASE}/api/servers`, {
+    method: 'POST', headers,
+    body: JSON.stringify({ name: 'src-server', url: `http://127.0.0.1:${remotePort}`, username: 'u', password: 'p123456' })
+  });
+  const srcServer = await mk1.json();
+
+  const mk2 = await fetch(`${BASE}/api/servers`, {
+    method: 'POST', headers,
+    body: JSON.stringify({ name: 'dst-server', url: `http://127.0.0.1:${remotePort2}`, username: 'u', password: 'p123456' })
+  });
+  const dstServer = await mk2.json();
+
+  // Seed a stream on the source server
+  const idb = new Database(dbPath);
+  idb.prepare("INSERT INTO streams (server_id, name, live_url, playlist_url, inputs) VALUES (?, 'move-me', '', '', '[\"rtsp://src\"]')").run(srcServer.id);
+  const moveId = (idb.prepare("SELECT id FROM streams WHERE name = 'move-me'").get() as any).id;
+  idb.close();
+
+  // Simulate the stream existing on the source Flussonic
+  mockBehavior.remoteStreams.add('move-me');
+
+  // Clear trackers
+  remoteRequests.length = 0;
+  remoteDeletes.length = 0;
+  remoteRequests2.length = 0;
+  remoteDeletes2.length = 0;
+
+  // Move stream from src-server to dst-server (same name, different server_id)
+  const moveRes = await fetch(`${BASE}/api/streams/${moveId}`, {
+    method: 'PUT', headers,
+    body: JSON.stringify({ server_id: dstServer.id, name: 'move-me', inputs: ['rtsp://dst'] })
+  });
+  assert.equal(moveRes.status, 200, `cross-server move should succeed, got ${moveRes.status}: ${await moveRes.text()}`);
+
+  // Verify:
+  // 1. New stream created on DST server (mock2)
+  assert.ok(
+    remoteRequests2.some(u => u.startsWith('PUT') && u.includes('/streams/move-me')),
+    'new stream should be PUT on destination server'
+  );
+  assert.ok(mockBehavior.remoteStreams2.has('move-me'), 'stream should exist on dst server inventory');
+
+  // 2. Old stream deleted on SRC server (mock1)
+  assert.ok(
+    remoteDeletes.some(u => u.includes('move-me')),
+    'old stream should be deleted on source server'
+  );
+
+  // 3. Local row updated to point to dst server
+  const db2 = new Database(dbPath);
+  const moved = db2.prepare('SELECT server_id, name FROM streams WHERE id = ?').get(moveId) as any;
+  assert.equal(moved.server_id, dstServer.id, 'local row should point to destination server');
+  db2.close();
+
+  mockBehavior.remoteStreams.delete('move-me');
+  mockBehavior.remoteStreams2.delete('move-me');
+});
+
+test('companion VOD is cleaned up when stream creation fails after VOD provisioning', async () => {
+  const { res: adminLogin } = await login('itadmin', 'it-admin-pass-12345');
+  const { token } = await adminLogin.json();
+  const headers = { authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+
+  const mk = await fetch(`${BASE}/api/servers`, {
+    method: 'POST', headers,
+    body: JSON.stringify({ name: 'mock-vod-rollback', url: `http://127.0.0.1:${remotePort}`, username: 'u', password: 'p123456' })
+  });
+  const server = await mk.json();
+
+  // Seed a stream
+  const idb = new Database(dbPath);
+  idb.prepare("INSERT INTO streams (server_id, name, live_url, playlist_url, inputs) VALUES (?, 'vod-rb-src', '', '', '[\"rtsp://x\"]')").run(server.id);
+  const sId = (idb.prepare("SELECT id FROM streams WHERE name = 'vod-rb-src'").get() as any).id;
+  idb.close();
+
+  // Pre-flight will pass (vod-rb-new doesn't exist on mock), VOD will be
+  // created, then stream PUT will fail.
+  mockBehavior.failPut = /\/streams\/vod-rb-new/;
+  remoteDeletes.length = 0;
+  const res = await fetch(`${BASE}/api/streams/${sId}`, {
+    method: 'PUT', headers,
+    body: JSON.stringify({ server_id: server.id, name: 'vod-rb-new', inputs: ['rtsp://y'] })
+  });
+  mockBehavior.failPut = null;
+
+  assert.equal(res.status, 502, 'should fail on remote error');
+
+  // Companion VOD should have been cleaned up remotely
+  const vodDeleted = remoteDeletes.some(u => u.includes('vod-rb-new_vod'));
+  assert.ok(vodDeleted, `companion VOD should be deleted on stream PUT failure, but no DELETE for vod-rb-new_vod found in: ${remoteDeletes.join(', ')}`);
+
+  // Local state: stream unchanged, no orphaned VOD
+  const db2 = new Database(dbPath);
+  const s = db2.prepare('SELECT name FROM streams WHERE id = ?').get(sId) as any;
+  assert.equal(s.name, 'vod-rb-src', 'stream name must not change');
+  const orphanVod = db2.prepare("SELECT id FROM vods WHERE name = 'vod-rb-new_vod' AND server_id = ?").get(server.id);
+  assert.ok(!orphanVod, 'no orphaned VOD row should remain in local DB');
+  db2.close();
 });

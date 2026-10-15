@@ -198,6 +198,7 @@ router.put('/:id', authenticateToken, requireAdmin, async (req, res) => {
     const vodName = await resolveCompanionVodName(dstServer, name);
     const vodPath = `/storage/${vodName}`;
     const existingVod = db.prepare('SELECT * FROM vods WHERE name IN (?, ?) AND server_id = ?').get(vodName, name, server_id);
+    let vodCreated = false;
     if (!existingVod) {
       const flussonicVodUrl = `${dstBaseUrl}/flussonic/api/v3/vods/${encodeURIComponent(vodName)}`;
       try {
@@ -207,6 +208,7 @@ router.put('/:id', authenticateToken, requireAdmin, async (req, res) => {
         return res.status(502).json({ error: `Failed to create companion VOD on Flussonic: ${e.message}` });
       }
       db.prepare('INSERT INTO vods (server_id, name, paths) VALUES (?, ?, ?)').run(server_id, vodName, JSON.stringify([vodPath]));
+      vodCreated = true;
     }
 
     // ---- Create new remote stream ------------------------------------------
@@ -217,6 +219,24 @@ router.put('/:id', authenticateToken, requireAdmin, async (req, res) => {
     try {
       await flussonicRequest('PUT', newStreamUrl, dstServer, payload);
     } catch (e: any) {
+      // If Flussonic returns 409/422 — the name was taken between our probe and
+      // this PUT (TOCTOU race). Treat it as a collision, not a generic failure.
+      if (e.response?.status === 409 || e.response?.status === 422) {
+        // Another process created it between our probe and PUT — do NOT
+        // delete the VOD (it may belong to the other stream's creation)
+        return res.status(409).json({
+          error: `Stream '${name}' was created on Flussonic by another process during this request (TOCTOU race)`
+        });
+      }
+      // Clean up companion VOD we just created — don't leave orphaned resources
+      if (vodCreated) {
+        const vodUrl = `${dstBaseUrl}/flussonic/api/v3/vods/${encodeURIComponent(vodName)}`;
+        await flussonicRequest('DELETE', vodUrl, dstServer)
+          .catch(ce => console.error('[streams PUT] rollback: failed to delete companion VOD:', ce.message));
+        try {
+          db.prepare('DELETE FROM vods WHERE server_id = ? AND name = ?').run(server_id, vodName);
+        } catch (_) { /* best-effort */ }
+      }
       return res.status(502).json({ error: `Failed to create stream on Flussonic: ${e.message}` });
     }
 
@@ -239,7 +259,10 @@ router.put('/:id', authenticateToken, requireAdmin, async (req, res) => {
       // DB failed after remote ops — compensate by restoring old remote stream
       // on the SOURCE server and deleting the NEW remote stream we just created
       // (which passed the pre-flight probe, so we know we created it).
-      console.error('[streams PUT] DB update failed — compensating:', dbErr.message);
+      console.error(
+        `[streams PUT] DB update failed for stream id=${req.params.id} ` +
+        `old='${stream.name}' new='${name}' — compensating: ${dbErr.message}`
+      );
       if (isRename || isCrossServer) {
         if (srcServer) {
           const srcBaseUrl = srcServer.url.replace(/\/$/, '');
@@ -249,13 +272,26 @@ router.put('/:id', authenticateToken, requireAdmin, async (req, res) => {
           const restorePayload: any = { name: stream.name, inputs: oldInputs };
           if (oldPushes.length > 0) restorePayload.pushes = oldPushes;
           await flussonicRequest('PUT', restoreUrl, srcServer, restorePayload)
-            .catch(ce => console.error('[streams PUT] compensation: restore old stream failed:', ce.message));
+            .then(() => console.log(`[streams PUT] compensation: restored '${stream.name}' on source server`))
+            .catch(ce => console.error(
+              `[streams PUT] compensation FAILED: could not restore '${stream.name}' on source server. ` +
+              `Manual recovery needed: re-create stream '${stream.name}' on server '${srcServer.name}' ` +
+              `or restore from DB backup. Error: ${ce.message}`
+            ));
         }
         // Delete the new stream we created (safe — pre-flight confirmed it didn't exist)
         await flussonicRequest('DELETE', newStreamUrl, dstServer)
-          .catch(ce => console.error('[streams PUT] compensation: delete new stream failed:', ce.message));
+          .then(() => console.log(`[streams PUT] compensation: deleted '${name}' on destination server`))
+          .catch(ce => console.error(
+            `[streams PUT] compensation FAILED: could not delete '${name}' on destination server. ` +
+            `Manual cleanup needed: delete stream '${name}' on server '${dstServer.name}'. ` +
+            `Error: ${ce.message}`
+          ));
       }
-      return res.status(500).json({ error: `Database update failed: ${dbErr.message}` });
+      return res.status(500).json({
+        error: `Database update failed: ${dbErr.message}`,
+        detail: 'Remote compensation attempted — check server logs for manual recovery steps if needed.'
+      });
     }
 
     broadcastStreamsUpdate();
