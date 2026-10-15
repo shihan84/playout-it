@@ -129,6 +129,48 @@ export const schema = `
     FOREIGN KEY(created_by) REFERENCES users(id) ON DELETE SET NULL
   );
 
+  CREATE TABLE IF NOT EXISTS overlay_profiles (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    stream_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    logo_path TEXT,
+    logo_position TEXT DEFAULT 'tr',
+    logo_x INTEGER DEFAULT 10,
+    logo_y INTEGER DEFAULT 10,
+    logo_width INTEGER DEFAULT 0,
+    logo_opacity REAL DEFAULT 1.0,
+    ticker_enabled INTEGER DEFAULT 0,
+    ticker_text TEXT,
+    ticker_speed INTEGER DEFAULT 100,
+    ticker_position TEXT DEFAULT 'bottom',
+    ticker_font_size INTEGER DEFAULT 28,
+    ticker_color TEXT DEFAULT 'white',
+    ticker_bg_color TEXT DEFAULT 'black@0.5',
+    output_stream TEXT,
+    output_url TEXT,
+    enabled INTEGER DEFAULT 1,
+    created_by INTEGER,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(stream_id) REFERENCES streams(id) ON DELETE CASCADE,
+    FOREIGN KEY(created_by) REFERENCES users(id) ON DELETE SET NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS overlay_jobs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    profile_id INTEGER NOT NULL,
+    stream_id INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'starting',
+    pid INTEGER,
+    exit_code INTEGER,
+    last_error TEXT,
+    started_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    stopped_at DATETIME,
+    FOREIGN KEY(profile_id) REFERENCES overlay_profiles(id) ON DELETE CASCADE,
+    FOREIGN KEY(stream_id) REFERENCES streams(id) ON DELETE CASCADE
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_overlay_jobs_stream ON overlay_jobs(stream_id, status);
+
   CREATE TABLE IF NOT EXISTS telegram_alert_history (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     telegram_alert_id INTEGER NOT NULL,
