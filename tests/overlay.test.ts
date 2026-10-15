@@ -9,8 +9,9 @@ const tmpDb = path.join(os.tmpdir(), `overlay-test-${process.pid}-${Date.now()}.
 process.env.DATABASE_PATH = tmpDb;
 process.env.JWT_SECRET = process.env.JWT_SECRET || 'overlay-test-secret-0123456789abcdef';
 
-const { buildArgs, validateProfileSpec, escapeDrawtext, OverlayError } =
+const { buildArgs, validateProfileSpec, escapeDrawtext, OverlayError, startOverlay } =
   await import('../src/server/services/overlay');
+const { db } = await import('../src/server/db');
 
 test('buildArgs: logo overlay composes scale/alpha/position correctly', () => {
   const args = buildArgs({
@@ -65,4 +66,32 @@ test('validateProfileSpec accepts a full valid profile', () => {
   assert.equal(p.logo_position, 'bl');
   assert.equal(p.ticker_position, 'top');
   assert.equal(p.output_stream, 'news_ovr');
+});
+
+// startOverlay policy ordering: isolation + recursion must reject (409)
+// regardless of whether ffmpeg is installed. Uses the disposable temp DB.
+function seedStream(name: string) {
+  db.prepare("INSERT OR IGNORE INTO servers (id, name, url, api_key) VALUES (1, 't', 'http://x', 'u:p')").run();
+  db.prepare("INSERT INTO streams (server_id, name, live_url, playlist_url) VALUES (1, ?, '', '')").run(name);
+  return (db.prepare('SELECT id FROM streams WHERE name = ?').get(name) as any).id;
+}
+
+test('startOverlay rejects self-targeting output before capability check', async () => {
+  const sid = seedStream('selft');
+  const pid = db.prepare(
+    "INSERT INTO overlay_profiles (stream_id, name, output_stream) VALUES (?, 'self', 'selft')"
+  ).run(sid).lastInsertRowid;
+  await assert.rejects(() => startOverlay(Number(pid)), (e: any) => e.status === 409 && /isolated/.test(e.message));
+});
+
+test('startOverlay rejects A->B / B->A recursion cycles', async () => {
+  const aId = seedStream('cyc-a');
+  const bId = seedStream('cyc-b');
+  // Profile on B outputs to A (explicit output_stream).
+  db.prepare("INSERT INTO overlay_profiles (stream_id, name, output_stream) VALUES (?, 'b-to-a', 'cyc-a')").run(bId);
+  // Profile on A wants to output to B -> would close the loop.
+  const pid = db.prepare(
+    "INSERT INTO overlay_profiles (stream_id, name, output_stream) VALUES (?, 'a-to-b', 'cyc-b')"
+  ).run(aId).lastInsertRowid;
+  await assert.rejects(() => startOverlay(Number(pid)), (e: any) => e.status === 409 && /[Rr]ecursive/.test(e.message));
 });

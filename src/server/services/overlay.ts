@@ -3,11 +3,11 @@ import { execSync } from 'child_process';
 import { db } from '../db';
 import { recordStreamEvent } from './lifecycle';
 
-// Phase 3 P2 â Logo & ticker overlay pipeline.
+// Phase 3 P2 -- Logo & ticker overlay pipeline.
 //
 // Model: one ffmpeg worker per active overlay profile. The worker pulls the
 // channel's playable output (streams.live_url), applies logo + ticker filters,
-// and publishes to a SEPARATE output stream â the source channel is never
+// and publishes to a SEPARATE output stream -- the source channel is never
 // touched. Isolated-test-stream safety is enforced: output_stream must differ
 // from the source stream name unless output_url is given explicitly.
 //
@@ -61,11 +61,11 @@ export function validateProfileSpec(body: any) {
   if (!POSITIONS.includes(logoPosition)) throw new OverlayError(`logo_position must be one of ${POSITIONS.join(', ')}`);
 
   const opacity = Number(body.logo_opacity ?? 1);
-  if (Number.isNaN(opacity) || opacity < 0 || opacity > 1) throw new OverlayError('logo_opacity must be 0â1');
+  if (Number.isNaN(opacity) || opacity < 0 || opacity > 1) throw new OverlayError('logo_opacity must be 0-1');
 
   const lx = Number(body.logo_x ?? 10), ly = Number(body.logo_y ?? 10), lw = Number(body.logo_width ?? 0);
   if (![lx, ly, lw].every(n => Number.isInteger(n) && n >= 0 && n <= 10000)) {
-    throw new OverlayError('logo_x / logo_y / logo_width must be integers 0â10000');
+    throw new OverlayError('logo_x / logo_y / logo_width must be integers 0-10000');
   }
 
   const tickerEnabled = body.ticker_enabled ? 1 : 0;
@@ -74,10 +74,10 @@ export function validateProfileSpec(body: any) {
   if (tickerText && tickerText.length > 2000) throw new OverlayError('ticker_text max 2000 chars');
 
   const speed = Number(body.ticker_speed ?? 100);
-  if (!Number.isInteger(speed) || speed < 1 || speed > 2000) throw new OverlayError('ticker_speed must be 1â2000 px/s');
+  if (!Number.isInteger(speed) || speed < 1 || speed > 2000) throw new OverlayError('ticker_speed must be 1-2000 px/s');
 
   const fontSize = Number(body.ticker_font_size ?? 28);
-  if (!Number.isInteger(fontSize) || fontSize < 8 || fontSize > 200) throw new OverlayError('ticker_font_size must be 8â200');
+  if (!Number.isInteger(fontSize) || fontSize < 8 || fontSize > 200) throw new OverlayError('ticker_font_size must be 8-200');
 
   for (const [key, val, def] of [
     ['ticker_color', body.ticker_color, 'white'],
@@ -140,7 +140,7 @@ function logoOverlayExpr(p: any): string {
   }[pos as string] || `${mx}:${my}`;
 }
 
-// Build the ffmpeg arg list for a profile. Pure function â unit-testable.
+// Build the ffmpeg arg list for a profile. Pure function -- unit-testable.
 export function buildArgs(profile: any, inputUrl: string, outputUrl: string): string[] {
   const args = ['-hide_banner', '-loglevel', 'warning', '-re', '-i', inputUrl];
   const filters: string[] = [];
@@ -203,9 +203,8 @@ export function runningJobs() {
 }
 
 export async function startOverlay(profileId: number): Promise<any> {
-  if (!detectFfmpeg()) {
-    throw new OverlayError('ffmpeg not found on PATH (set FFMPEG_PATH). Overlay rendering requires FFmpeg.', 503);
-  }
+  // Policy validation runs BEFORE the ffmpeg capability check -- a 409
+  // isolation violation must be reported even when ffmpeg is absent.
   const profile = db.prepare('SELECT * FROM overlay_profiles WHERE id = ?').get(profileId) as any;
   if (!profile) throw new OverlayError('Profile not found', 404);
   if (!profile.enabled) throw new OverlayError('Profile is disabled', 409);
@@ -218,15 +217,33 @@ export async function startOverlay(profileId: number): Promise<any> {
   const outputName = profile.output_stream || `${stream.name}_ovr`;
   if (outputName === stream.name && !profile.output_url) {
     throw new OverlayError(
-      `output_stream '${outputName}' equals the source stream â overlay output must be an isolated stream. ` +
+      `output_stream '${outputName}' equals the source stream -- overlay output must be an isolated stream. ` +
       `Set output_stream (e.g. '${stream.name}_ovr') or an explicit output_url.`, 409);
+  }
+
+  // Recursion guard: reject a cycle where our OUTPUT stream is itself the
+  // source of an enabled profile whose output resolves back to this stream
+  // (A -> B plus B -> A would loop the ffmpeg pipelines indefinitely).
+  const backedge = db.prepare(
+    `SELECT p.id FROM overlay_profiles p JOIN streams s2 ON s2.id = p.stream_id
+     WHERE s2.name = ? AND p.enabled = 1
+       AND (p.output_stream = ? OR (p.output_stream IS NULL AND ? = s2.name || '_ovr'))`
+  ).get(outputName, stream.name, stream.name) as any;
+  if (backedge) {
+    throw new OverlayError(
+      `Recursive overlay rejected: '${outputName}' already sources an overlay outputting to '${stream.name}'. ` +
+      `Chained overlays must not form cycles.`, 409);
+  }
+
+  if (!detectFfmpeg()) {
+    throw new OverlayError('ffmpeg not found on PATH (set FFMPEG_PATH). Overlay rendering requires FFmpeg.', 503);
   }
 
   const running = db.prepare(
     `SELECT COUNT(*) n FROM overlay_jobs WHERE stream_id = ? AND status IN ('starting','running')`
   ).get(stream.id) as any;
   if (running.n >= MAX_PER_STREAM) {
-    throw new OverlayError('An overlay job is already running for this stream â stop it first', 409);
+    throw new OverlayError('An overlay job is already running for this stream -- stop it first', 409);
   }
 
   const inputUrl = stream.live_url || (server ? `${server.url.replace(/\/$/, '')}/${encodeURIComponent(stream.name)}/index.m3u8` : null);
@@ -260,7 +277,7 @@ export async function startOverlay(profileId: number): Promise<any> {
   });
   proc.on('exit', (code: any) => {
     const cur = db.prepare('SELECT status FROM overlay_jobs WHERE id = ?').get(jobId) as any;
-    // 'stopped' means we asked it to stop â don't overwrite deliberate stops.
+    // 'stopped' means we asked it to stop -- don't overwrite deliberate stops.
     if (cur && cur.status !== 'stopped') {
       db.prepare(`UPDATE overlay_jobs SET status=?, exit_code=?, last_error=?, stopped_at=CURRENT_TIMESTAMP WHERE id=?`)
         .run(code === 0 ? 'completed' : 'exited', code, code === 0 ? null : (stderrTail.slice(-1000) || `exit code ${code}`), jobId);
@@ -293,7 +310,7 @@ export function stopOverlay(jobId: number): boolean {
 }
 
 // On boot, any job left 'running'/'starting' is dead (process state is
-// process-local) â mark them so the dashboard reflects reality.
+// process-local) -- mark them so the dashboard reflects reality.
 export function recoverOverlayJobs() {
   const r = db.prepare(
     `UPDATE overlay_jobs SET status='exited', last_error='process lost on application restart', stopped_at=CURRENT_TIMESTAMP
