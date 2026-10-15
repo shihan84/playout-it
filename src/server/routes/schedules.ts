@@ -97,7 +97,7 @@ router.post('/:id/jobs', authenticateToken, requireAdmin, (req: AuthRequest, res
 router.delete('/jobs/:jobId', authenticateToken, requireAdmin, (req, res) => {
   const job = db.prepare('SELECT * FROM playout_jobs WHERE id = ?').get(req.params.jobId) as any;
   if (!job) return res.status(404).json({ error: 'Job not found' });
-  if (!['scheduled', 'skipped', 'completed', 'failed'].includes(job.status)) {
+  if (!['scheduled', 'skipped', 'completed', 'failed', 'restore_failed'].includes(job.status)) {
     return res.status(409).json({ error: `Cannot cancel a job in status '${job.status}'` });
   }
   db.prepare(`UPDATE playout_jobs SET status = 'cancelled' WHERE id = ? AND status != 'running'`).run(job.id);

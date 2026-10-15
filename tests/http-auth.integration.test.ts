@@ -212,6 +212,7 @@ test.before(async () => {
       DATABASE_PATH: dbPath,
       JWT_SECRET: 'test-secret-key-for-integration-tests-only-0123456789',
       SCHEDULER_TICK_MS: '400',
+      SCHEDULER_ENABLED: '1',
     },
     cwd: process.cwd(),
     stdio: ['ignore', 'pipe', 'pipe'],

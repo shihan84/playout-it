@@ -170,24 +170,38 @@ async function executeJob(job: any) {
     `playout job #${job.id} started: inputs -> ${JSON.stringify(inputs.map(i => i.url))}`);
 }
 
-async function restoreJob(job: any) {
+async function restoreJob(job: any): Promise<boolean> {
   const stream = db.prepare('SELECT * FROM streams WHERE id = ?').get(job.stream_id) as any;
   const server = stream?.server_id ? db.prepare('SELECT * FROM servers WHERE id = ?').get(stream.server_id) as any : null;
   const previous = normalizeInputs(job.previous_inputs ? JSON.parse(job.previous_inputs) : []);
-  if (!stream || !server || previous.length === 0) return; // nothing restorable — job still completes
+  if (!stream || !server || previous.length === 0) return true; // nothing restorable — job completes cleanly
   try {
     await swapStreamInputs(stream, server, previous);
     db.prepare('UPDATE streams SET inputs = ? WHERE id = ?').run(JSON.stringify(previous.map(i => i.url)), stream.id);
     recordStreamEvent(stream.id, stream.lifecycle_state, stream.lifecycle_state, null,
       `playout job #${job.id} completed: inputs restored`);
+    return true;
   } catch (e: any) {
-    // Restore is best-effort — do not rethrow; the job ends regardless and the
-    // failure is surfaced via last_error + a stream event for the operator.
+    // Restore is best-effort — the job ends regardless, but the failure is
+    // surfaced via a DISTINCT status ('restore_failed') + last_error + a
+    // stream event so operators can find channels needing manual repair.
     recordStreamEvent(stream.id, stream.lifecycle_state, stream.lifecycle_state, null,
       `playout job #${job.id} ended but input restore FAILED: ${e.message} — manual check required on server '${server.name}'`);
     db.prepare('UPDATE playout_jobs SET last_error = ? WHERE id = ?')
       .run(`restore failed: ${e.message} (manual check required)`, job.id);
+    return false;
   }
+}
+
+// The scheduler is DISABLED by default — it performs input swaps against
+// real Flussonic servers, so it must be explicitly armed. Enable via
+// settings.scheduler_enabled = '1' or the SCHEDULER_ENABLED=1 env var.
+// This prevents accidental execution against production channels (e.g.
+// CDN-ITAssist) when the feature ships.
+export function schedulerEnabled(): boolean {
+  const s = db.prepare("SELECT value FROM settings WHERE key = 'scheduler_enabled'").get() as any;
+  if (s) return s.value === '1';
+  return process.env.SCHEDULER_ENABLED === '1';
 }
 
 export function recoverOnBoot() {
@@ -209,13 +223,15 @@ export function recoverOnBoot() {
 export async function tick() {
   const now = new Date().toISOString();
 
-  // 1. Complete running/'ending' jobs past their window.
+  // 1. Complete running/'ending' jobs past their window. A restore failure
+  //    leaves the job in 'restore_failed' so monitoring can flag channels
+  //    still airing scheduled inputs past their intended end.
   const ending = db.prepare(
     `SELECT * FROM playout_jobs WHERE status IN ('running', 'ending') AND end_at_utc <= ?`
   ).all(now) as any[];
   for (const job of ending) {
-    await restoreJob(job);
-    db.prepare(`UPDATE playout_jobs SET status = 'completed' WHERE id = ?`).run(job.id);
+    const restored = await restoreJob(job);
+    db.prepare(`UPDATE playout_jobs SET status = ? WHERE id = ?`).run(restored ? 'completed' : 'restore_failed', job.id);
   }
 
   // 2. Expire scheduled jobs whose window has fully elapsed.
@@ -244,10 +260,14 @@ export async function tick() {
 }
 
 export function startScheduler(intervalMs = TICK_MS) {
+  if (!schedulerEnabled()) {
+    console.log('[scheduler] disabled — set settings.scheduler_enabled=1 or SCHEDULER_ENABLED=1 to arm playout execution');
+    return;
+  }
   recoverOnBoot();
   tick().catch(e => console.error('[scheduler] initial tick failed:', e.message));
   tickTimer = setInterval(() => {
-    if (isTicking) return;
+    if (isTicking || !schedulerEnabled()) return;
     isTicking = true;
     tick().catch(e => console.error('[scheduler] tick failed:', e.message))
       .finally(() => { isTicking = false; });
