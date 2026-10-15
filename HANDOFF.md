@@ -1,8 +1,23 @@
 # IBS Manager — Engineering Handoff
 
 Date: 2026-10-15
-Repo: `git@github.com:shihan84/playout-it.git` (branch `main`, HEAD `11e9963` — Phase 2 merge, PR #3)
+Repo: `git@github.com:shihan84/playout-it.git` (branch `main`, HEAD `71edc95` — Phase 3 P0 docs)
 Scope: Flussonic Media Server management dashboard (React SPA + Express + SQLite)
+
+## Progress Tracker
+
+| Milestone | Branch / PR | Status |
+|---|---|---|
+| Phase 2 — channel lifecycle | merged `11e9963` (PR #3) | ✅ Live locally |
+| Sync `/`-name fix | merged `0cd73e7` (PR #4) | ✅ Live locally |
+| Phase 3 P0 — gap analysis | `docs/PHASE3_GAP_ANALYSIS.md` on main (`71edc95`) | ✅ Done |
+| Phase 3 P1 — scheduled playout | `feature/phase-3-scheduled-playout` → PR #5 | 🔄 In review |
+| Phase 3 P2 — logo/ticker overlay (ffmpeg) | `feature/phase-3-overlay-pipeline` → PR #6 | 🔄 In review |
+| Phase 3 P3 — broadcast monitoring | `feature/phase-3-monitoring` (stacked on P1) | ⏳ In progress |
+| Phase 3 P4 — ops dashboard UI | — | ⏳ Pending |
+| Phase 3 P5 — release readiness | — | ⏳ Pending |
+
+Environment notes: FFmpeg present on this Windows host (`ffmpeg`/`ffprobe` on PATH, GPL build with drawtext+freetype). FS1/FS2 are **mock test servers** — their DNS failures are expected, not blockers.
 
 ---
 
@@ -14,13 +29,13 @@ Scope: Flussonic Media Server management dashboard (React SPA + Express + SQLite
 - Watchdog 15s, auto-sync 60s
 - Last verified backup: `C:\Users\LIVE PC\playout-it-backups\release-2026-10-15T11-31-04\` (integrity ok, outside repo)
 
-**Uncommitted change in working tree:**
-- `src/server/services/sync.ts` — `isValidName` now allows `/` in Flussonic stream names (real server uses `folder/stream` names like `meemtv/meemtv`; 44/46 remote streams were being rejected, killing all CDN-ITAssist sync). Typecheck + 54/54 tests pass. **Needs commit.**
+**Recently landed on main:**
+- `980b57c` — `isValidName` allows `/` in Flussonic stream names (real server uses `folder/stream`; 44/46 remote streams were being rejected). Merged via PR #4.
+- `4c50547` + `71edc95` — refreshed HANDOFF + Phase 3 gap analysis.
 
 **Open items for the operator:**
 1. Log in at localhost:3000 — new `JWT_SECRET` from deploy invalidated old sessions. Agent does not know the admin password.
-2. `FS1`/`FS2` servers point at `fs.local`/`fs2.local` — dead DNS, pre-existing. Decide: fix URLs or remove.
-3. Commit + push the sync `/` fix (or fold into next feature branch).
+2. FS1/FS2 are mock test servers (`fs.local`/`fs2.local` DNS failures expected — not a blocker).
 
 **Architecture constraint:** single-process / single-writer. SQLite + process-local `inFlightCreations` lock in `routes/channels.ts`. No PM2 cluster, no multi-worker. See `docs/OPERATIONS_RECOVERY.md` for failure reconciliation.
 
