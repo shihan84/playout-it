@@ -112,7 +112,11 @@ export interface SyncOptions {
 // Per-record validation — fail closed. A malformed record means the whole
 // inventory is untrustworthy, so reject it rather than partially apply it.
 function isValidName(n: any): n is string {
-  return typeof n === 'string' && n.length > 0 && n.length <= 200 && !/[\/\0]/.test(n);
+  // Flussonic stream names legitimately contain '/' (folder/channel syntax
+  // like "folder/stream"). Names are always encodeURIComponent'd into remote
+  // URLs, so '/' carries no path-traversal risk for us. Reject only empty,
+  // oversized, or NUL-bearing names.
+  return typeof n === 'string' && n.length > 0 && n.length <= 200 && !/\0/.test(n);
 }
 
 function validateStreamRecord(s: any) {
