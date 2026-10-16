@@ -27,6 +27,7 @@ import settingsRoutes from './src/server/routes/settings';
 import sslRoutes from './src/server/routes/ssl';
 import channelsRoutes from './src/server/routes/channels';
 import schedulesRoutes from './src/server/routes/schedules';
+import monitoringRoutes from './src/server/routes/monitoring';
 
 const app = express();
 
@@ -55,6 +56,7 @@ app.use('/api/servers', metricsRoutes);
 app.use('/api/ssl', sslRoutes);
 app.use('/api/channels', channelsRoutes);
 app.use('/api/schedules', schedulesRoutes);
+app.use('/api/monitoring', monitoringRoutes);
 
 // Watchdog restart endpoint
 app.post('/api/watchdog/restart', authenticateToken, requireAdmin, (req, res) => {
