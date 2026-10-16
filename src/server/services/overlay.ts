@@ -266,7 +266,7 @@ export function buildArgs(profile: any, inputUrl: string, outputUrl: string): st
   args.push(
     '-c:v', 'libx264', '-preset', 'veryfast', '-tune', 'zerolatency',
     '-c:a', 'aac', '-b:a', '128k',
-    '-f', 'mpegts', outputUrl
+    '-f', /^rtmps?:\/\//i.test(outputUrl) ? 'flv' : 'mpegts', outputUrl
   );
   return args;
 }
@@ -304,9 +304,11 @@ export async function startOverlay(profileId: number): Promise<any> {
   if (!inputUrl) throw new OverlayError('No playable input URL for this stream', 400);
 
   const outputName = profile.output_stream || `${stream.name}_ovr`;
+  // Keep the derived URL only for isolation and recursion checks.
+  // It is NOT assumed to be a valid Flussonic ingest endpoint.
   const outputUrl = profile.output_url
     || (server ? `${server.url.replace(/\/$/, '')}/flussonic/publish/${encodeURIComponent(outputName)}` : null);
-  if (!outputUrl) throw new OverlayError('No output_url and stream has no server to derive one from', 400);
+  if (!outputUrl) throw new OverlayError('An explicit output_url is required', 400);
 
   // Isolation rule A: a named output stream must not be the source channel.
   if (outputName === stream.name && !profile.output_url) {
@@ -346,6 +348,12 @@ export async function startOverlay(profileId: number): Promise<any> {
     throw new OverlayError(
       `Recursive overlay rejected: '${outputName}' already sources an overlay outputting to '${stream.name}'. ` +
       `Chained overlays must not form cycles.`, 409);
+  }
+
+  // Fail closed: the management API URL does not identify a verified ingest
+  // endpoint. Do not start a worker until an explicit destination is configured.
+  if (!profile.output_url) {
+    throw new OverlayError('An explicit output_url is required (verified RTMP, SRT or UDP publishing endpoint)', 400);
   }
 
   // Logo assets: full path resolution (containment + existence + symlink).

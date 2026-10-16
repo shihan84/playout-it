@@ -31,6 +31,14 @@ test('buildArgs: logo overlay composes scale/alpha/position correctly', () => {
   assert.ok(s.endsWith('-f mpegts udp://127.0.0.1:5555'));
 });
 
+test('buildArgs: RTMP publishing uses FLV muxer instead of MPEG-TS', () => {
+  const profile = { logo_path: null, ticker_enabled: 0 };
+  const args = buildArgs(profile, 'http://example.test/source/index.m3u8', 'rtmp://example.test/live/overlay');
+  assert.deepEqual(args.slice(-3), ['-f', 'flv', 'rtmp://example.test/live/overlay']);
+  const srtArgs = buildArgs(profile, 'http://example.test/source/index.m3u8', 'srt://example.test:9000');
+  assert.deepEqual(srtArgs.slice(-3), ['-f', 'mpegts', 'srt://example.test:9000']);
+});
+
 test('buildArgs: ticker uses drawtext with escaped text and scroll expression', () => {
   const args = buildArgs({
     logo_path: null, ticker_enabled: 1, ticker_text: "Breaking: it's 100% live!",
@@ -171,8 +179,17 @@ test('resolveLogoPath: inside file ok; missing file and symlink escape rejected'
 test('startOverlay requires the overlay_enabled gate (off by default)', async () => {
   const sid = seedStream('gated', { live_url: 'http://fs.example/gated/index.m3u8' });
   const pid = db.prepare(
-    "INSERT INTO overlay_profiles (stream_id, name, output_stream) VALUES (?, 'g', 'gated_ovr')"
+    "INSERT INTO overlay_profiles (stream_id, name, output_stream, output_url) VALUES (?, 'g', 'gated_ovr', 'srt://staging.example:9000')"
   ).run(sid).lastInsertRowid;
   await assert.rejects(() => startOverlay(Number(pid)),
     (e: any) => e.status === 409 && /disabled/i.test(e.message));
+});
+
+test('startOverlay rejects unconfigured publishing destination before spawning', async () => {
+  const sid = seedStream('missing-destination', { live_url: 'http://fs.example/missing-destination/index.m3u8' });
+  const pid = db.prepare(
+    "INSERT INTO overlay_profiles (stream_id, name, output_stream) VALUES (?, 'missing', 'missing-destination_ovr')"
+  ).run(sid).lastInsertRowid;
+  await assert.rejects(() => startOverlay(Number(pid)),
+    (e: any) => e.status === 400 && /explicit output_url/i.test(e.message));
 });
