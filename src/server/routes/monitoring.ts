@@ -87,7 +87,17 @@ router.get('/events', authenticateToken, requireAdmin, (req, res) => {
   const conds: string[] = [];
   const params: any[] = [];
   if (req.query.stream_id) { conds.push('e.stream_id = ?'); params.push(Number(req.query.stream_id)); }
-  if (req.query.since) { conds.push('e.created_at >= ?'); params.push(String(req.query.since)); }
+  if (req.query.since !== undefined) {
+    const raw = String(req.query.since);
+    const parsed = Date.parse(raw);
+    if (!/^\d{4}-\d{2}-\d{2}T/.test(raw) || !Number.isFinite(parsed)) {
+      return res.status(400).json({ error: 'since must be a valid ISO-8601 timestamp' });
+    }
+    // SQLite datetime strings and ISO-8601 strings differ lexicographically.
+    // Compare normalized instants rather than raw text.
+    conds.push('julianday(e.created_at) >= julianday(?)');
+    params.push(new Date(parsed).toISOString());
+  }
   const where = conds.length ? `WHERE ${conds.join(' AND ')}` : '';
   const rows = db.prepare(
     `SELECT e.id, e.stream_id, s.name AS stream_name, e.from_state, e.to_state, e.detail, e.created_at
@@ -101,7 +111,7 @@ router.get('/events', authenticateToken, requireAdmin, (req, res) => {
 router.get('/jobs/failures', authenticateToken, requireAdmin, (req, res) => {
   const limit = Math.min(Math.max(Number(req.query.limit) || 50, 1), 500);
   const playout = db.prepare(
-    `SELECT 'playout' AS type, j.id, j.stream_id, s.name AS stream_name, j.status, j.last_error, j.start_at_utc AS at
+    `SELECT 'playout' AS type, j.id, j.stream_id, s.name AS stream_name, j.status, j.last_error, j.created_at AS at
      FROM playout_jobs j LEFT JOIN streams s ON s.id = j.stream_id
      WHERE j.status IN ('failed','skipped','restore_failed','restore_unverified') ORDER BY j.created_at DESC LIMIT ?`
   ).all(limit);
@@ -110,7 +120,10 @@ router.get('/jobs/failures', authenticateToken, requireAdmin, (req, res) => {
      FROM overlay_jobs j LEFT JOIN streams s ON s.id = j.stream_id
      WHERE j.status IN ('failed','exited') ORDER BY j.id DESC LIMIT ?`
   ).all(limit) : [];
-  const merged = [...playout, ...overlay].sort((a: any, b: any) => String(b.at).localeCompare(String(a.at))).slice(0, limit);
+  // Timestamps may use SQLite or ISO formats; sort by actual instant.
+  const merged = [...playout, ...overlay].sort((a: any, b: any) =>
+    (Date.parse(String(b.at || '')) || 0) - (Date.parse(String(a.at || '')) || 0)
+  ).slice(0, limit);
   res.json(merged);
 });
 
