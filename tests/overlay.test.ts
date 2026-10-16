@@ -179,8 +179,17 @@ test('resolveLogoPath: inside file ok; missing file and symlink escape rejected'
 test('startOverlay requires the overlay_enabled gate (off by default)', async () => {
   const sid = seedStream('gated', { live_url: 'http://fs.example/gated/index.m3u8' });
   const pid = db.prepare(
-    "INSERT INTO overlay_profiles (stream_id, name, output_stream) VALUES (?, 'g', 'gated_ovr')"
+    "INSERT INTO overlay_profiles (stream_id, name, output_stream, output_url) VALUES (?, 'g', 'gated_ovr', 'srt://staging.example:9000')"
   ).run(sid).lastInsertRowid;
   await assert.rejects(() => startOverlay(Number(pid)),
     (e: any) => e.status === 409 && /disabled/i.test(e.message));
+});
+
+test('startOverlay rejects unconfigured publishing destination before spawning', async () => {
+  const sid = seedStream('missing-destination', { live_url: 'http://fs.example/missing-destination/index.m3u8' });
+  const pid = db.prepare(
+    "INSERT INTO overlay_profiles (stream_id, name, output_stream) VALUES (?, 'missing', 'missing-destination_ovr')"
+  ).run(sid).lastInsertRowid;
+  await assert.rejects(() => startOverlay(Number(pid)),
+    (e: any) => e.status === 400 && /explicit output_url/i.test(e.message));
 });
