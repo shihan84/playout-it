@@ -2249,3 +2249,32 @@ test('monitoring: channel summary aggregates status, playout progress, next job'
   const fails = await (await fetch(`${BASE}/api/monitoring/jobs/failures`, { headers })).json();
   assert.ok(Array.isArray(fails));
 });
+
+
+test('monitoring: event filters reject malformed dates and accept ISO timestamps', async () => {
+  const { res } = await login('itadmin', 'it-admin-pass-12345');
+  const { token } = await res.json();
+  const headers = { authorization: `Bearer ${token}` };
+  const bad = await fetch(`${BASE}/api/monitoring/events?since=not-a-date`, { headers });
+  assert.equal(bad.status, 400);
+  const valid = await fetch(`${BASE}/api/monitoring/events?since=${encodeURIComponent(new Date(Date.now() - 3600e3).toISOString())}`, { headers });
+  assert.equal(valid.status, 200);
+  assert.ok(Array.isArray(await valid.json()));
+});
+
+test('monitoring: failed playout job appears in failure feed and 24h count', async () => {
+  const { res } = await login('itadmin', 'it-admin-pass-12345');
+  const { token } = await res.json();
+  const headers = { authorization: `Bearer ${token}` };
+  const server = (await (await fetch(`${BASE}/api/servers`, { headers })).json()).find((s: any) => s.name === 'mock-vod');
+  const idb = new Database(dbPath);
+  const sId = seedStream(idb, server.id, 'mon-failure-check');
+  const now = new Date().toISOString();
+  idb.prepare(`INSERT INTO playout_jobs (stream_id, kind, inputs, start_at_utc, duration_sec, end_at_utc, status)
+    VALUES (?, 'inputs', '[]', ?, 60, ?, 'restore_unverified')`).run(sId, now, now);
+  idb.close();
+  const summary = await (await fetch(`${BASE}/api/monitoring/channels/${sId}`, { headers })).json();
+  assert.equal(summary.playout.failures_24h, 1);
+  const failures = await (await fetch(`${BASE}/api/monitoring/jobs/failures`, { headers })).json();
+  assert.ok(failures.some((x: any) => x.stream_id === sId && x.status === 'restore_unverified'));
+});
