@@ -31,6 +31,14 @@ test('buildArgs: logo overlay composes scale/alpha/position correctly', () => {
   assert.ok(s.endsWith('-f mpegts udp://127.0.0.1:5555'));
 });
 
+test('buildArgs: RTMP publishing uses FLV muxer instead of MPEG-TS', () => {
+  const profile = { logo_path: null, ticker_enabled: 0 };
+  const args = buildArgs(profile, 'http://example.test/source/index.m3u8', 'rtmp://example.test/live/overlay');
+  assert.deepEqual(args.slice(-3), ['-f', 'flv', 'rtmp://example.test/live/overlay']);
+  const srtArgs = buildArgs(profile, 'http://example.test/source/index.m3u8', 'srt://example.test:9000');
+  assert.deepEqual(srtArgs.slice(-3), ['-f', 'mpegts', 'srt://example.test:9000']);
+});
+
 test('buildArgs: ticker uses drawtext with escaped text and scroll expression', () => {
   const args = buildArgs({
     logo_path: null, ticker_enabled: 1, ticker_text: "Breaking: it's 100% live!",
