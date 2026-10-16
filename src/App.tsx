@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { BrowserRouter, Routes, Route, Link, useLocation, useNavigate, Navigate } from 'react-router-dom';
-import { LayoutDashboard, Server, Radio, Settings, Folder, Users, LogOut, Shield, Bell } from 'lucide-react';
+import { LayoutDashboard, Server, Radio, Settings, Folder, Users, LogOut, Shield, Bell, Calendar, Activity, Layers } from 'lucide-react';
 import { clsx } from 'clsx';
 import { twMerge } from 'tailwind-merge';
 import axios from 'axios';
@@ -14,6 +14,9 @@ import Login from './pages/Login';
 import UserManagement from './pages/UserManagement';
 import IpManagement from './pages/IpManagement';
 import TelegramAlerts from './pages/TelegramAlerts';
+import Playout from './pages/Playout';
+import OpsMonitoring from './pages/OpsMonitoring';
+import Overlays from './pages/Overlays';
 
 function cn(...inputs: (string | undefined | null | false)[]) {
   return twMerge(clsx(inputs));
@@ -47,6 +50,9 @@ function Sidebar() {
     { name: 'Dashboard', path: '/', icon: LayoutDashboard },
     { name: 'Servers', path: '/servers', icon: Server, adminOnly: true },
     { name: 'Streams', path: '/streams', icon: Radio },
+    { name: 'Playout', path: '/playout', icon: Calendar },
+    { name: 'Monitoring', path: '/monitoring', icon: Activity, adminOnly: true },
+    { name: 'Overlays', path: '/overlays', icon: Layers, adminOnly: true },
     { name: 'VODs', path: '/vods', icon: Folder, adminOnly: true },
     { name: 'Users', path: '/users', icon: Users, adminOnly: true },
     { name: 'IP Management', path: '/ip-management', icon: Shield },
@@ -147,6 +153,9 @@ function ProtectedRoutes() {
         <Route path="/" element={<Dashboard />} />
         <Route path="/servers" element={isAdmin ? <Servers /> : <Navigate to="/" replace />} />
         <Route path="/streams" element={<Streams />} />
+        <Route path="/playout" element={<Playout />} />
+        <Route path="/monitoring" element={isAdmin ? <OpsMonitoring /> : <Navigate to="/" replace />} />
+        <Route path="/overlays" element={isAdmin ? <Overlays /> : <Navigate to="/" replace />} />
         <Route path="/vods" element={isAdmin ? <Vods /> : <Navigate to="/" replace />} />
         <Route path="/users" element={isAdmin ? <UserManagement /> : <Navigate to="/" replace />} />
         <Route path="/ip-management" element={<IpManagement />} />
