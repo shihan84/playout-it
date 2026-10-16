@@ -304,14 +304,11 @@ export async function startOverlay(profileId: number): Promise<any> {
   if (!inputUrl) throw new OverlayError('No playable input URL for this stream', 400);
 
   const outputName = profile.output_stream || `${stream.name}_ovr`;
-  // Do not infer a publishing endpoint from the Flussonic management URL.
-  // The operator must supply a verified RTMP/SRT/UDP ingest URL.
-  const outputUrl = profile.output_url || null;
-  if (!outputUrl) {
-    // Keep the self-targeting check below effective even for invalid profiles.
-    if (outputName === stream.name) throw new OverlayError('Overlay output must be isolated from its source stream', 409);
-    throw new OverlayError('An explicit output_url is required (verified RTMP, SRT or UDP publishing endpoint)', 400);
-  }
+  // Keep the derived URL only for isolation and recursion checks.
+  // It is NOT assumed to be a valid Flussonic ingest endpoint.
+  const outputUrl = profile.output_url
+    || (server ? `${server.url.replace(/\/$/, '')}/flussonic/publish/${encodeURIComponent(outputName)}` : null);
+  if (!outputUrl) throw new OverlayError('An explicit output_url is required', 400);
 
   // Isolation rule A: a named output stream must not be the source channel.
   if (outputName === stream.name && !profile.output_url) {
@@ -351,6 +348,12 @@ export async function startOverlay(profileId: number): Promise<any> {
     throw new OverlayError(
       `Recursive overlay rejected: '${outputName}' already sources an overlay outputting to '${stream.name}'. ` +
       `Chained overlays must not form cycles.`, 409);
+  }
+
+  // Fail closed: the management API URL does not identify a verified ingest
+  // endpoint. Do not start a worker until an explicit destination is configured.
+  if (!profile.output_url) {
+    throw new OverlayError('An explicit output_url is required (verified RTMP, SRT or UDP publishing endpoint)', 400);
   }
 
   // Logo assets: full path resolution (containment + existence + symlink).
