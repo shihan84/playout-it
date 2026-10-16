@@ -304,9 +304,14 @@ export async function startOverlay(profileId: number): Promise<any> {
   if (!inputUrl) throw new OverlayError('No playable input URL for this stream', 400);
 
   const outputName = profile.output_stream || `${stream.name}_ovr`;
-  const outputUrl = profile.output_url
-    || (server ? `${server.url.replace(/\/$/, '')}/flussonic/publish/${encodeURIComponent(outputName)}` : null);
-  if (!outputUrl) throw new OverlayError('No output_url and stream has no server to derive one from', 400);
+  // Do not infer a publishing endpoint from the Flussonic management URL.
+  // The operator must supply a verified RTMP/SRT/UDP ingest URL.
+  const outputUrl = profile.output_url || null;
+  if (!outputUrl) {
+    // Keep the self-targeting check below effective even for invalid profiles.
+    if (outputName === stream.name) throw new OverlayError('Overlay output must be isolated from its source stream', 409);
+    throw new OverlayError('An explicit output_url is required (verified RTMP, SRT or UDP publishing endpoint)', 400);
+  }
 
   // Isolation rule A: a named output stream must not be the source channel.
   if (outputName === stream.name && !profile.output_url) {
