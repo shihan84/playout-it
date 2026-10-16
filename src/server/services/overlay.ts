@@ -266,7 +266,7 @@ export function buildArgs(profile: any, inputUrl: string, outputUrl: string): st
   args.push(
     '-c:v', 'libx264', '-preset', 'veryfast', '-tune', 'zerolatency',
     '-c:a', 'aac', '-b:a', '128k',
-    '-f', 'mpegts', outputUrl
+    '-f', /^rtmps?:\/\//i.test(outputUrl) ? 'flv' : 'mpegts', outputUrl
   );
   return args;
 }
