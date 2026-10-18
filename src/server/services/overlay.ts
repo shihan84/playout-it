@@ -243,15 +243,33 @@ export function validateProfileSpec(body: any) {
 
 // ---- Filter graph construction ---------------------------------------------
 
-// Escape a string for safe inclusion in a drawtext `text=` option:
-// filter-graph level: \ : ' need backslash escapes; % needs %%.
+// Escape a string for safe inclusion in a drawtext `text=` option.
+// Two parse levels are involved: the filtergraph args parser (separates
+// options on ':' and consumes \-escapes) and drawtext's own option parser.
+// NOTE: single-quoted values containing \' break ffmpeg's args parser (a
+// \' inside '...' is a real parse hazard in -filter_complex), so the text
+// is emitted UNQUOTED with both levels backslash-escaped instead.
 export function escapeDrawtext(t: string): string {
-  return t
+  // Level 1 — drawtext option parser: \ : ' % are special.
+  let s = t
     .replace(/\\/g, '\\\\')
     .replace(/'/g, "\\'")
     .replace(/:/g, '\\:')
-    .replace(/%/g, '%%')
     .replace(/[\x00-\x1f]/g, ' ');
+  // Level 2 — filtergraph args parser: escape level-1 backslashes first,
+  // then the graph-level metacharacters.
+  return s
+    .replace(/\\/g, '\\\\')
+    .replace(/'/g, "\\'")
+    .replace(/:/g, '\\:')
+    .replace(/,/g, '\\,')
+    .replace(/;/g, '\\;')
+    .replace(/\[/g, '\\[')
+    .replace(/\]/g, '\\]')
+    .replace(/\(/g, '\\(')
+    .replace(/\)/g, '\\)')
+    .replace(/=/g, '\\=')
+    .replace(/ /g, '\\ ');
 }
 
 function logoOverlayExpr(p: any): string {
@@ -291,10 +309,10 @@ export function buildArgs(profile: any, inputUrl: string, outputUrl: string): st
     const speed = profile.ticker_speed;
     // Scroll right-to-left at speed px/s; loop seamlessly.
     const dt =
-      `drawtext=text='${escapeDrawtext(profile.ticker_text)}'` +
+      `drawtext=expansion=none:text=${escapeDrawtext(profile.ticker_text)}` +
       `:x='w-mod(t*${speed}\\,w+tw)'` +
       `:y=${y}:fontsize=${profile.ticker_font_size}` +
-      `:fontcolor=${profile.ticker_color}:box=1:boxcolor=${profile.ticker_bg_color}`;
+      `:fontcolor=${profile.ticker_color}:box=1:boxcolor='${profile.ticker_bg_color}'`;
     filters.push(`${vChain}${dt}[v_out]`);
     vChain = '[v_out]';
   }

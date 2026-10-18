@@ -46,17 +46,19 @@ test('buildArgs: ticker uses drawtext with escaped text and scroll expression', 
     ticker_color: 'white', ticker_bg_color: 'black@0.5',
   }, 'in.ts', 'out.ts');
   const s = args.join(' ');
-  assert.ok(s.includes('drawtext=text='), 'drawtext present');
-  assert.ok(s.includes("it\\'s"), "apostrophe escaped");
-  assert.ok(s.includes('100%%'), 'percent doubled for drawtext');
+  assert.ok(s.includes('drawtext=expansion=none:text='), 'drawtext present with expansion disabled');
+  assert.ok(s.includes("it\\\\\\'s"), "apostrophe double-escaped for graph+drawtext levels");
+  assert.ok(s.includes('100%'), 'percent passes through with expansion=none');
+  assert.ok(!s.includes('%%'), 'no %% doubling needed under expansion=none');
   assert.ok(s.includes('w-mod(t*60'), 'scroll speed in x expression');
   assert.ok(s.includes('h-th-10'), 'bottom position');
   assert.ok(s.includes('fontcolor=white'));
 });
 
 test('escapeDrawtext strips control characters and escapes filter metachars', () => {
+  // Unquoted two-level escaping: level 1 (drawtext) then level 2 (graph args).
   const out = escapeDrawtext("a'b:c%d\u001fe");
-  assert.equal(out, "a\\'b\\:c%%d e");
+  assert.equal(out, "a\\\\\\'b\\\\\\:c%d\\ e");
 });
 
 test('validateProfileSpec rejects unsafe/invalid inputs', () => {
