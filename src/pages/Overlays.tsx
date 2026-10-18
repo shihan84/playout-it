@@ -20,7 +20,7 @@ export default function Overlays() {
   const [form, setForm] = useState({
     stream_id: 0, name: '', logo_path: '', logo_position: 'tr', logo_opacity: 1,
     ticker_enabled: false, ticker_text: '', ticker_position: 'bottom', ticker_speed: 100,
-    ticker_font_size: 28, output_stream: '',
+    ticker_font_size: 28, output_stream: '', output_url: '',
   });
 
   const load = useCallback(async () => {
@@ -69,6 +69,7 @@ export default function Overlays() {
         ticker_speed: Number(form.ticker_speed),
         ticker_font_size: Number(form.ticker_font_size),
         output_stream: form.output_stream || null,
+        output_url: form.output_url || null,
       });
       setForm({ ...form, name: '', logo_path: '', ticker_text: '' });
       load();
@@ -157,6 +158,10 @@ export default function Overlays() {
               <input value={form.output_stream} onChange={e => setForm({ ...form, output_stream: e.target.value })} placeholder="auto: <name>_ovr"
                 className="mt-1 w-full bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-sm text-zinc-200" />
             </label>
+            <label className="text-xs text-zinc-500">Publish URL (required to start)
+              <input value={form.output_url} onChange={e => setForm({ ...form, output_url: e.target.value })} placeholder="rtmp(s)://, srt:// or udp:// destination"
+                className="mt-1 w-full bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-sm text-zinc-200" />
+            </label>
           </div>
           <label className="flex items-center gap-2 text-sm text-zinc-300">
             <input type="checkbox" checked={form.ticker_enabled} onChange={e => setForm({ ...form, ticker_enabled: e.target.checked })} />
@@ -170,7 +175,7 @@ export default function Overlays() {
             className="flex items-center gap-2 bg-emerald-600 hover:bg-emerald-500 disabled:opacity-40 text-white text-sm font-medium px-4 py-2 rounded-xl">
             <Plus size={16} /> Create profile
           </button>
-          <p className="text-xs text-zinc-600">Logo files must live inside the server's overlay asset dir. Output is always isolated from the source channel.</p>
+          <p className="text-xs text-zinc-600">Logo files must live inside the server's overlay asset dir. An explicit publish URL (rtmp/srt/udp) is required — output is always isolated from the source channel and credentials in URLs are redacted in the list.</p>
         </div>
 
         {/* Profiles + jobs */}
@@ -186,7 +191,7 @@ export default function Overlays() {
                     <div className="flex-1 min-w-0">
                       <p className="text-sm text-zinc-200">{p.name} <span className="text-zinc-500">→ {p.stream_name}</span></p>
                       <p className="text-xs text-zinc-500">
-                        {p.logo_path ? 'logo ' : ''}{p.ticker_enabled ? 'ticker ' : ''}out: {p.output_stream || 'auto'}
+                        {p.logo_path ? 'logo ' : ''}{p.ticker_enabled ? 'ticker ' : ''}out: {p.output_stream || 'auto'}{p.output_url ? ` → ${p.output_url}` : ' · no publish URL'}
                         {p.enabled ? '' : ' · disabled'}
                       </p>
                     </div>
