@@ -1874,7 +1874,7 @@ test('overlay job lifecycle: start spawns worker, stop/status tracked, restart n
 
   const profile = await (await fetch(`${BASE}/api/overlays`, {
     method: 'POST', headers,
-    body: JSON.stringify({ stream_id: streamId, name: 'job-ovr', output_stream: 'ovr-job_ovr' })
+    body: JSON.stringify({ stream_id: streamId, name: 'job-ovr', output_stream: 'ovr-job_ovr', output_url: 'udp://127.0.0.1:5599' })
   })).json();
 
   const start = await fetch(`${BASE}/api/overlays/${profile.id}/start`, { method: 'POST', headers });
