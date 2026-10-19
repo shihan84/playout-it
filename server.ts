@@ -11,6 +11,7 @@ import { config } from './src/server/config';
 import './src/server/db'; // initializes DB as side effect
 import { wss, verifyWsAuth } from './src/server/websocket';
 import { startWatchdog } from './src/server/services/watchdog';
+import { startScheduler } from './src/server/services/scheduler';
 
 import authRoutes from './src/server/routes/auth';
 import usersRoutes from './src/server/routes/users';
@@ -27,6 +28,8 @@ import sslRoutes from './src/server/routes/ssl';
 import channelsRoutes from './src/server/routes/channels';
 import overlaysRoutes from './src/server/routes/overlays';
 import { recoverOverlayJobs } from './src/server/services/overlay';
+import schedulesRoutes from './src/server/routes/schedules';
+import monitoringRoutes from './src/server/routes/monitoring';
 
 const app = express();
 
@@ -55,6 +58,8 @@ app.use('/api/servers', metricsRoutes);
 app.use('/api/ssl', sslRoutes);
 app.use('/api/channels', channelsRoutes);
 app.use('/api/overlays', overlaysRoutes);
+app.use('/api/schedules', schedulesRoutes);
+app.use('/api/monitoring', monitoringRoutes);
 
 // Watchdog restart endpoint
 app.post('/api/watchdog/restart', authenticateToken, requireAdmin, (req, res) => {
@@ -131,6 +136,7 @@ async function startServer() {
 // Start background services
 startWatchdog();
 recoverOverlayJobs();
+startScheduler();
 
 startServer().catch(err => {
   console.error("Failed to start server:", err);

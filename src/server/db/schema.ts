@@ -171,6 +171,40 @@ export const schema = `
 
   CREATE INDEX IF NOT EXISTS idx_overlay_jobs_stream ON overlay_jobs(stream_id, status);
 
+  CREATE TABLE IF NOT EXISTS playout_schedules (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    stream_id INTEGER NOT NULL,
+    name TEXT NOT NULL,
+    timezone TEXT NOT NULL DEFAULT 'UTC',
+    enabled INTEGER DEFAULT 1,
+    created_by INTEGER,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY(stream_id) REFERENCES streams(id) ON DELETE CASCADE,
+    FOREIGN KEY(created_by) REFERENCES users(id) ON DELETE SET NULL
+  );
+
+  CREATE TABLE IF NOT EXISTS playout_jobs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    schedule_id INTEGER,
+    stream_id INTEGER NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'inputs',
+    inputs TEXT NOT NULL DEFAULT '[]',
+    start_at_utc TEXT NOT NULL,
+    duration_sec INTEGER NOT NULL,
+    end_at_utc TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'scheduled',
+    previous_inputs TEXT,
+    last_error TEXT,
+    claimed_at TEXT,
+    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(stream_id, start_at_utc),
+    FOREIGN KEY(schedule_id) REFERENCES playout_schedules(id) ON DELETE CASCADE,
+    FOREIGN KEY(stream_id) REFERENCES streams(id) ON DELETE CASCADE
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_playout_jobs_stream ON playout_jobs(stream_id, start_at_utc);
+  CREATE INDEX IF NOT EXISTS idx_playout_jobs_due ON playout_jobs(status, start_at_utc);
+
   CREATE TABLE IF NOT EXISTS telegram_alert_history (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     telegram_alert_id INTEGER NOT NULL,
