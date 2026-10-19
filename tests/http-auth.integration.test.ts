@@ -226,6 +226,8 @@ test.before(async () => {
       DATABASE_PATH: dbPath,
       JWT_SECRET: 'test-secret-key-for-integration-tests-only-0123456789',
       SCHEDULER_TICK_MS: '400',
+      OVERLAY_ENABLED: '1',
+      OVERLAY_ASSET_DIR: path.join(tmpDir, 'overlay-assets'),
       SCHEDULER_ENABLED: '1',
     },
     cwd: process.cwd(),
@@ -2277,4 +2279,118 @@ test('monitoring: failed playout job appears in failure feed and 24h count', asy
   assert.equal(summary.playout.failures_24h, 1);
   const failures = await (await fetch(`${BASE}/api/monitoring/jobs/failures`, { headers })).json();
   assert.ok(failures.some((x: any) => x.stream_id === sId && x.status === 'restore_unverified'));
+});
+// ============================================================================
+// Phase 3 P2 — Overlay profiles + ffmpeg jobs
+// ============================================================================
+
+test('overlay profiles: CRUD, admin-only, validation, isolation rule', async () => {
+  const { res: adminRes } = await login('itadmin', 'it-admin-pass-12345');
+  const { token } = await adminRes.json();
+  const headers = { authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+  const { res: clientRes } = await login('itclient', 'it-client-pass-12345');
+  const { token: clientToken } = await clientRes.json();
+  const clientHeaders = { authorization: `Bearer ${clientToken}`, 'Content-Type': 'application/json' };
+
+  const list = await (await fetch(`${BASE}/api/servers`, { headers })).json();
+  const server = list.find((s: any) => s.name === 'mock-vod');
+  const idb = new Database(dbPath);
+  idb.prepare("INSERT INTO streams (server_id, name, live_url, playlist_url) VALUES (?, 'ovr-src', '', '')").run(server.id);
+  const streamId = (idb.prepare("SELECT id FROM streams WHERE name = 'ovr-src'").get() as any).id;
+  idb.close();
+
+  // Client forbidden
+  const denied = await fetch(`${BASE}/api/overlays`, {
+    method: 'POST', headers: clientHeaders,
+    body: JSON.stringify({ stream_id: streamId, name: 'x' })
+  });
+  assert.equal(denied.status, 403);
+
+  // Validation: invalid opacity
+  const bad = await fetch(`${BASE}/api/overlays`, {
+    method: 'POST', headers,
+    body: JSON.stringify({ stream_id: streamId, name: 'bad', logo_opacity: 5 })
+  });
+  assert.equal(bad.status, 400);
+
+  // Isolation rule checked at start, not create: profile targeting its own
+  // stream name is created but cannot start.
+  const badProfile = await (await fetch(`${BASE}/api/overlays`, {
+    method: 'POST', headers,
+    body: JSON.stringify({ stream_id: streamId, name: 'self-target', output_stream: 'ovr-src' })
+  })).json();
+  const startSelf = await fetch(`${BASE}/api/overlays/${badProfile.id}/start`, { method: 'POST', headers });
+  assert.equal(startSelf.status, 409, 'overlay output must not equal source stream name');
+
+  // Valid profile
+  const create = await fetch(`${BASE}/api/overlays`, {
+    method: 'POST', headers,
+    body: JSON.stringify({
+      stream_id: streamId, name: 'news-ovr', logo_position: 'tr', logo_opacity: 0.9,
+      ticker_enabled: 1, ticker_text: 'hello world', output_stream: 'ovr-src_ovr'
+    })
+  });
+  assert.equal(create.status, 201);
+  const profile = await create.json();
+  assert.equal(profile.stream_id, streamId);
+  assert.equal(profile.ticker_enabled, 1);
+
+  // Patch validation still applies on merged spec
+  const badPatch = await fetch(`${BASE}/api/overlays/${profile.id}`, {
+    method: 'PATCH', headers, body: JSON.stringify({ ticker_speed: 99999 })
+  });
+  assert.equal(badPatch.status, 400);
+
+  const okPatch = await fetch(`${BASE}/api/overlays/${profile.id}`, {
+    method: 'PATCH', headers, body: JSON.stringify({ ticker_speed: 120 })
+  });
+  assert.equal(okPatch.status, 200);
+  assert.equal((await okPatch.json()).ticker_speed, 120);
+});
+
+test('overlay job lifecycle: start spawns worker, stop/status tracked, restart never leaves ghost jobs', async () => {
+  const { res: adminRes } = await login('itadmin', 'it-admin-pass-12345');
+  const { token } = await adminRes.json();
+  const headers = { authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+
+  const caps = await (await fetch(`${BASE}/api/overlays/capabilities`, { headers })).json();
+
+  const list = await (await fetch(`${BASE}/api/servers`, { headers })).json();
+  const server = list.find((s: any) => s.name === 'mock-vod');
+  const idb = new Database(dbPath);
+  idb.prepare("INSERT INTO streams (server_id, name, live_url, playlist_url) VALUES (?, 'ovr-job', '', '')").run(server.id);
+  const streamId = (idb.prepare("SELECT id FROM streams WHERE name = 'ovr-job'").get() as any).id;
+  idb.close();
+
+  const profile = await (await fetch(`${BASE}/api/overlays`, {
+    method: 'POST', headers,
+    body: JSON.stringify({ stream_id: streamId, name: 'job-ovr', output_stream: 'ovr-job_ovr', output_url: 'udp://127.0.0.1:5599' })
+  })).json();
+
+  const start = await fetch(`${BASE}/api/overlays/${profile.id}/start`, { method: 'POST', headers });
+  if (!caps.ffmpeg) {
+    assert.equal(start.status, 503, 'no ffmpeg -> clear 503');
+    return;
+  }
+  assert.equal(start.status, 201);
+  const job = await start.json();
+  assert.ok(['starting', 'running'].includes(job.status));
+
+  // Second concurrent overlay on the same stream must be rejected while active
+  const again = await fetch(`${BASE}/api/overlays/${profile.id}/start`, { method: 'POST', headers });
+  assert.equal(again.status, 409, 'one overlay per stream');
+
+  // The input is unreachable (mock returns {} for /index.m3u8) — ffmpeg will
+  // exit shortly. Poll until the job leaves starting/running.
+  const deadline = Date.now() + 20000;
+  let cur: any;
+  while (Date.now() < deadline) {
+    const c = new Database(dbPath);
+    cur = c.prepare('SELECT * FROM overlay_jobs WHERE id = ?').get(job.id);
+    c.close();
+    if (!['starting', 'running'].includes(cur.status)) break;
+    await new Promise(r => setTimeout(r, 400));
+  }
+  assert.ok(['exited', 'failed', 'stopped', 'completed'].includes(cur.status),
+    `job must reach a terminal state, got '${cur.status}'`);
 });

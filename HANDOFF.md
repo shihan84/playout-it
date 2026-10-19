@@ -4,6 +4,21 @@ Date: 2026-10-15
 Repo: `git@github.com:shihan84/playout-it.git` (branch `main`, HEAD `71edc95` — Phase 3 P0 gap analysis)
 Scope: Flussonic Media Server management dashboard (React SPA + Express + SQLite)
 
+## Progress Tracker
+
+| Milestone | Branch / PR | Status |
+|---|---|---|
+| Phase 2 — channel lifecycle | merged `11e9963` (PR #3) | ✅ Live locally |
+| Sync `/`-name fix | merged `0cd73e7` (PR #4) | ✅ Live locally |
+| Phase 3 P0 — gap analysis | `docs/PHASE3_GAP_ANALYSIS.md` on main (`71edc95`) | ✅ Done |
+| Phase 3 P1 — scheduled playout | `feature/phase-3-scheduled-playout` → PR #5 | 🔄 In review |
+| Phase 3 P2 — logo/ticker overlay (ffmpeg) | `feature/phase-3-overlay-pipeline` → PR #6 | 🔄 In review |
+| Phase 3 P3 — broadcast monitoring | `feature/phase-3-monitoring` → PR #7 (stacked on P1) | 🔄 In review |
+| Phase 3 P4 — ops dashboard UI | `feature/phase-4-ops-dashboard` → PR #9 | 🔄 In review |
+| Phase 3 P5 — release readiness | `feature/phase-5-reliability` → PR #10 | 🔄 In review |
+
+Environment notes: FFmpeg present on this Windows host (`ffmpeg`/`ffprobe` on PATH, GPL build with drawtext+freetype). FS1/FS2 are **mock test servers** — their DNS failures are expected, not blockers.
+
 ---
 
 ## 0. Current State (resume here)
@@ -14,22 +29,26 @@ Scope: Flussonic Media Server management dashboard (React SPA + Express + SQLite
 - Watchdog 15s, auto-sync 60s; CDN-ITAssist sync healthy (`/` names allowed since PR #4)
 - Last verified backup: `C:\Users\LIVE PC\playout-it-backups\release-2026-10-15T11-31-04\` (integrity ok, outside repo)
 
+
 **Phase 3 — all five milestones implemented, in stacked PRs (NOT merged):**
 
 | PR | Branch | Scope | Status |
 |---|---|---|---|
-| #5 | `feature/phase-3-scheduled-playout` | P1 scheduler (jobs, crash-safe swap+restore, `swapping`/`restore_unverified`, enable gate) | OPEN, CI green, review fixes in `1785897` |
-| #6 | `feature/phase-3-overlay-pipeline` | P2 ffmpeg logo/ticker → isolated output; URL/feedback/symlink guards; enable gate | OPEN, review fixes in `28658bc`+`0ea6e22` |
-| #7 | `feature/phase-3-monitoring` | P3 monitoring API; rebased on #5 tip, tracks new statuses | OPEN, stacked on #5 |
+| #5 | `feature/phase-3-scheduled-playout` | P1 scheduler (jobs, crash-safe swap+restore, `swapping`/`restore_unverified`, enable gate) | **MERGED** `b0765db` |
+| #6 | `feature/phase-3-overlay-pipeline` | P2 ffmpeg logo/ticker → isolated output; URL/feedback/symlink guards; enable gate | OPEN, review fixes in `28658bc`+`0ea6e22`; child fix below |
+| #11 | `feature/overlay-output-protocol-fix` → #6 branch | RTMP→FLV / SRT·UDP→TS muxer; explicit `output_url` required (no derivation); scheme allowlist; URL-identity hardening (ports, `folder/name`, `%xx`); output collision 409; global worker cap; credential redaction; drawtext escaping fix | **INTEGRATED** into #6 branch `5bc73c0` |
+| #7 | `feature/phase-3-monitoring` | P3 monitoring API; rebased onto merged #5 (`30a6cae`), tracks new statuses | OPEN, base `main` |
 | #8 | `docs/phase-3-p4-p5-plan` | P4/P5 planning doc | OPEN, independent |
-| #9 | `feature/phase-4-ops-dashboard` | P4 UI: playout editor, monitoring board, overlay editor | OPEN, stacked on #7 |
-| #10 | `feature/phase-5-reliability` | P5 reliability tests + runbook | OPEN, stacked on #9 |
+| #9 | `feature/phase-4-ops-dashboard` | P4 UI: playout editor, monitoring board, overlay editor (+`output_url` field `66edd42`) | OPEN, rebased on new #7 tip |
+| #10 | `feature/phase-5-reliability` | P5 reliability tests + runbook | OPEN, rebased on new #9 tip (`1ab4352`) |
 
-**Merge order when approved:** #5 → (retarget #7 to main) → #7 → #6 anytime → (retarget #9) → #9 → (retarget #10) → #10 → #8 anytime. See `docs/PHASE3_P5_RELIABILITY.md`.
+**Merge order when approved:** ~~#5~~ (merged) → ~~#7~~ (merged `c349b72`) → ~~#11 into #6 branch~~ (done `5bc73c0`, conflicts vs main resolved) → **#6** → retarget **#9** to main → **#10** → #8 anytime. See `docs/PHASE3_P5_RELIABILITY.md` + `docs/OVERLAY_PIPELINE.md`.
 
 **Safety gates (both OFF by default — production channels cannot be armed accidentally):**
 - `settings.scheduler_enabled=1` or `SCHEDULER_ENABLED=1` — required before any input swap executes
 - `settings.overlay_enabled=1` or `OVERLAY_ENABLED=1` — required before any ffmpeg worker spawns
+- Overlay `output_url` is mandatory (no derived ingest URL); schemes restricted to rtmp/rtmps/srt/udp — see `docs/OVERLAY_PIPELINE.md`
+- `OVERLAY_MAX_WORKERS` (default 8) caps global ffmpeg workers; 429 when saturated
 - Logo files confined to `OVERLAY_ASSET_DIR` (default `<cwd>/assets/overlay`)
 
 **Open items for the operator:**

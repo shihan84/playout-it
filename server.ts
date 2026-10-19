@@ -26,6 +26,8 @@ import metricsRoutes from './src/server/routes/metrics';
 import settingsRoutes from './src/server/routes/settings';
 import sslRoutes from './src/server/routes/ssl';
 import channelsRoutes from './src/server/routes/channels';
+import overlaysRoutes from './src/server/routes/overlays';
+import { recoverOverlayJobs } from './src/server/services/overlay';
 import schedulesRoutes from './src/server/routes/schedules';
 import monitoringRoutes from './src/server/routes/monitoring';
 
@@ -55,6 +57,7 @@ app.use('/api/settings', settingsRoutes);
 app.use('/api/servers', metricsRoutes);
 app.use('/api/ssl', sslRoutes);
 app.use('/api/channels', channelsRoutes);
+app.use('/api/overlays', overlaysRoutes);
 app.use('/api/schedules', schedulesRoutes);
 app.use('/api/monitoring', monitoringRoutes);
 
@@ -132,6 +135,7 @@ async function startServer() {
 
 // Start background services
 startWatchdog();
+recoverOverlayJobs();
 startScheduler();
 
 startServer().catch(err => {
