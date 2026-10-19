@@ -15,7 +15,7 @@ fs.mkdirSync(assetDir, { recursive: true });
 process.env.OVERLAY_ASSET_DIR = assetDir;
 
 const { buildArgs, validateProfileSpec, escapeDrawtext, OverlayError, startOverlay,
-  assertLogoPathAllowed, resolveLogoPath } =
+  assertLogoPathAllowed, resolveLogoPath, redactUrl } =
   await import('../src/server/services/overlay');
 const { db } = await import('../src/server/db');
 
@@ -31,6 +31,14 @@ test('buildArgs: logo overlay composes scale/alpha/position correctly', () => {
   assert.ok(s.endsWith('-f mpegts udp://127.0.0.1:5555'));
 });
 
+test('buildArgs: RTMP publishing uses FLV muxer instead of MPEG-TS', () => {
+  const profile = { logo_path: null, ticker_enabled: 0 };
+  const args = buildArgs(profile, 'http://example.test/source/index.m3u8', 'rtmp://example.test/live/overlay');
+  assert.deepEqual(args.slice(-3), ['-f', 'flv', 'rtmp://example.test/live/overlay']);
+  const srtArgs = buildArgs(profile, 'http://example.test/source/index.m3u8', 'srt://example.test:9000');
+  assert.deepEqual(srtArgs.slice(-3), ['-f', 'mpegts', 'srt://example.test:9000']);
+});
+
 test('buildArgs: ticker uses drawtext with escaped text and scroll expression', () => {
   const args = buildArgs({
     logo_path: null, ticker_enabled: 1, ticker_text: "Breaking: it's 100% live!",
@@ -38,17 +46,19 @@ test('buildArgs: ticker uses drawtext with escaped text and scroll expression', 
     ticker_color: 'white', ticker_bg_color: 'black@0.5',
   }, 'in.ts', 'out.ts');
   const s = args.join(' ');
-  assert.ok(s.includes('drawtext=text='), 'drawtext present');
-  assert.ok(s.includes("it\\'s"), "apostrophe escaped");
-  assert.ok(s.includes('100%%'), 'percent doubled for drawtext');
+  assert.ok(s.includes('drawtext=expansion=none:text='), 'drawtext present with expansion disabled');
+  assert.ok(s.includes("it\\\\\\'s"), "apostrophe double-escaped for graph+drawtext levels");
+  assert.ok(s.includes('100%'), 'percent passes through with expansion=none');
+  assert.ok(!s.includes('%%'), 'no %% doubling needed under expansion=none');
   assert.ok(s.includes('w-mod(t*60'), 'scroll speed in x expression');
   assert.ok(s.includes('h-th-10'), 'bottom position');
   assert.ok(s.includes('fontcolor=white'));
 });
 
 test('escapeDrawtext strips control characters and escapes filter metachars', () => {
+  // Unquoted two-level escaping: level 1 (drawtext) then level 2 (graph args).
   const out = escapeDrawtext("a'b:c%d\u001fe");
-  assert.equal(out, "a\\'b\\:c%%d e");
+  assert.equal(out, "a\\\\\\'b\\\\\\:c%d\\ e");
 });
 
 test('validateProfileSpec rejects unsafe/invalid inputs', () => {
@@ -171,8 +181,96 @@ test('resolveLogoPath: inside file ok; missing file and symlink escape rejected'
 test('startOverlay requires the overlay_enabled gate (off by default)', async () => {
   const sid = seedStream('gated', { live_url: 'http://fs.example/gated/index.m3u8' });
   const pid = db.prepare(
-    "INSERT INTO overlay_profiles (stream_id, name, output_stream) VALUES (?, 'g', 'gated_ovr')"
+    "INSERT INTO overlay_profiles (stream_id, name, output_stream, output_url) VALUES (?, 'g', 'gated_ovr', 'srt://staging.example:9000')"
   ).run(sid).lastInsertRowid;
   await assert.rejects(() => startOverlay(Number(pid)),
     (e: any) => e.status === 409 && /disabled/i.test(e.message));
+});
+
+test('startOverlay rejects unconfigured publishing destination before spawning', async () => {
+  const sid = seedStream('missing-destination', { live_url: 'http://fs.example/missing-destination/index.m3u8' });
+  const pid = db.prepare(
+    "INSERT INTO overlay_profiles (stream_id, name, output_stream) VALUES (?, 'missing', 'missing-destination_ovr')"
+  ).run(sid).lastInsertRowid;
+  await assert.rejects(() => startOverlay(Number(pid)),
+    (e: any) => e.status === 400 && /explicit output_url/i.test(e.message));
+});
+
+// ---- Hardening: verified publish schemes only --------------------------------
+
+test('validateProfileSpec rejects http(s) and unknown output_url schemes', () => {
+  const base = { name: 'p', stream_id: 1 };
+  for (const bad of ['http://cdn.example/publish/x', 'https://cdn.example/publish/x', 'ftp://cdn.example/x', 'file:///tmp/x']) {
+    assert.throws(() => validateProfileSpec({ ...base, output_url: bad }),
+      (e: any) => /rtmp|srt|udp|publishing/i.test(e.message));
+  }
+  for (const ok of ['rtmp://cdn.example/live/x', 'rtmps://cdn.example/live/x', 'srt://cdn.example:9000', 'udp://239.1.1.1:5000']) {
+    assert.equal(validateProfileSpec({ ...base, output_url: ok }).output_url, ok);
+  }
+});
+
+test('startOverlay rejects a DB-resident non-publish scheme (defense in depth)', async () => {
+  const sid = seedStream('badscheme', { live_url: 'http://fs.example/badscheme/index.m3u8' });
+  const pid = db.prepare(
+    "INSERT INTO overlay_profiles (stream_id, name, output_stream, output_url) VALUES (?, 'bs', 'badscheme_ovr', 'http://other.example/publish/x')"
+  ).run(sid).lastInsertRowid;
+  await assert.rejects(() => startOverlay(Number(pid)),
+    (e: any) => e.status === 400 && /publishing protocol/i.test(e.message));
+});
+
+// ---- Hardening: URL identity variants -----------------------------------------
+
+test('startOverlay rejects folder/name source targeting and port variants', async () => {
+  const sid = seedStream('folder/name', { live_url: 'http://fs.example/folder/name/index.m3u8' });
+  const pid = db.prepare(
+    "INSERT INTO overlay_profiles (stream_id, name, output_url) VALUES (?, 'f', 'http://fs.example:80/flussonic/publish/folder/name')"
+  ).run(sid).lastInsertRowid;
+  await assert.rejects(() => startOverlay(Number(pid)),
+    (e: any) => e.status === 409 && /source stream|equals the source input/i.test(e.message));
+
+  const pid2 = db.prepare(
+    "INSERT INTO overlay_profiles (stream_id, name, output_url) VALUES (?, 'f2', 'rtmp://fs.example:1935/publish/folder%2Fname')"
+  ).run(sid).lastInsertRowid;
+  await assert.rejects(() => startOverlay(Number(pid2)),
+    (e: any) => e.status === 409 && /source stream|equals the source input/i.test(e.message));
+});
+
+test('startOverlay rejects two profiles publishing to the same destination', async () => {
+  const s1 = seedStream('dup-a', { live_url: 'http://fs.example/dup-a/index.m3u8' });
+  const s2 = seedStream('dup-b', { live_url: 'http://fs.example/dup-b/index.m3u8' });
+  db.prepare("INSERT INTO overlay_profiles (stream_id, name, output_url) VALUES (?, 'first', 'srt://dest.example:9000')").run(s1);
+  const pid = db.prepare(
+    "INSERT INTO overlay_profiles (stream_id, name, output_url) VALUES (?, 'second', 'srt://dest.example:9000')"
+  ).run(s2).lastInsertRowid;
+  await assert.rejects(() => startOverlay(Number(pid)),
+    (e: any) => e.status === 409 && /already publishes/i.test(e.message));
+});
+
+test('startOverlay enforces the global worker cap before spawning', async () => {
+  // Park 8 fake running jobs — the cap trips regardless of ffmpeg presence.
+  for (let i = 0; i < 8; i++) {
+    db.prepare("INSERT INTO overlay_jobs (profile_id, stream_id, status) VALUES (1, 1, 'running')").run();
+  }
+  const sid = seedStream('capped', { live_url: 'http://fs.example/capped/index.m3u8' });
+  const pid = db.prepare(
+    "INSERT INTO overlay_profiles (stream_id, name, output_stream, output_url, enabled) VALUES (?, 'c', 'capped_ovr', 'srt://dest.example:9001', 1)"
+  ).run(sid).lastInsertRowid;
+  // Arm the gate for this test only, then disarm again.
+  db.prepare("INSERT OR REPLACE INTO settings (key, value) VALUES ('overlay_enabled', '1')").run();
+  try {
+    await assert.rejects(() => startOverlay(Number(pid)),
+      (e: any) => e.status === 429 && /worker limit/i.test(e.message));
+  } finally {
+    db.prepare("DELETE FROM settings WHERE key = 'overlay_enabled'").run();
+    db.prepare("DELETE FROM overlay_jobs WHERE status = 'running'").run();
+  }
+});
+
+test('redactUrl strips credentials from publish URLs', () => {
+  assert.equal(redactUrl('rtmp://user:secret@cdn.example/live/x'), 'rtmp://***@cdn.example/live/x');
+  assert.equal(redactUrl('srt://cdn.example:9000'), 'srt://cdn.example:9000');
+  assert.equal(redactUrl(null), null);
+  assert.equal(redactUrl('rtmp://u:p@h/x'.replace('u:p@h', 'u:p@h')), 'rtmp://***@h/x');
+  // Unparseable strings are returned unchanged unless they contain user@host form.
+  assert.equal(redactUrl('plain text'), 'plain text');
 });

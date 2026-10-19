@@ -79,13 +79,22 @@ export function resolveLogoPath(logoPath: string): string {
   return real;
 }
 
-// Canonicalize a URL for equality checks: lowercase scheme+host, strip the
-// default port and trailing slashes. Throws on unparseable input.
+// Default ports per scheme — used to canonicalize `rtmp://host` and
+// `rtmp://host:1935` to the same identity.
+const DEFAULT_PORTS: Record<string, string> = {
+  'http:': '80', 'https:': '443', 'rtmp:': '1935', 'rtmps:': '443',
+};
+
+function effectivePort(u: URL): string {
+  return u.port || DEFAULT_PORTS[u.protocol] || '';
+}
+
+// Canonicalize a URL for equality checks: lowercase scheme+host, normalize
+// the default port, drop userinfo, strip trailing slashes.
 function canonUrl(raw: string): string | null {
   try {
     const u = new URL(raw);
-    const port = u.port && !((u.protocol === 'http:' && u.port === '80') || (u.protocol === 'https:' && u.port === '443'))
-      ? `:${u.port}` : '';
+    const port = u.port && u.port !== DEFAULT_PORTS[u.protocol] ? `:${u.port}` : '';
     return `${u.protocol}//${u.hostname.toLowerCase()}${port}${u.pathname.replace(/\/+$/, '')}${u.search}`;
   } catch {
     // udp:// rtmp:// srt:// parse fine via URL; anything unparseable is
@@ -94,17 +103,42 @@ function canonUrl(raw: string): string | null {
   }
 }
 
+// Strip credentials from a URL for safe display — publish endpoints often
+// carry user:pass@ tokens that must never reach the UI or logs.
+export function redactUrl(raw: string | null | undefined): string | null {
+  if (!raw) return null;
+  try {
+    const u = new URL(raw);
+    if (u.username || u.password) {
+      u.username = '***';
+      u.password = '';
+    }
+    return u.toString();
+  } catch {
+    return raw.replace(/\/\/[^/@]*@/, '//***@');
+  }
+}
+
 // True when `out` targets the given stream on the given server — i.e. ffmpeg
 // would publish back onto the source channel or an endpoint the source
-// consumes. Covers publish paths, stream API paths, and any URL that has the
-// stream name as a path segment on the same host.
+// consumes. Compares scheme-normalized host AND effective port (an
+// alternate port on the same host still reaches the same server), then
+// matches the stream name either as a single path segment ('name') or as a
+// trailing multi-segment path ('folder/name' after percent-decoding).
 function urlTargetsStream(out: string, serverUrl: string, streamName: string): boolean {
   try {
     const o = new URL(out);
     const s = new URL(serverUrl);
     if (o.hostname.toLowerCase() !== s.hostname.toLowerCase()) return false;
-    const segs = o.pathname.split('/').map(decodeURIComponent).filter(Boolean);
-    return segs.includes(streamName);
+    // Port is intentionally NOT compared: a Flussonic server accepts ingest
+    // on rtmp:1935, srt, udp and http simultaneously — publishing to the same
+    // hostname under ANY port still reaches the same server.
+    const path = o.pathname.split('/').map(seg => {
+      try { return decodeURIComponent(seg); } catch { return seg; }
+    }).join('/');
+    return path.split('/').includes(streamName)
+      || path.endsWith(`/${streamName}`)
+      || path === `/${streamName}`;
   } catch {
     return false;
   }
@@ -179,8 +213,16 @@ export function validateProfileSpec(body: any) {
     throw new OverlayError('output_stream may contain letters, digits, _ - . / only');
   }
   const outputUrl = body.output_url ? String(body.output_url).trim() : null;
-  if (outputUrl && !/^(udp|rtmp|srt|https?):\/\//i.test(outputUrl)) {
-    throw new OverlayError('output_url must start with udp://, rtmp://, srt://, or http(s)://');
+  // Only protocols with verified publish semantics are accepted:
+  //   rtmp:// / rtmps:// -> FLV muxer (Flussonic RTMP ingest)
+  //   srt://  / udp://   -> MPEG-TS muxer (Flussonic ts/srt/udp ingest)
+  // http(s) is rejected — it is ambiguous (HLS/DASH pull vs PUT ingest is
+  // not a verified Flussonic publish path) and would broaden SSRF surface.
+  if (outputUrl && /^https?:\/\//i.test(outputUrl)) {
+    throw new OverlayError('http(s):// output_url is not a verified publishing protocol — use rtmp(s)://, srt:// or udp://');
+  }
+  if (outputUrl && !/^(rtmps?|srt|udp):\/\//i.test(outputUrl)) {
+    throw new OverlayError('output_url must start with rtmp://, rtmps://, srt://, or udp://');
   }
 
   return {
@@ -201,15 +243,33 @@ export function validateProfileSpec(body: any) {
 
 // ---- Filter graph construction ---------------------------------------------
 
-// Escape a string for safe inclusion in a drawtext `text=` option:
-// filter-graph level: \ : ' need backslash escapes; % needs %%.
+// Escape a string for safe inclusion in a drawtext `text=` option.
+// Two parse levels are involved: the filtergraph args parser (separates
+// options on ':' and consumes \-escapes) and drawtext's own option parser.
+// NOTE: single-quoted values containing \' break ffmpeg's args parser (a
+// \' inside '...' is a real parse hazard in -filter_complex), so the text
+// is emitted UNQUOTED with both levels backslash-escaped instead.
 export function escapeDrawtext(t: string): string {
-  return t
+  // Level 1 — drawtext option parser: \ : ' % are special.
+  let s = t
     .replace(/\\/g, '\\\\')
     .replace(/'/g, "\\'")
     .replace(/:/g, '\\:')
-    .replace(/%/g, '%%')
     .replace(/[\x00-\x1f]/g, ' ');
+  // Level 2 — filtergraph args parser: escape level-1 backslashes first,
+  // then the graph-level metacharacters.
+  return s
+    .replace(/\\/g, '\\\\')
+    .replace(/'/g, "\\'")
+    .replace(/:/g, '\\:')
+    .replace(/,/g, '\\,')
+    .replace(/;/g, '\\;')
+    .replace(/\[/g, '\\[')
+    .replace(/\]/g, '\\]')
+    .replace(/\(/g, '\\(')
+    .replace(/\)/g, '\\)')
+    .replace(/=/g, '\\=')
+    .replace(/ /g, '\\ ');
 }
 
 function logoOverlayExpr(p: any): string {
@@ -249,10 +309,10 @@ export function buildArgs(profile: any, inputUrl: string, outputUrl: string): st
     const speed = profile.ticker_speed;
     // Scroll right-to-left at speed px/s; loop seamlessly.
     const dt =
-      `drawtext=text='${escapeDrawtext(profile.ticker_text)}'` +
+      `drawtext=expansion=none:text=${escapeDrawtext(profile.ticker_text)}` +
       `:x='w-mod(t*${speed}\\,w+tw)'` +
       `:y=${y}:fontsize=${profile.ticker_font_size}` +
-      `:fontcolor=${profile.ticker_color}:box=1:boxcolor=${profile.ticker_bg_color}`;
+      `:fontcolor=${profile.ticker_color}:box=1:boxcolor='${profile.ticker_bg_color}'`;
     filters.push(`${vChain}${dt}[v_out]`);
     vChain = '[v_out]';
   }
@@ -266,7 +326,7 @@ export function buildArgs(profile: any, inputUrl: string, outputUrl: string): st
   args.push(
     '-c:v', 'libx264', '-preset', 'veryfast', '-tune', 'zerolatency',
     '-c:a', 'aac', '-b:a', '128k',
-    '-f', 'mpegts', outputUrl
+    '-f', /^rtmps?:\/\//i.test(outputUrl) ? 'flv' : 'mpegts', outputUrl
   );
   return args;
 }
@@ -281,6 +341,9 @@ export function __setSpawnImpl(fn: SpawnFn) { const prev = spawnImpl; spawnImpl 
 
 const activeJobs = new Map<number, ChildProcess>(); // jobId -> process
 const MAX_PER_STREAM = 1;                            // one overlay per channel
+// Global ffmpeg worker cap — each job is a full decode+encode process; an
+// unbounded count would saturate CPU and starve the management server.
+const MAX_TOTAL_WORKERS = Math.max(1, Number(process.env.OVERLAY_MAX_WORKERS || 8));
 
 export function runningJobs() {
   return db.prepare(`SELECT * FROM overlay_jobs WHERE status IN ('starting','running')`).all() as any[];
@@ -304,16 +367,37 @@ export async function startOverlay(profileId: number): Promise<any> {
   if (!inputUrl) throw new OverlayError('No playable input URL for this stream', 400);
 
   const outputName = profile.output_stream || `${stream.name}_ovr`;
-  const outputUrl = profile.output_url
-    || (server ? `${server.url.replace(/\/$/, '')}/flussonic/publish/${encodeURIComponent(outputName)}` : null);
-  if (!outputUrl) throw new OverlayError('No output_url and stream has no server to derive one from', 400);
 
-  // Isolation rule A: a named output stream must not be the source channel.
-  if (outputName === stream.name && !profile.output_url) {
+  // Isolation rule A: a named output stream must never be the source channel
+  // — regardless of whether an explicit output_url is present.
+  if (outputName === stream.name) {
     throw new OverlayError(
       `output_stream '${outputName}' equals the source stream -- overlay output must be an isolated stream. ` +
-      `Set output_stream (e.g. '${stream.name}_ovr') or an explicit output_url.`, 409);
+      `Set output_stream (e.g. '${stream.name}_ovr').`, 409);
   }
+
+  // Recursion guard (name-based — runs even without an output_url): reject a
+  // cycle where our OUTPUT stream is itself the source of an enabled profile
+  // whose output resolves back to this stream (A -> B plus B -> A would loop
+  // the ffmpeg pipelines indefinitely).
+  const backedge = db.prepare(
+    `SELECT p.id FROM overlay_profiles p JOIN streams s2 ON s2.id = p.stream_id
+     WHERE s2.name = ? AND p.enabled = 1
+       AND (p.output_stream = ? OR (p.output_stream IS NULL AND ? = s2.name || '_ovr'))`
+  ).get(outputName, stream.name, stream.name) as any;
+  if (backedge) {
+    throw new OverlayError(
+      `Recursive overlay rejected: '${outputName}' already sources an overlay outputting to '${stream.name}'. ` +
+      `Chained overlays must not form cycles.`, 409);
+  }
+
+  // Fail closed: the management API URL does not identify a verified ingest
+  // endpoint. No synthetic URL is derived — an explicit, validated
+  // destination is required before any further checks.
+  if (!profile.output_url) {
+    throw new OverlayError('An explicit output_url is required (verified RTMP, SRT or UDP publishing endpoint)', 400);
+  }
+  const outputUrl = profile.output_url;
 
   // Isolation rule B: an explicit output_url gets the SAME scrutiny —
   // canonicalized and rejected if it equals the input URL, targets the
@@ -323,7 +407,8 @@ export async function startOverlay(profileId: number): Promise<any> {
     throw new OverlayError(
       `output_url equals the source input URL — overlay output must not feed back into the channel it reads`, 409);
   }
-  if (server && urlTargetsStream(outputUrl, server.url, stream.name)) {
+  if ((server && urlTargetsStream(outputUrl, server.url, stream.name))
+    || urlTargetsStream(outputUrl, inputUrl, stream.name)) {
     throw new OverlayError(
       `output_url targets the source stream '${stream.name}' on its own server — overlay output must be isolated`, 409);
   }
@@ -334,18 +419,26 @@ export async function startOverlay(profileId: number): Promise<any> {
       `output_url matches one of the source channel's inputs — publishing there creates a feedback loop`, 409);
   }
 
-  // Recursion guard: reject a cycle where our OUTPUT stream is itself the
-  // source of an enabled profile whose output resolves back to this stream
-  // (A -> B plus B -> A would loop the ffmpeg pipelines indefinitely).
-  const backedge = db.prepare(
-    `SELECT p.id FROM overlay_profiles p JOIN streams s2 ON s2.id = p.stream_id
-     WHERE s2.name = ? AND p.enabled = 1
-       AND (p.output_stream = ? OR (p.output_stream IS NULL AND ? = s2.name || '_ovr'))`
-  ).get(outputName, stream.name, stream.name) as any;
-  if (backedge) {
+  // Defense in depth: even if a non-publish scheme slips into the DB (legacy
+  // row or direct write), refuse to spawn — only verified protocols run.
+  if (!/^(rtmps?|srt|udp):\/\//i.test(outputUrl)) {
     throw new OverlayError(
-      `Recursive overlay rejected: '${outputName}' already sources an overlay outputting to '${stream.name}'. ` +
-      `Chained overlays must not form cycles.`, 409);
+      `output_url scheme is not a verified publishing protocol — use rtmp(s)://, srt:// or udp://`, 400);
+  }
+
+  // Output collision: two profiles must not publish to the same destination
+  // — two ffmpeg workers writing one endpoint corrupts the stream.
+  const collision = db.prepare(
+    `SELECT id, output_url FROM overlay_profiles WHERE id != ? AND output_url IS NOT NULL`
+  ).all(profile.id) as any[];
+  if (collision.some(p => canonUrl(p.output_url) === outCanon)) {
+    throw new OverlayError('Another overlay profile already publishes to this output_url', 409);
+  }
+  const nameCollision = db.prepare(
+    `SELECT id FROM overlay_profiles WHERE id != ? AND output_stream = ? AND enabled = 1`
+  ).get(profile.id, outputName) as any;
+  if (nameCollision) {
+    throw new OverlayError(`Another enabled profile already outputs to stream '${outputName}'`, 409);
   }
 
   // Logo assets: full path resolution (containment + existence + symlink).
@@ -359,15 +452,23 @@ export async function startOverlay(profileId: number): Promise<any> {
     throw new OverlayError('Overlay rendering is disabled — set settings.overlay_enabled=1 or OVERLAY_ENABLED=1', 409);
   }
 
-  if (!detectFfmpeg()) {
-    throw new OverlayError('ffmpeg not found on PATH (set FFMPEG_PATH). Overlay rendering requires FFmpeg.', 503);
-  }
-
+  // Resource caps are policy — enforce before capability checks so a busy
+  // pool reports 429/409 deterministically even when ffmpeg is absent.
   const running = db.prepare(
     `SELECT COUNT(*) n FROM overlay_jobs WHERE stream_id = ? AND status IN ('starting','running')`
   ).get(stream.id) as any;
   if (running.n >= MAX_PER_STREAM) {
     throw new OverlayError('An overlay job is already running for this stream -- stop it first', 409);
+  }
+  const globalRunning = db.prepare(
+    `SELECT COUNT(*) n FROM overlay_jobs WHERE status IN ('starting','running')`
+  ).get() as any;
+  if (globalRunning.n >= MAX_TOTAL_WORKERS) {
+    throw new OverlayError(`Overlay worker limit reached (${MAX_TOTAL_WORKERS}) — stop a job or raise OVERLAY_MAX_WORKERS`, 429);
+  }
+
+  if (!detectFfmpeg()) {
+    throw new OverlayError('ffmpeg not found on PATH (set FFMPEG_PATH). Overlay rendering requires FFmpeg.', 503);
   }
 
   const info = db.prepare(
@@ -394,8 +495,9 @@ export async function startOverlay(profileId: number): Promise<any> {
   });
   proc.on('exit', (code: any) => {
     const cur = db.prepare('SELECT status FROM overlay_jobs WHERE id = ?').get(jobId) as any;
-    // 'stopped' means we asked it to stop -- don't overwrite deliberate stops.
-    if (cur && cur.status !== 'stopped') {
+    // 'stopped'/'failed' are deliberate terminal states (stop request or the
+    // 'error' handler already recorded the spawn failure) — never overwrite.
+    if (cur && cur.status !== 'stopped' && cur.status !== 'failed') {
       db.prepare(`UPDATE overlay_jobs SET status=?, exit_code=?, last_error=?, stopped_at=CURRENT_TIMESTAMP WHERE id=?`)
         .run(code === 0 ? 'completed' : 'exited', code, code === 0 ? null : (stderrTail.slice(-1000) || `exit code ${code}`), jobId);
       if (code !== 0) {

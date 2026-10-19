@@ -34,18 +34,21 @@ Environment notes: FFmpeg present on this Windows host (`ffmpeg`/`ffprobe` on PA
 
 | PR | Branch | Scope | Status |
 |---|---|---|---|
-| #5 | `feature/phase-3-scheduled-playout` | P1 scheduler (jobs, crash-safe swap+restore, `swapping`/`restore_unverified`, enable gate) | OPEN, CI green, review fixes in `1785897` |
-| #6 | `feature/phase-3-overlay-pipeline` | P2 ffmpeg logo/ticker → isolated output; URL/feedback/symlink guards; enable gate | OPEN, review fixes in `28658bc`+`0ea6e22` |
-| #7 | `feature/phase-3-monitoring` | P3 monitoring API; rebased on #5 tip, tracks new statuses | OPEN, stacked on #5 |
+| #5 | `feature/phase-3-scheduled-playout` | P1 scheduler (jobs, crash-safe swap+restore, `swapping`/`restore_unverified`, enable gate) | **MERGED** `b0765db` |
+| #6 | `feature/phase-3-overlay-pipeline` | P2 ffmpeg logo/ticker → isolated output; URL/feedback/symlink guards; enable gate | OPEN, review fixes in `28658bc`+`0ea6e22`; child fix below |
+| #11 | `feature/overlay-output-protocol-fix` → #6 branch | RTMP→FLV / SRT·UDP→TS muxer; explicit `output_url` required (no derivation); scheme allowlist; URL-identity hardening (ports, `folder/name`, `%xx`); output collision 409; global worker cap; credential redaction; drawtext escaping fix | DRAFT — review pending, do NOT merge without owner approval |
+| #7 | `feature/phase-3-monitoring` | P3 monitoring API; rebased onto merged #5 (`30a6cae`), tracks new statuses | OPEN, base `main` |
 | #8 | `docs/phase-3-p4-p5-plan` | P4/P5 planning doc | OPEN, independent |
-| #9 | `feature/phase-4-ops-dashboard` | P4 UI: playout editor, monitoring board, overlay editor | OPEN, stacked on #7 |
-| #10 | `feature/phase-5-reliability` | P5 reliability tests + runbook | OPEN, stacked on #9 |
+| #9 | `feature/phase-4-ops-dashboard` | P4 UI: playout editor, monitoring board, overlay editor (+`output_url` field `66edd42`) | OPEN, rebased on new #7 tip |
+| #10 | `feature/phase-5-reliability` | P5 reliability tests + runbook | OPEN, rebased on new #9 tip (`1ab4352`) |
 
-**Merge order when approved:** #5 → (retarget #7 to main) → #7 → #6 anytime → (retarget #9) → #9 → (retarget #10) → #10 → #8 anytime. See `docs/PHASE3_P5_RELIABILITY.md`.
+**Merge order when approved:** ~~#5~~ (merged) → **#7** → integrate **#11** into the #6 branch (not main) → **#6** → **#9** → **#10** → #8 anytime. See `docs/PHASE3_P5_RELIABILITY.md` + `docs/OVERLAY_PIPELINE.md`.
 
 **Safety gates (both OFF by default — production channels cannot be armed accidentally):**
 - `settings.scheduler_enabled=1` or `SCHEDULER_ENABLED=1` — required before any input swap executes
 - `settings.overlay_enabled=1` or `OVERLAY_ENABLED=1` — required before any ffmpeg worker spawns
+- Overlay `output_url` is mandatory (no derived ingest URL); schemes restricted to rtmp/rtmps/srt/udp — see `docs/OVERLAY_PIPELINE.md`
+- `OVERLAY_MAX_WORKERS` (default 8) caps global ffmpeg workers; 429 when saturated
 - Logo files confined to `OVERLAY_ASSET_DIR` (default `<cwd>/assets/overlay`)
 
 **Open items for the operator:**
