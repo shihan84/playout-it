@@ -36,13 +36,13 @@ Environment notes: FFmpeg present on this Windows host (`ffmpeg`/`ffprobe` on PA
 |---|---|---|---|
 | #5 | `feature/phase-3-scheduled-playout` | P1 scheduler (jobs, crash-safe swap+restore, `swapping`/`restore_unverified`, enable gate) | **MERGED** `b0765db` |
 | #6 | `feature/phase-3-overlay-pipeline` | P2 ffmpeg logo/ticker → isolated output; URL/feedback/symlink guards; enable gate | OPEN, review fixes in `28658bc`+`0ea6e22`; child fix below |
-| #11 | `feature/overlay-output-protocol-fix` → #6 branch | RTMP→FLV / SRT·UDP→TS muxer; explicit `output_url` required (no derivation); scheme allowlist; URL-identity hardening (ports, `folder/name`, `%xx`); output collision 409; global worker cap; credential redaction; drawtext escaping fix | DRAFT — review pending, do NOT merge without owner approval |
+| #11 | `feature/overlay-output-protocol-fix` → #6 branch | RTMP→FLV / SRT·UDP→TS muxer; explicit `output_url` required (no derivation); scheme allowlist; URL-identity hardening (ports, `folder/name`, `%xx`); output collision 409; global worker cap; credential redaction; drawtext escaping fix | **INTEGRATED** into #6 branch `5bc73c0` |
 | #7 | `feature/phase-3-monitoring` | P3 monitoring API; rebased onto merged #5 (`30a6cae`), tracks new statuses | OPEN, base `main` |
 | #8 | `docs/phase-3-p4-p5-plan` | P4/P5 planning doc | OPEN, independent |
 | #9 | `feature/phase-4-ops-dashboard` | P4 UI: playout editor, monitoring board, overlay editor (+`output_url` field `66edd42`) | OPEN, rebased on new #7 tip |
 | #10 | `feature/phase-5-reliability` | P5 reliability tests + runbook | OPEN, rebased on new #9 tip (`1ab4352`) |
 
-**Merge order when approved:** ~~#5~~ (merged) → **#7** → integrate **#11** into the #6 branch (not main) → **#6** → **#9** → **#10** → #8 anytime. See `docs/PHASE3_P5_RELIABILITY.md` + `docs/OVERLAY_PIPELINE.md`.
+**Merge order when approved:** ~~#5~~ (merged) → ~~#7~~ (merged `c349b72`) → ~~#11 into #6 branch~~ (done `5bc73c0`, conflicts vs main resolved) → **#6** → retarget **#9** to main → **#10** → #8 anytime. See `docs/PHASE3_P5_RELIABILITY.md` + `docs/OVERLAY_PIPELINE.md`.
 
 **Safety gates (both OFF by default — production channels cannot be armed accidentally):**
 - `settings.scheduler_enabled=1` or `SCHEDULER_ENABLED=1` — required before any input swap executes
