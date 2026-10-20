@@ -40,8 +40,12 @@ const SSL_CERT_PATH = config.sslCertPath;
 
 app.use(cookieParser());
 app.use('/api', csrfProtection);
-app.use(express.json({ limit: '1000gb' }));
-app.use(express.urlencoded({ limit: '1000gb', extended: true }));
+// Auth endpoints get a tighter cap first (credentials are <1KB); the global
+// limit covers the largest real JSON payloads (VOD/playlist path lists,
+// settings). Media uploads go through multer, not these parsers.
+app.use('/api/auth', express.json({ limit: '2kb' }));
+app.use(express.json({ limit: '5mb' }));
+app.use(express.urlencoded({ limit: '1mb', extended: true }));
 
 // API routes
 app.use('/api/auth', authRoutes);
@@ -69,6 +73,12 @@ app.post('/api/watchdog/restart', authenticateToken, requireAdmin, (req, res) =>
 
 // Global error handler
 app.use((err: any, req: express.Request, res: express.Response, _next: express.NextFunction) => {
+  if (err.type === 'entity.too.large' || err.status === 413) {
+    return res.status(413).json({ error: 'Payload too large' });
+  }
+  if (err.type === 'entity.parse.failed') {
+    return res.status(400).json({ error: 'Malformed request body' });
+  }
   console.error('Unhandled error:', err);
   if (!res.headersSent) {
     res.status(500).json({ error: 'Internal server error' });

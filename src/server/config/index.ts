@@ -1,7 +1,24 @@
 import 'dotenv/config';
 
-if (process.env.NODE_ENV === 'production' && (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 32)) {
-  throw new Error('JWT_SECRET must be configured with at least 32 characters in production');
+const JWT_WEAK_SECRETS = new Set([
+  'your-secret-key-change-in-production',
+  'secret',
+  'changeme',
+  'change-me',
+  'jwt-secret',
+  'jwt_secret',
+  'password',
+  'test-secret',
+]);
+
+const jwtSecretEnv = process.env.JWT_SECRET;
+if (process.env.NODE_ENV === 'production') {
+  if (!jwtSecretEnv || jwtSecretEnv.length < 32) {
+    throw new Error('JWT_SECRET must be configured with at least 32 characters in production');
+  }
+  if (JWT_WEAK_SECRETS.has(jwtSecretEnv.trim().toLowerCase())) {
+    throw new Error('JWT_SECRET must not be a placeholder or commonly used value in production');
+  }
 }
 
 export const config = {
