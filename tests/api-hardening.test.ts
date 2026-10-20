@@ -130,6 +130,37 @@ test('rate limiter isolates counts between clients', async () => {
   }
 });
 
+test('rate-limit window expires — no permanent lockout', async () => {
+  const srv = await startScratchApp((app) => {
+    app.post('/login', createRateLimiter({ windowMs: 300, max: 1 }), (_req, res) => res.json({ ok: true }));
+  });
+  try {
+    const port = srv.address().port;
+    assert.equal((await postJson(port, '/login')).status, 200);
+    assert.equal((await postJson(port, '/login')).status, 429);
+    await new Promise(r => setTimeout(r, 400)); // let the 300ms window lapse
+    assert.equal((await postJson(port, '/login')).status, 200);
+  } finally {
+    srv.close();
+  }
+});
+
+test('multiple users behind one proxy share a bucket when proxy is untrusted', async () => {
+  const srv = await startScratchApp((app) => {
+    // No trust proxy: NATed/proxied clients collapse to the proxy's IP.
+    app.post('/login', createRateLimiter({ windowMs: 60000, max: 2 }), (_req, res) => res.json({ ok: true }));
+  });
+  try {
+    const port = srv.address().port;
+    assert.equal((await postJson(port, '/login', { 'x-forwarded-for': '10.0.0.1' })).status, 200);
+    assert.equal((await postJson(port, '/login', { 'x-forwarded-for': '10.0.0.2' })).status, 200);
+    // Third distinct "user" behind the same peer IP is still limited.
+    assert.equal((await postJson(port, '/login', { 'x-forwarded-for': '10.0.0.3' })).status, 429);
+  } finally {
+    srv.close();
+  }
+});
+
 test('spoofed X-Forwarded-For cannot bypass the limit when proxy is not trusted', async () => {
   const srv = await startScratchApp((app) => {
     // No `trust proxy` -> XFF ignored, key is the socket peer.
