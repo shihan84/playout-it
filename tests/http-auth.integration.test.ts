@@ -229,6 +229,7 @@ test.before(async () => {
       OVERLAY_ENABLED: '1',
       OVERLAY_ASSET_DIR: path.join(tmpDir, 'overlay-assets'),
       SCHEDULER_ENABLED: '1',
+      AUTH_RATE_LIMIT_MAX: '100000', // suite performs ~65 logins from one IP
     },
     cwd: process.cwd(),
     stdio: ['ignore', 'pipe', 'pipe'],

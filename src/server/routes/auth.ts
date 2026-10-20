@@ -4,10 +4,11 @@ import jwt from 'jsonwebtoken';
 import { db } from '../db';
 import { config } from '../config';
 import { authenticateToken } from '../middleware/auth';
+import { authRateLimiter } from '../middleware/rateLimit';
 
 const router = Router();
 
-router.post('/login', (req, res) => {
+router.post('/login', authRateLimiter, (req, res) => {
   const { username, password } = req.body;
 
 
