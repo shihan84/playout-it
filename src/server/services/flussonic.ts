@@ -34,6 +34,29 @@ export function serverInBackoff(server: any): boolean {
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
+// Classify an axios/network failure into an operator-actionable diagnostic —
+// raw err.message alone ("Request failed with status code 500") doesn't say
+// WHICH layer broke. Stored to servers.last_error and surfaced in alerts.
+export function describeNetError(err: any): string {
+  const status = err?.response?.status;
+  if (status) {
+    const label =
+      status === 401 || status === 403 ? 'authentication rejected' :
+      status === 404 ? 'endpoint not found (check Flussonic version/API path)' :
+      status === 429 ? 'rate limited by remote' :
+      status >= 500 ? 'remote server error' : `HTTP ${status}`;
+    return `${label} (HTTP ${status})`;
+  }
+  const code = err?.code || '';
+  if (code === 'ECONNABORTED' || /timeout/i.test(err?.message || '')) return `request timed out (${err?.timeout || 'configured'}ms)`;
+  if (code === 'ECONNREFUSED') return `connection refused — Flussonic not listening at ${err?.address || 'host'}${err?.port ? ':' + err.port : ''}`;
+  if (code === 'ENOTFOUND' || code === 'EAI_AGAIN') return `DNS resolution failed (${code}) — check server hostname`;
+  if (code === 'ECONNRESET') return 'connection reset by remote (TLS mismatch or restart mid-request)';
+  if (code.startsWith('UNABLE_TO_') || code.includes('CERT') || code === 'DEPTH_ZERO_SELF_SIGNED_CERT') return `TLS certificate error (${code})`;
+  if (code === 'ERR_BAD_RESPONSE' || err?.message?.includes('socket hang up')) return 'connection dropped mid-response';
+  return err?.message || 'unknown network error';
+}
+
 // Resolve the auth header for a server. Prefers explicit username/password,
 // falls back to legacy api_key formats (user:pass, or flussonic/admin password).
 export function getServerAuthHeader(server: any): string {
@@ -119,7 +142,7 @@ export async function flussonicRequest(
       }
       // Never retry client errors; retry network errors and 5xx once
       if (e.response && e.response.status < 500) {
-        if (server.id) recordServerFailure(server.id, lastError.message);
+        if (server.id) recordServerFailure(server.id, describeNetError(lastError));
         throw lastError;
       }
       if (attempt < retries) await sleep(300 * (attempt + 1));
@@ -127,6 +150,6 @@ export async function flussonicRequest(
   }
   // Record one failure per request — counting each retry attempt would
   // double-count consecutive_failures and trip the circuit breaker early.
-  if (server.id) recordServerFailure(server.id, lastError.message);
+  if (server.id) recordServerFailure(server.id, describeNetError(lastError));
   throw lastError;
 }

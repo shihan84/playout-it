@@ -12,6 +12,18 @@ let isSyncing = false;
 let watchdogTimer: NodeJS.Timeout;
 let autoSyncTimer: NodeJS.Timeout;
 
+// A server is due for a sync cycle when at least its effective interval has
+// elapsed since last_synced_at. Effective interval = per-server
+// sync_interval_secs override, else the global interval. A server that has
+// never synced is always due. The 1s slack absorbs whole-second timestamp
+// rounding plus tick drift when tick == interval.
+export function serverDueForSync(server: any, globalSecs: number, nowMs: number): boolean {
+  if (!server.last_synced_at) return true;
+  const eff = server.sync_interval_secs || globalSecs;
+  const elapsed = nowMs - new Date(`${server.last_synced_at}Z`).getTime();
+  return elapsed >= eff * 1000 - 1000;
+}
+
 const checkStreams = async () => {
   if (isChecking) return;
   isChecking = true;
@@ -211,15 +223,11 @@ export const startWatchdog = () => {
             console.log(`Auto-sync skipping ${server.name} (in failure backoff)`);
             return;
           }
-          // Per-server interval override: only apply the elapsed check when
-          // an override is actually configured — the global tick already
-          // respects the global interval, and whole-second timestamp
-          // resolution would otherwise skip every other tick.
-          if (server.sync_interval_secs && server.last_synced_at) {
-            const elapsed = Date.now() - new Date(`${server.last_synced_at}Z`).getTime();
-            // 1s slack for timestamp rounding + tick drift
-            if (elapsed < server.sync_interval_secs * 1000 - 1000) return;
-          }
+          // Per-server interval: the elapsed check applies to EVERY server —
+          // the tick can fire faster than the global interval whenever any
+          // server's override is shorter, so servers without an override must
+          // still wait for the global interval to elapse.
+          if (!serverDueForSync(server, syncIntervalSecs, Date.now())) return;
           try {
             const { addedCount, removedCount } = await syncServerStreams(server);
             const vodSync = await syncServerVods(server);
