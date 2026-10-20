@@ -112,4 +112,18 @@ router.post('/jobs/:jobId/stop', authenticateToken, requireAdmin, (req, res) => 
   res.json({ success: true });
 });
 
+// Manual retry of a terminated job — re-runs full validation via startOverlay.
+router.post('/jobs/:jobId/retry', authenticateToken, requireAdmin, async (req, res) => {
+  try {
+    const job = db.prepare('SELECT * FROM overlay_jobs WHERE id = ?').get(Number(req.params.jobId)) as any;
+    if (!job) return res.status(404).json({ error: 'Job not found' });
+    if (!['exited', 'failed', 'completed'].includes(job.status)) {
+      throw new OverlayError(`Cannot retry a job in status '${job.status}'`, 409);
+    }
+    db.prepare('UPDATE overlay_jobs SET next_retry_at=NULL WHERE id=?').run(job.id);
+    const newJob = await startOverlay(job.profile_id);
+    res.status(201).json(newJob);
+  } catch (e: any) { err(e, res); }
+});
+
 export default router;
