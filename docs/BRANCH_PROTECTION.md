@@ -19,9 +19,18 @@ require individual step names — GitHub reports at job level.
 
 ## Pending CI improvement (owner apply — needs `workflow` scope)
 
-The automation token cannot push workflow edits, so this one-line addition
-is **not** in this PR. Apply it manually on `main` (or via an owner-approved
-PR) to make dependency auditing a required part of the check:
+The automation token cannot push workflow edits, so this addition is **not**
+in this PR's diff. A ready-to-apply patch ships at
+`docs/patches/security-ci-npm-audit.patch`:
+
+```bash
+git checkout main && git pull
+git apply docs/patches/security-ci-npm-audit.patch
+git add .github/workflows/security-ci.yml
+git commit -m "ci: add npm audit gate to validate job" && git push
+```
+
+It adds two lines after the Build step:
 
 ```diff
        - name: Build
