@@ -219,3 +219,25 @@ Phase 2 columns: `streams.lifecycle_state`, `streams.channel_group`, `user_strea
 - **Tests before push**: `npm run lint`, `npx tsx --test tests/*.test.ts`, `npm run build`.
 - **No secrets in output**: `.env`, DB creds, JWT secret, Flussonic passwords.
 - Git work needs explicit owner direction for push/merge/deploy.
+
+---
+
+## 11. Governance & Security Hardening (in review)
+
+Two draft PRs on `main` @ `921b4cb`. **Neither is merged — awaiting owner + reviewer sign-off.**
+
+| PR | Branch | Scope |
+|---|---|---|
+| #13 (draft) | `security/branch-governance` | `.github/CODEOWNERS` (`* @shihan84`), `docs/BRANCH_PROTECTION.md` — ruleset guide + required check `validate`. CI audit step NOT pushed (token lacks `workflow` scope; documented as owner action). |
+| #14 (draft) | `security/api-abuse-hardening` | `express-rate-limit` on `POST /api/auth/login` (30/IP/15min → 429, `AUTH_RATE_LIMIT_*` env); body limits 1000gb → auth-JSON 2kb / global 5mb / urlencoded 1mb (413, malformed→400); prod JWT_SECRET rejects missing/<32/placeholder; `tsx`→4.23.15 + `overrides qs ^6.16.0` → audit clean; `tests/api-hardening.test.ts` (13 tests); `docs/API_HARDENING.md`. |
+
+Verified on #14: **108/108 tests**, `tsc --noEmit` clean, `npm run build` clean, `npm audit` → 0.
+
+### Open items for reviewer input
+- qs override (express pins `~6.14.0`) vs express-5 upgrade later
+- `trust proxy` posture if a reverse proxy is deployed (currently unset — XFF ignored)
+- multi-instance rate-limit store (currently in-memory; app is single-process by design)
+- recommended merge order in PR descriptions: **#14 first, #13 after owner applies the ruleset**
+
+### Next phase (not started — needs authorization)
+FFmpeg overlay-worker auto-restart with bounded backoff + failure alerting (PR C).
