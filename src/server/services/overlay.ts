@@ -37,6 +37,23 @@ export function overlayEnabled(): boolean {
   return process.env.OVERLAY_ENABLED === '1';
 }
 
+// Auto-restart of crashed overlay workers is DISABLED by default and requires
+// BOTH the per-profile auto_restart flag AND this global gate
+// (settings.overlay_auto_restart=1 or OVERLAY_AUTO_RESTART_ENABLED=1).
+export function autoRestartEnabled(): boolean {
+  const s = db.prepare("SELECT value FROM settings WHERE key = 'overlay_auto_restart'").get() as any;
+  if (s) return s.value === '1';
+  return process.env.OVERLAY_AUTO_RESTART_ENABLED === '1';
+}
+
+// Read per-call so ops/tests can tune without a reload.
+const restartMaxAttempts = () => Math.max(0, Number(process.env.OVERLAY_RESTART_MAX_ATTEMPTS || 5));
+const restartBaseDelayMs = () => Math.max(0, Number(process.env.OVERLAY_RESTART_BASE_DELAY_MS || 5000));
+const restartMaxDelayMs = () => Math.max(1000, Number(process.env.OVERLAY_RESTART_MAX_DELAY_MS || 300000));
+// A worker alive this long before crashing counts as stable — its restart
+// counter resets, so a rare crash never permanently consumes retries.
+const restartStableMs = () => Math.max(0, Number(process.env.OVERLAY_RESTART_STABLE_MS || 60000));
+
 // Logo assets are confined to a single approved directory. Default:
 // <cwd>/assets/overlay. Override with OVERLAY_ASSET_DIR (tests, deployments).
 export function overlayAssetDir(): string {
@@ -119,6 +136,14 @@ export function redactUrl(raw: string | null | undefined): string | null {
   }
 }
 
+// Scrub user:pass@ credential segments out of arbitrary text (e.g. an ffmpeg
+// stderr tail that echoes the publish URL) before persisting to job rows or
+// stream events.
+export function redactCredsInText(text: string): string {
+  return text.replace(/([a-zA-Z][a-zA-Z0-9+.-]*:\/\/)[^\s/@:]+:[^\s/@]+@/g, '$1***@')
+             .replace(/([a-zA-Z][a-zA-Z0-9+.-]*:\/\/)[^\s/@]+@/g, '$1***@');
+}
+
 // True when `out` targets the given stream on the given server — i.e. ffmpeg
 // would publish back onto the source channel or an endpoint the source
 // consumes. Compares scheme-normalized host AND effective port (an
@@ -158,6 +183,10 @@ export function detectFfmpeg(): boolean {
   }
   return ffmpegAvailable;
 }
+
+// Test hook: force the detection result (null = re-detect). Tests must not
+// depend on the runner actually having ffmpeg installed.
+export function __setFfmpegAvailable(v: boolean | null) { const prev = ffmpegAvailable; ffmpegAvailable = v; return () => { ffmpegAvailable = prev; }; }
 
 // ---- Profile validation ----------------------------------------------------
 
@@ -212,6 +241,8 @@ export function validateProfileSpec(body: any) {
   if (outputStream && !/^[A-Za-z0-9_\-\.\/]{1,200}$/.test(outputStream)) {
     throw new OverlayError('output_stream may contain letters, digits, _ - . / only');
   }
+  const autoRestart = body.auto_restart ? 1 : 0;
+
   const outputUrl = body.output_url ? String(body.output_url).trim() : null;
   // Only protocols with verified publish semantics are accepted:
   //   rtmp:// / rtmps:// -> FLV muxer (Flussonic RTMP ingest)
@@ -237,6 +268,7 @@ export function validateProfileSpec(body: any) {
     ticker_bg_color: body.ticker_bg_color ?? 'black@0.5',
     output_stream: outputStream,
     output_url: outputUrl,
+    auto_restart: autoRestart,
     enabled: body.enabled === undefined ? 1 : (body.enabled ? 1 : 0),
   };
 }
@@ -340,6 +372,11 @@ let spawnImpl: SpawnFn = (cmd, args, opts) => spawn(cmd, args, opts) as ChildPro
 export function __setSpawnImpl(fn: SpawnFn) { const prev = spawnImpl; spawnImpl = fn; return () => { spawnImpl = prev; }; }
 
 const activeJobs = new Map<number, ChildProcess>(); // jobId -> process
+// Timers for scheduled auto-restarts, keyed by the crashed job's id. A job
+// row keeps next_retry_at as the durable record; the timer is the in-process
+// trigger. Clearing next_retry_at (stop, retry consumed, boot reconcile)
+// always wins over a stale timer.
+const pendingRetries = new Map<number, ReturnType<typeof setTimeout>>();
 const MAX_PER_STREAM = 1;                            // one overlay per channel
 // Global ffmpeg worker cap — each job is a full decode+encode process; an
 // unbounded count would saturate CPU and starve the management server.
@@ -498,11 +535,13 @@ export async function startOverlay(profileId: number): Promise<any> {
     // 'stopped'/'failed' are deliberate terminal states (stop request or the
     // 'error' handler already recorded the spawn failure) — never overwrite.
     if (cur && cur.status !== 'stopped' && cur.status !== 'failed') {
+      const safeTail = redactCredsInText(stderrTail);
       db.prepare(`UPDATE overlay_jobs SET status=?, exit_code=?, last_error=?, stopped_at=CURRENT_TIMESTAMP WHERE id=?`)
-        .run(code === 0 ? 'completed' : 'exited', code, code === 0 ? null : (stderrTail.slice(-1000) || `exit code ${code}`), jobId);
+        .run(code === 0 ? 'completed' : 'exited', code, code === 0 ? null : (safeTail.slice(-1000) || `exit code ${code}`), jobId);
       if (code !== 0) {
         recordStreamEvent(stream.id, stream.lifecycle_state, stream.lifecycle_state, null,
-          `overlay job #${jobId} exited unexpectedly (code ${code}): ${stderrTail.slice(-300)}`);
+          `overlay job #${jobId} exited unexpectedly (code ${code}): ${safeTail.slice(-300)}`);
+        maybeScheduleRestart(jobId, profile.id, stream.id);
       }
     }
     activeJobs.delete(jobId);
@@ -515,11 +554,77 @@ export async function startOverlay(profileId: number): Promise<any> {
   return db.prepare('SELECT * FROM overlay_jobs WHERE id = ?').get(jobId);
 }
 
+// Exponential backoff for attempt n (1-based): base * 2^(n-1), capped, with
+// ±10% jitter so a fleet of crashed workers doesn't retry in lockstep.
+export function restartDelayMs(attempt: number): number {
+  const delay = Math.min(restartBaseDelayMs() * Math.pow(2, attempt - 1), restartMaxDelayMs());
+  return Math.round(delay * (0.9 + Math.random() * 0.2));
+}
+
+// Decide whether an unexpected exit should be retried, and if so schedule it.
+// Requires the per-profile auto_restart flag AND the global gate. Intentional
+// stops never reach here ('stopped' is terminal before this is called).
+function maybeScheduleRestart(jobId: number, profileId: number, streamId: number) {
+  const profile = db.prepare('SELECT * FROM overlay_profiles WHERE id = ?').get(profileId) as any;
+  if (!profile?.auto_restart || !autoRestartEnabled()) return;
+
+  const job = db.prepare('SELECT * FROM overlay_jobs WHERE id = ?').get(jobId) as any;
+  if (!job) return;
+  // Stable-run reset: uptime >= threshold means this crash doesn't count
+  // against the retry budget.
+  const uptimeMs = Date.now() - new Date(String(job.started_at).replace(' ', 'T') + 'Z').getTime();
+  const attempt = (uptimeMs >= restartStableMs() ? 0 : (job.restart_count || 0)) + 1;
+
+  const stream = db.prepare('SELECT * FROM streams WHERE id = ?').get(streamId) as any;
+  if (attempt > restartMaxAttempts()) {
+    db.prepare(`UPDATE overlay_jobs SET status='failed', last_error=? WHERE id=?`)
+      .run(`auto-restart exhausted (${restartMaxAttempts()} attempts)`, jobId);
+    recordStreamEvent(streamId, stream?.lifecycle_state, stream?.lifecycle_state, null,
+      `overlay job #${jobId} marked failed: auto-restart exhausted after ${restartMaxAttempts()} attempts`);
+    void import('./telegram').then(t => t.sendTelegramNotification(
+      `Overlay worker failed permanently: job #${jobId} (${stream?.name || streamId}) after ${restartMaxAttempts()} restart attempts`
+    )).catch(() => {});
+    return;
+  }
+
+  const delay = restartDelayMs(attempt);
+  db.prepare(`UPDATE overlay_jobs SET restart_count=?, next_retry_at=datetime('now', '+' || ? || ' seconds') WHERE id=?`)
+    .run(attempt, Math.ceil(delay / 1000), jobId);
+  recordStreamEvent(streamId, stream?.lifecycle_state, stream?.lifecycle_state, null,
+    `overlay job #${jobId} crashed — auto-restart attempt ${attempt}/${restartMaxAttempts()} in ${Math.round(delay / 1000)}s`);
+
+  const timer = setTimeout(() => attemptRestart(jobId), delay);
+  timer.unref?.();
+  pendingRetries.set(jobId, timer);
+}
+
+// Fire a scheduled restart. Re-runs the FULL startOverlay validation —
+// isolation, scheme, collision and cap checks must all pass again because
+// the output target or profile may have become unsafe during the backoff.
+export async function attemptRestart(oldJobId: number): Promise<void> {
+  pendingRetries.delete(oldJobId);
+  const job = db.prepare('SELECT * FROM overlay_jobs WHERE id = ?').get(oldJobId) as any;
+  // next_retry_at cleared means the retry was cancelled (stop/retry/boot reconcile).
+  if (!job?.next_retry_at) return;
+  db.prepare('UPDATE overlay_jobs SET next_retry_at=NULL WHERE id=?').run(oldJobId);
+  try {
+    const newJob = await startOverlay(job.profile_id);
+    db.prepare('UPDATE overlay_jobs SET restart_count=? WHERE id=?').run(job.restart_count || 0, newJob.id);
+  } catch (e: any) {
+    const stream = db.prepare('SELECT * FROM streams WHERE id = ?').get(job.stream_id) as any;
+    recordStreamEvent(job.stream_id, stream?.lifecycle_state, stream?.lifecycle_state, null,
+      `overlay auto-restart for job #${oldJobId} aborted: ${e.message}`);
+  }
+}
+
 export function stopOverlay(jobId: number): boolean {
   const job = db.prepare('SELECT * FROM overlay_jobs WHERE id = ?').get(jobId) as any;
   if (!job) return false;
+  // Cancel any scheduled auto-restart — an operator stop is terminal.
+  const timer = pendingRetries.get(jobId);
+  if (timer) { clearTimeout(timer); pendingRetries.delete(jobId); }
   const proc = activeJobs.get(jobId);
-  db.prepare(`UPDATE overlay_jobs SET status='stopped', stopped_at=CURRENT_TIMESTAMP WHERE id=?`).run(jobId);
+  db.prepare(`UPDATE overlay_jobs SET status='stopped', stopped_at=CURRENT_TIMESTAMP, next_retry_at=NULL WHERE id=?`).run(jobId);
   if (proc) {
     try { proc.kill('SIGTERM'); } catch { /* already dead */ }
     setTimeout(() => { try { proc.kill('SIGKILL'); } catch { /* noop */ } }, 5000).unref?.();
@@ -531,9 +636,28 @@ export function stopOverlay(jobId: number): boolean {
 // On boot, any job left 'running'/'starting' is dead (process state is
 // process-local) -- mark them so the dashboard reflects reality.
 export function recoverOverlayJobs() {
+  const stale = db.prepare(
+    `SELECT * FROM overlay_jobs WHERE status IN ('starting','running')`
+  ).all() as any[];
   const r = db.prepare(
     `UPDATE overlay_jobs SET status='exited', last_error='process lost on application restart', stopped_at=CURRENT_TIMESTAMP
      WHERE status IN ('starting','running')`
   ).run();
   if (r.changes) console.log(`[overlay] marked ${r.changes} stale job(s) as exited`);
+  // Crash-during-run: eligible stale jobs get a fresh backoff window.
+  for (const j of stale) maybeScheduleRestart(j.id, j.profile_id, j.stream_id);
+  // Crash-during-backoff: rows with a pending retry resume their remaining
+  // delay instead of being forgotten with the in-process timer map.
+  const pending = db.prepare(
+    `SELECT j.*, (julianday(j.next_retry_at) - julianday('now')) * 86400000 AS remaining_ms
+     FROM overlay_jobs j WHERE j.next_retry_at IS NOT NULL`
+  ).all() as any[];
+  for (const j of pending) {
+    if (pendingRetries.has(j.id)) continue;
+    const delay = Math.max(0, Math.round(j.remaining_ms));
+    const timer = setTimeout(() => attemptRestart(j.id), delay);
+    timer.unref?.();
+    pendingRetries.set(j.id, timer);
+  }
+  if (pending.length) console.log(`[overlay] resumed ${pending.length} pending auto-restart(s)`);
 }

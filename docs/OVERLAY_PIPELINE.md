@@ -99,3 +99,28 @@ not continuous frame-accurate playout. A true playout engine (gapless
 file-to-file transitions, no stream restart at boundaries) needs a separate
 persistent FFmpeg/GStreamer process model feeding a stable Flussonic
 publish endpoint — tracked as future work, not claimed here.
+
+## Automatic worker recovery (Phase C)
+
+Crashed overlay workers can auto-restart — requires BOTH the per-profile
+`auto_restart` flag AND the global gate (`settings.overlay_auto_restart=1` or
+`OVERLAY_AUTO_RESTART_ENABLED=1`). Both default OFF.
+
+| Env var | Default | Meaning |
+|---|---|---|
+| `OVERLAY_RESTART_MAX_ATTEMPTS` | 5 | retries before the job is marked `failed` |
+| `OVERLAY_RESTART_BASE_DELAY_MS` | 5000 | first backoff delay |
+| `OVERLAY_RESTART_MAX_DELAY_MS` | 300000 | backoff cap (min 1000) |
+| `OVERLAY_RESTART_STABLE_MS` | 60000 | uptime ≥ this resets the retry counter |
+
+- Backoff: `base · 2^(n-1)`, capped, ±10% jitter. Retry lineage persists via
+  `overlay_jobs.restart_count` / `next_retry_at` — pending retries survive an
+  application restart (`recoverOverlayJobs` resumes remaining delay; stale
+  running jobs get a fresh backoff window).
+- Every retry re-runs the FULL `startOverlay` validation — isolation, scheme,
+  collision and worker caps — so a target that became unsafe during backoff
+  aborts instead of spawning.
+- Intentional stops (`stopped`) and exhausted budgets (`failed`) never
+  restart. Exhaustion records a stream event and sends a Telegram alert.
+- `stderr` tails are credential-scrubbed before persisting (`redactCredsInText`).
+- `POST /api/overlays/jobs/:jobId/retry` retries an `exited`/`failed` job now.

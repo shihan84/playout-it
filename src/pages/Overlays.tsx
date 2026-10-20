@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from 'react';
 import axios from 'axios';
-import { Layers, Plus, Play, Square, Trash2, AlertTriangle } from 'lucide-react';
+import { Layers, Plus, Play, Square, Trash2, AlertTriangle, RotateCw } from 'lucide-react';
 
 // P4 — Overlay profile editor + job control (P2 API).
 // Shows a notice instead of breaking when the overlay module isn't deployed.
@@ -20,7 +20,7 @@ export default function Overlays() {
   const [form, setForm] = useState({
     stream_id: 0, name: '', logo_path: '', logo_position: 'tr', logo_opacity: 1,
     ticker_enabled: false, ticker_text: '', ticker_position: 'bottom', ticker_speed: 100,
-    ticker_font_size: 28, output_stream: '', output_url: '',
+    ticker_font_size: 28, output_stream: '', output_url: '', auto_restart: false,
   });
 
   const load = useCallback(async () => {
@@ -70,6 +70,7 @@ export default function Overlays() {
         ticker_font_size: Number(form.ticker_font_size),
         output_stream: form.output_stream || null,
         output_url: form.output_url || null,
+        auto_restart: form.auto_restart ? 1 : 0,
       });
       setForm({ ...form, name: '', logo_path: '', ticker_text: '' });
       load();
@@ -85,6 +86,11 @@ export default function Overlays() {
 
   const stopJob = async (id: number) => {
     try { await axios.post(`/api/overlays/jobs/${id}/stop`); load(); }
+    catch (e: any) { setError(e.response?.data?.error || e.message); }
+  };
+
+  const retryJob = async (id: number) => {
+    try { await axios.post(`/api/overlays/jobs/${id}/retry`); load(); }
     catch (e: any) { setError(e.response?.data?.error || e.message); }
   };
 
@@ -167,6 +173,10 @@ export default function Overlays() {
             <input type="checkbox" checked={form.ticker_enabled} onChange={e => setForm({ ...form, ticker_enabled: e.target.checked })} />
             Enable scrolling ticker
           </label>
+          <label className="flex items-center gap-2 text-sm text-zinc-300">
+            <input type="checkbox" checked={form.auto_restart} onChange={e => setForm({ ...form, auto_restart: e.target.checked })} />
+            Auto-restart worker on crash <span className="text-xs text-zinc-500">(bounded backoff; requires OVERLAY_AUTO_RESTART_ENABLED)</span>
+          </label>
           {form.ticker_enabled && (
             <textarea rows={2} value={form.ticker_text} onChange={e => setForm({ ...form, ticker_text: e.target.value })}
               placeholder="Ticker text" className="w-full bg-zinc-950 border border-zinc-800 rounded-xl px-3 py-2 text-sm text-zinc-200" />
@@ -192,7 +202,7 @@ export default function Overlays() {
                       <p className="text-sm text-zinc-200">{p.name} <span className="text-zinc-500">→ {p.stream_name}</span></p>
                       <p className="text-xs text-zinc-500">
                         {p.logo_path ? 'logo ' : ''}{p.ticker_enabled ? 'ticker ' : ''}out: {p.output_stream || 'auto'}{p.output_url ? ` → ${p.output_url}` : ' · no publish URL'}
-                        {p.enabled ? '' : ' · disabled'}
+                        {p.enabled ? '' : ' · disabled'}{p.auto_restart ? ' · auto-restart' : ''}
                       </p>
                     </div>
                     <button onClick={() => startJob(p.id)} className="text-emerald-400 hover:text-emerald-300" title="Start overlay"><Play size={16} /></button>
@@ -213,11 +223,17 @@ export default function Overlays() {
                   <div key={j.id} className="py-2 flex items-center gap-3">
                     <div className="flex-1 min-w-0">
                       <p className="text-sm text-zinc-200">#{j.id} {j.profile_name} → {j.stream_name}</p>
-                      <p className="text-xs text-zinc-500">{j.status}{j.last_error ? ` — ${j.last_error}` : ''} · {fmt(j.started_at || j.created_at)}</p>
+                      <p className="text-xs text-zinc-500">
+                        {j.status}{j.last_error ? ` — ${j.last_error}` : ''} · {fmt(j.started_at || j.created_at)}
+                        {j.restart_count ? ` · restart #${j.restart_count}` : ''}
+                        {j.next_retry_at ? ` · retry at ${j.next_retry_at}` : ''}
+                      </p>
                     </div>
-                    {['starting', 'running'].includes(j.status) && (
+                    {['starting', 'running'].includes(j.status) ? (
                       <button onClick={() => stopJob(j.id)} className="text-red-400 hover:text-red-300" title="Stop"><Square size={14} /></button>
-                    )}
+                    ) : ['exited', 'failed'].includes(j.status) ? (
+                      <button onClick={() => retryJob(j.id)} className="text-emerald-400 hover:text-emerald-300" title="Retry now"><RotateCw size={14} /></button>
+                    ) : null}
                   </div>
                 ))}
               </div>

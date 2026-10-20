@@ -237,6 +237,11 @@ export function runMigrations(db: any) {
     db.exec('CREATE INDEX IF NOT EXISTS idx_overlay_jobs_stream ON overlay_jobs(stream_id, status)');
   } catch (e) { /* tables exist */ }
 
+  // Phase C — overlay auto-restart columns (idempotent column adds)
+  try { db.exec('ALTER TABLE overlay_profiles ADD COLUMN auto_restart INTEGER DEFAULT 0'); } catch (e) {}
+  try { db.exec('ALTER TABLE overlay_jobs ADD COLUMN restart_count INTEGER DEFAULT 0'); } catch (e) {}
+  try { db.exec('ALTER TABLE overlay_jobs ADD COLUMN next_retry_at DATETIME'); } catch (e) {}
+
   // Phase 3 P1 — scheduled playout
   try {
     db.exec(`CREATE TABLE IF NOT EXISTS playout_schedules (
