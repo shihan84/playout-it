@@ -23448,7 +23448,7 @@
     },
     "description": "This document is a comprehensive API specification for the Flussonic Media Server.\n\nThe Flussonic Media Server API lets you manage the server configuration: retrieving the data about the streams, DVRs, templates, and others, \ncreating/updating, and removing them.\nTo know more about our API's design principles, see [Flussonic API design principles](https://flussonic.com/doc/rest-api-guidelines/).\n\nPermanent [download link](https://flussonic.com/doc/api/reference.json) to JSON schema file.\n\nThis API Reference provides you with all the methods, fields, values, and endpoints currently accessible in Flussonic.\n\nBefore you proceed, read the following information:\n\n* `server_config` represents the server configuration file. Our built-in config parser validates the configuration file structure \naccording to this specification.\n* Some API methods may send extra fields in responses, so your application must be ready to drop them;\n* Do not rely on undocumented fields in the responses as we may modify them at any moment.\n* In further updates of this document, some fields may become deprecated. Such fields will be scheduled for deletion with \n`x-delete-at` property with year and month, after which it will no longer exist.\n* To disable a feature, provide the corresponding property with the `null` value. Learn more about the upsert method in [Flussonic API design principles](https://flussonic.com/doc/rest-api-guidelines/#api-http-upsert).\n",
     "title": "Flussonic Media Server API",
-    "version": "26.03-604"
+    "version": "26.03-643"
   },
   "openapi": "3.1.0",
   "paths": {

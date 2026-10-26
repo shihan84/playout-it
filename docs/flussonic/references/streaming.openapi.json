@@ -2200,7 +2200,7 @@
     },
     "description": "This document describes possible URLs that can be accessed by a player for playing video streams and files by various protocols.\n\nPermanent [download link](https://flussonic.com/doc/api/streaming.json) to JSON schema file.\n\nIt is worth noting that parameter `{name}` used in this schema may be multi-segment, i.e.: \n`/part1/part2/part3/index.m3u8` and `name` here will be `/part1/part2/part3`.\n\nAt the moment container format is selected automatically depending on source video codec. `fmp4` is used in\ncase of `hevc`, otherwise `ts` is used. \n\nIn the future perspective Flussonic is going to use `fmp4` container as default for all types of encoded video.\n\nTo keep using `ts` container please refer to `HLS TS playback` API section and consider to change your manifest\nurls.\n",
     "title": "Flussonic Streaming API",
-    "version": "26.03-604"
+    "version": "26.03-643"
   },
   "openapi": "3.1.0",
   "paths": {
