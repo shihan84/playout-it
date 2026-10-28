@@ -12,12 +12,25 @@ ffmpeg on the test host, and a non-production app instance (separate
 STAGING_URL=http://stage.example:8080 STAGING_USER=… STAGING_PASS=… \
   npx tsx scripts/staging-validate.ts
 
-# Full lifecycle (disposable stream e2e-val-<ts>, always cleaned up):
-… --write
+# Full lifecycle (disposable stream e2e-val-<ts>, cleaned up in `finally`,
+# also on crash or Ctrl+C). Requires confirming the staging hostname:
+STAGING_CONFIRM_HOST=stage.example … --write
 
-# With a real publish test (synthetic ffmpeg source):
+# With a real publish test (synthetic ffmpeg source, staging host only):
 … --write --publish=rtmp://stage.example/live/e2e-val-out
 ```
+
+**Production guards:**
+
+| Guard | Mode | Behavior |
+|---|---|---|
+| `PRODUCTION_HOSTS=a.example,b.example` | all | refuse to run against listed hosts |
+| `STAGING_CONFIRM_HOST` | `--write` | must equal the `STAGING_URL` hostname |
+| `STAGING_MAX_STREAMS` (default 20) | `--write` | refuse to write if the server already has more streams (treated as production) |
+| `--publish` host | `--write` | must equal the `STAGING_URL` hostname |
+
+If cleanup fails, the harness prints the disposable stream name — delete it
+manually in the Flussonic UI.
 
 Validates: v3 auth, `/streams` + `/vods` inventory, PUT→GET→DELETE roundtrip,
 the exact input-swap the scheduler performs, and optional real ingest

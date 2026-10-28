@@ -13,12 +13,20 @@
  * Usage:
  *   STAGING_URL=http://stage.example:8080 STAGING_USER=admin STAGING_PASS=secret \
  *     npx tsx scripts/staging-validate.ts            # GET-only (safe)
- *   ... --write                                    # lifecycle roundtrip
+ *   ... STAGING_CONFIRM_HOST=stage.example --write   # lifecycle roundtrip
  *   ... --write --publish=rtmp://stage.example/live/<name>
  *
- * The disposable stream name is `e2e-val-<timestamp>` — always deleted in
- * finally, never colliding with real channels. NOTHING is touched unless
- * --write is passed. All GET output is credentials-redacted.
+ * The disposable stream name is `e2e-val-<timestamp>`, never colliding with
+ * real channels. Once created it is deleted in a `finally` block (also on
+ * crash or Ctrl+C). NOTHING is touched unless --write is passed.
+ *
+ * Production guards (all modes):
+ *   - PRODUCTION_HOSTS (comma-separated) — refuse to run against these hosts.
+ * Production guards (--write only):
+ *   - STAGING_CONFIRM_HOST must equal the STAGING_URL hostname.
+ *   - Refuse if the server already has more than STAGING_MAX_STREAMS
+ *     (default 20) streams — a populated server is treated as production.
+ *   - --publish must target the same host as STAGING_URL.
  */
 
 const URL_BASE = (process.env.STAGING_URL || '').replace(/\/$/, '');
@@ -28,9 +36,39 @@ const WRITE = process.argv.includes('--write');
 const PUBLISH_ARG = process.argv.find(a => a.startsWith('--publish='))?.split('=')[1];
 const FFMPEG = process.env.FFMPEG_PATH || 'ffmpeg';
 const STREAM = `e2e-val-${Date.now().toString(36)}`;
+const MAX_STREAMS = Number(process.env.STAGING_MAX_STREAMS) >= 0 && process.env.STAGING_MAX_STREAMS
+  ? Number(process.env.STAGING_MAX_STREAMS) : 20;
 
 if (!URL_BASE || !USER || !PASS) {
   console.error('Required env: STAGING_URL, STAGING_USER, STAGING_PASS');
+  process.exit(2);
+}
+
+function hostOf(url: string): string {
+  try { return new URL(url).hostname.toLowerCase(); } catch { return ''; }
+}
+
+const TARGET_HOST = hostOf(URL_BASE);
+if (!TARGET_HOST) {
+  console.error(`STAGING_URL is not a valid URL: ${URL_BASE}`);
+  process.exit(2);
+}
+const PRODUCTION_HOSTS = (process.env.PRODUCTION_HOSTS || '')
+  .split(',').map(h => h.trim().toLowerCase()).filter(Boolean);
+if (PRODUCTION_HOSTS.includes(TARGET_HOST)) {
+  console.error(`Refusing to run: ${TARGET_HOST} is listed in PRODUCTION_HOSTS.`);
+  process.exit(2);
+}
+if (WRITE && (process.env.STAGING_CONFIRM_HOST || '').trim().toLowerCase() !== TARGET_HOST) {
+  console.error(`--write requires STAGING_CONFIRM_HOST=${TARGET_HOST} to confirm this is a staging server.`);
+  process.exit(2);
+}
+if (PUBLISH_ARG && !WRITE) {
+  console.error('--publish requires --write.');
+  process.exit(2);
+}
+if (PUBLISH_ARG && hostOf(PUBLISH_ARG) !== TARGET_HOST) {
+  console.error(`Refusing --publish to ${hostOf(PUBLISH_ARG) || PUBLISH_ARG}: must target the staging host ${TARGET_HOST}.`);
   process.exit(2);
 }
 
@@ -52,6 +90,25 @@ async function api(method: string, path: string, body?: any) {
   return { status: res.status, data };
 }
 
+let created = false;
+
+async function cleanup() {
+  if (!created) return;
+  created = false;
+  try {
+    const del = await api('DELETE', `/streams/${encodeURIComponent(STREAM)}`);
+    del.status < 300 || del.status === 404
+      ? ok('DELETE disposable stream (cleanup)') : fail('cleanup DELETE', `HTTP ${del.status} — remove ${STREAM} manually`);
+  } catch (e: any) {
+    fail('cleanup DELETE', `${e.message} — remove ${STREAM} manually`);
+  }
+}
+
+process.on('SIGINT', () => {
+  console.log('\nInterrupted — cleaning up');
+  cleanup().finally(() => process.exit(130));
+});
+
 async function main() {
   console.log(`Staging validation → ${URL_BASE} (write: ${WRITE})`);
 
@@ -70,8 +127,21 @@ async function main() {
 
   if (!WRITE) {
     console.log('\nRead-only mode complete. Re-run with --write for lifecycle validation.');
-  } else {
+    return;
+  }
+
+  if (streams.status >= 300) {
+    fail('write guard', 'stream inventory unavailable — refusing to write');
+    return;
+  }
+  if (list.length > MAX_STREAMS) {
+    fail('write guard', `${list.length} streams > STAGING_MAX_STREAMS=${MAX_STREAMS} — looks like production, refusing to write`);
+    return;
+  }
+
+  try {
     // 4. Lifecycle roundtrip on a disposable stream
+    created = true; // a failed/timed-out PUT may still have created it
     const put = await api('PUT', `/streams/${encodeURIComponent(STREAM)}`, {
       name: STREAM, inputs: [{ url: 'fake://fake' }],
     });
@@ -105,17 +175,15 @@ async function main() {
         ? ok(`ffmpeg publish (${muxer})`, PUBLISH_ARG.replace(/\/\/[^/@]*@/, '//***@'))
         : fail('ffmpeg publish', (r.stderr || r.error?.message || '').slice(0, 300));
     }
+  } finally {
+    await cleanup();
   }
-
-  // Always clean up the disposable stream when it may exist
-  if (WRITE) {
-    const del = await api('DELETE', `/streams/${encodeURIComponent(STREAM)}`);
-    del.status < 300 || del.status === 404
-      ? ok('DELETE disposable stream (cleanup)') : fail('cleanup DELETE', `HTTP ${del.status}`);
-  }
-
-  console.log(`\n${passed} passed, ${failed} failed`);
-  process.exit(failed ? 1 : 0);
 }
 
-main().catch(e => { console.error('Validation crashed:', e.message); process.exit(1); });
+main()
+  .catch(e => { failed++; console.error('Validation crashed:', e.message); })
+  .finally(async () => {
+    await cleanup();
+    console.log(`\n${passed} passed, ${failed} failed`);
+    process.exit(failed ? 1 : 0);
+  });
