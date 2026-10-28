@@ -1,48 +1,36 @@
 # IBS Manager — Engineering Handoff
 
-Date: 2026-10-15
-Repo: `git@github.com:shihan84/playout-it.git` (branch `main`, HEAD `71edc95` — Phase 3 P0 gap analysis)
+Date: 2026-10-28 (refreshed after Windows reinstall)
+Repo: `https://github.com/shihan84/playout-it` (branch `main`, HEAD `871a85f`)
 Scope: Flussonic Media Server management dashboard (React SPA + Express + SQLite)
 
 ## Progress Tracker
 
-| Milestone | Branch / PR | Status |
+| Milestone | PR | Status |
 |---|---|---|
-| Phase 2 — channel lifecycle | merged `11e9963` (PR #3) | ✅ Live locally |
-| Sync `/`-name fix | merged `0cd73e7` (PR #4) | ✅ Live locally |
-| Phase 3 P0 — gap analysis | `docs/PHASE3_GAP_ANALYSIS.md` on main (`71edc95`) | ✅ Done |
-| Phase 3 P1 — scheduled playout | `feature/phase-3-scheduled-playout` → PR #5 | 🔄 In review |
-| Phase 3 P2 — logo/ticker overlay (ffmpeg) | `feature/phase-3-overlay-pipeline` → PR #6 | 🔄 In review |
-| Phase 3 P3 — broadcast monitoring | `feature/phase-3-monitoring` → PR #7 (stacked on P1) | 🔄 In review |
-| Phase 3 P4 — ops dashboard UI | `feature/phase-4-ops-dashboard` → PR #9 | 🔄 In review |
-| Phase 3 P5 — release readiness | `feature/phase-5-reliability` → PR #10 | 🔄 In review |
+| Security foundation, multiserver, channel lifecycle, sync `/`-names | #1–#4 | ✅ Merged |
+| Phase 3 P1–P5 — scheduler, overlay, monitoring, ops dashboard, reliability | #5–#11 | ✅ Merged |
+| API hardening + branch governance | #13, #14 | ✅ Merged |
+| Overlay auto-restart (Phase C) | #15 | ✅ Merged |
+| Watchdog/sync capacity fixes (Phase D) | #16 | ✅ Merged |
+| Staging validation harness (Phase E) | #17 `feature/staging-validation` | 🔄 Open — not merged |
 
-Environment notes: FFmpeg present on this Windows host (`ffmpeg`/`ffprobe` on PATH, GPL build with drawtext+freetype). FS1/FS2 are **mock test servers** — their DNS failures are expected, not blockers.
+Verified on `main` @ `871a85f`: `tsc --noEmit` clean, **129/129 tests**, `npm run build` clean.
+FS1/FS2 are **mock test servers** — their DNS failures are expected, not blockers.
 
 ---
 
 ## 0. Current State (resume here)
 
-**Local deployment is LIVE on this Windows machine:**
-- `npm run dev` (`tsx server.ts`) running on `http://0.0.0.0:3000`
-- DB: `flussonic.db` (from `.env` `DATABASE_PATH`) — 47 streams (25 online), 10 VODs, 2 users, 3 servers
-- Watchdog 15s, auto-sync 60s; CDN-ITAssist sync healthy (`/` names allowed since PR #4)
-- Last verified backup: `C:\Users\LIVE PC\playout-it-backups\release-2026-10-15T11-31-04\` (integrity ok, outside repo)
-
-
-**Phase 3 — all five milestones implemented, in stacked PRs (NOT merged):**
-
-| PR | Branch | Scope | Status |
-|---|---|---|---|
-| #5 | `feature/phase-3-scheduled-playout` | P1 scheduler (jobs, crash-safe swap+restore, `swapping`/`restore_unverified`, enable gate) | **MERGED** `b0765db` |
-| #6 | `feature/phase-3-overlay-pipeline` | P2 ffmpeg logo/ticker → isolated output; URL/feedback/symlink guards; enable gate | OPEN, review fixes in `28658bc`+`0ea6e22`; child fix below |
-| #11 | `feature/overlay-output-protocol-fix` → #6 branch | RTMP→FLV / SRT·UDP→TS muxer; explicit `output_url` required (no derivation); scheme allowlist; URL-identity hardening (ports, `folder/name`, `%xx`); output collision 409; global worker cap; credential redaction; drawtext escaping fix | **INTEGRATED** into #6 branch `5bc73c0` |
-| #7 | `feature/phase-3-monitoring` | P3 monitoring API; rebased onto merged #5 (`30a6cae`), tracks new statuses | OPEN, base `main` |
-| #8 | `docs/phase-3-p4-p5-plan` | P4/P5 planning doc | OPEN, independent |
-| #9 | `feature/phase-4-ops-dashboard` | P4 UI: playout editor, monitoring board, overlay editor (+`output_url` field `66edd42`) | OPEN, rebased on new #7 tip |
-| #10 | `feature/phase-5-reliability` | P5 reliability tests + runbook | OPEN, rebased on new #9 tip (`1ab4352`) |
-
-**Merge order when approved:** ~~#5~~ (merged) → ~~#7~~ (merged `c349b72`) → ~~#11 into #6 branch~~ (done `5bc73c0`, conflicts vs main resolved) → **#6** → retarget **#9** to main → **#10** → #8 anytime. See `docs/PHASE3_P5_RELIABILITY.md` + `docs/OVERLAY_PIPELINE.md`.
+**Development machine (Windows 10, user `admin`, no admin rights):**
+- Toolchain via Scoop (`C:\Users\admin\scoop`): Git, Node 24 LTS / npm 11, FFmpeg/ffprobe, PHP, JDK, Python.
+- npm 11 skips native install scripts — after `npm ci` run
+  `npm rebuild bcrypt better-sqlite3 esbuild protobufjs --foreground-scripts`.
+- Fresh working copy: `D:\playout-it` — its `flussonic.db` is a new, empty dev DB (one `admin` user), not production data.
+- Previous working copy (pre-reinstall, formerly on `E:`): `D:\NEW DOWNLOADS\Fluplayout\playout-it`. Holds the real `.env`, `flussonic.db`
+  and backups, plus an uncommitted 12-line `WATCHDOG_ENABLED=0` kill switch in `services/watchdog.ts`. All local commits are on GitHub.
+  **Do not modify or delete it.** A copy (DB, `.env`, backups, patch, git bundle) is in `D:\playout-it-recovery-2026-10-28\`.
+- Historical production: CDN-ITAssist (~47 streams, 10 VODs). Not contacted from the new machine.
 
 **Safety gates (both OFF by default — production channels cannot be armed accidentally):**
 - `settings.scheduler_enabled=1` or `SCHEDULER_ENABLED=1` — required before any input swap executes
@@ -52,10 +40,11 @@ Environment notes: FFmpeg present on this Windows host (`ffmpeg`/`ffprobe` on PA
 - Logo files confined to `OVERLAY_ASSET_DIR` (default `<cwd>/assets/overlay`)
 
 **Open items for the operator:**
-1. Log in at localhost:3000 — new `JWT_SECRET` from deploy invalidated old sessions.
-2. `FS1`/`FS2` servers point at `fs.local`/`fs2.local` — dead DNS, expected mock failures. Decide: fix URLs or remove.
-3. GitHub token lacks `workflow` scope — CI on stacked-PR bases needs the manual `on:` trigger diff (see PR #5 comment or `.github/workflows/security-ci.yml`).
-4. Review + approve the PR stack; nothing merges without approval.
+1. Review PR #17 (staging harness) — needs an authorized staging Flussonic server to exercise.
+2. Apply the branch ruleset in `docs/BRANCH_PROTECTION.md` — `main` is currently unprotected, so CODEOWNERS is not enforced.
+3. CI npm-audit step: apply `docs/patches/security-ci-npm-audit.patch` (needs a token with `workflow` scope).
+4. `FS1`/`FS2` (`fs.local`/`fs2.local`) — mock servers from the old DB; fix URLs or remove.
+5. Phase F (not startable on staging): 24h+ continuous playout, 50+ channel load, failover drills.
 
 **Architecture constraint:** single-process / single-writer. SQLite + process-local locks. No PM2 cluster. See `docs/OPERATIONS_RECOVERY.md` + `docs/PHASE3_P5_RELIABILITY.md` for failure reconciliation and rollback.
 
@@ -185,10 +174,12 @@ Phase 2 columns: `streams.lifecycle_state`, `streams.channel_group`, `user_strea
 ## 8. Known Issues
 
 1. **FS1/FS2 dead DNS** — `fs.local`/`fs2.local` don't resolve. Pre-existing; fix URLs or remove servers.
-2. **Admin password unknown to agent** — `admin` user exists; login endpoint verified functional (401 on bad creds). Owner must log in or request reset.
-3. **npm audit**: 2 non-critical transitive vulns (`esbuild`, `qs`).
+2. **Admin password** — provision/reset with `ADMIN_PASSWORD_FILE=<file> npm run admin:provision`; never print it.
+3. **npm audit**: re-check regularly — new advisories land against pinned transitive deps (e.g. `body-parser`, `multer`).
 4. **Heavy `any`** typing in server code; frontend bundle ~991 kB warning.
-5. **Stale untracked `backups/` dir in repo** — keep, don't delete.
+5. **Stale untracked `backups/` dir in the old working copy** — keep, don't delete.
+6. **No graceful shutdown** — no SIGTERM/SIGINT handler; on restart, old ffmpeg overlay workers may keep publishing while new ones start.
+7. **Scheduler tick** defaults to 30s (`SCHEDULER_TICK_MS`); `docs/CAPACITY_PLAN.md` assumes ~1s.
 
 ---
 
@@ -205,11 +196,11 @@ Phase 2 columns: `streams.lifecycle_state`, `streams.channel_group`, `user_strea
 
 | Priority | Item |
 |---|---|
-| 1 | Commit `sync.ts` `/`-name fix; consider syncing local DB names that were previously skipped |
-| 2 | Confirm owner login works; if not, provision/reset admin via `ADMIN_PASSWORD_FILE` |
-| 3 | Resolve FS1/FS2 (update URL or remove — ask owner first) |
-| 4 | Phase 3 candidates (discuss with owner): client-role VOD access review, metrics endpoint verification, `VodFileManager` direct-upload skip, Telegram alert self-call → direct service call |
-| 5 | Consider moving stream_events pruning/retention policy into settings |
+| 1 | Land PR #17 fixes (cleanup in `finally`, production guards) and run Phase E on an authorized staging server |
+| 2 | Owner applies branch protection |
+| 3 | Hardening phase (needs authorization): graceful shutdown that stops ffmpeg workers, scheduler failure alerts, overlay output-liveness checks, scheduler tick vs capacity doc |
+| 4 | Resolve FS1/FS2 (ask owner first) |
+| 5 | Phase F long-run / load / failover validation |
 
 ### Rules for the next agent
 
@@ -222,22 +213,10 @@ Phase 2 columns: `streams.lifecycle_state`, `streams.channel_group`, `user_strea
 
 ---
 
-## 11. Governance & Security Hardening (in review)
+## 11. Governance & Security Hardening
 
-Two draft PRs on `main` @ `921b4cb`. **Neither is merged — awaiting owner + reviewer sign-off.**
-
-| PR | Branch | Scope |
-|---|---|---|
-| #13 (draft) | `security/branch-governance` | `.github/CODEOWNERS` (`* @shihan84`), `docs/BRANCH_PROTECTION.md` — ruleset guide + required check `validate`. CI audit step NOT pushed (token lacks `workflow` scope; documented as owner action). |
-| #14 (draft) | `security/api-abuse-hardening` | `express-rate-limit` on `POST /api/auth/login` (30/IP/15min → 429, `AUTH_RATE_LIMIT_*` env); body limits 1000gb → auth-JSON 2kb / global 5mb / urlencoded 1mb (413, malformed→400); prod JWT_SECRET rejects missing/<32/placeholder; `tsx`→4.23.15 + `overrides qs ^6.16.0` → audit clean; `tests/api-hardening.test.ts` (13 tests); `docs/API_HARDENING.md`. |
-
-Verified on #14: **108/108 tests**, `tsc --noEmit` clean, `npm run build` clean, `npm audit` → 0.
-
-### Open items for reviewer input
-- qs override (express pins `~6.14.0`) vs express-5 upgrade later
+PR #13 (`.github/CODEOWNERS`, `docs/BRANCH_PROTECTION.md`) and PR #14 (login rate limit, body limits, prod `JWT_SECRET` validation,
+`docs/API_HARDENING.md`) are **merged**. The branch ruleset itself is still an owner action (see §0). Remaining reviewer questions:
 - `trust proxy` posture if a reverse proxy is deployed (currently unset — XFF ignored)
-- multi-instance rate-limit store (currently in-memory; app is single-process by design)
-- recommended merge order in PR descriptions: **#14 first, #13 after owner applies the ruleset**
-
-### Next phase (not started — needs authorization)
-FFmpeg overlay-worker auto-restart with bounded backoff + failure alerting (PR C).
+- multi-instance rate-limit store (in-memory; app is single-process by design)
+- `qs` override vs a later express-5 upgrade
