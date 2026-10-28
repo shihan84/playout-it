@@ -9,11 +9,14 @@ Scope: Flussonic Media Server management dashboard (React SPA + Express + SQLite
 | Milestone | PR | Status |
 |---|---|---|
 | Security foundation, multiserver, channel lifecycle, sync `/`-names | #1–#4 | ✅ Merged |
-| Phase 3 P1–P5 — scheduler, overlay, monitoring, ops dashboard, reliability | #5–#11 | ✅ Merged |
+| Phase 3 P1–P5 — scheduler, overlay, monitoring, ops dashboard, reliability | #5–#10 | ✅ Merged |
+| Overlay output protocol fix (RTMP→FLV, SRT/UDP→TS, explicit `output_url`) | #11 | ✅ Merged into the #6 branch (`b66f1c6`, conflicts resolved `5bc73c0`), landed on `main` with PR #6 (`2b93410`) |
 | API hardening + branch governance | #13, #14 | ✅ Merged |
 | Overlay auto-restart (Phase C) | #15 | ✅ Merged |
 | Watchdog/sync capacity fixes (Phase D) | #16 | ✅ Merged |
-| Staging validation harness (Phase E) | #17 `feature/staging-validation` | 🔄 Open — not merged |
+| Staging validation harness (Phase E) | #17 `feature/staging-validation` | 🔄 Open, not merged — cleanup-in-`finally` + production guards added; not yet run against a real staging server |
+| Dependency security fix (`body-parser` 1.20.9, `multer` 2.5.0; lockfile only) | #18 `devin/security-audit-fixes` | 🔄 Open, not merged — awaiting owner approval |
+| HANDOFF refresh (this document) | #19 `devin/handoff-refresh` | 🔄 Open, not merged — awaiting owner approval |
 
 Verified on `main` @ `871a85f`: `tsc --noEmit` clean, **129/129 tests**, `npm run build` clean.
 FS1/FS2 are **mock test servers** — their DNS failures are expected, not blockers.
@@ -29,7 +32,8 @@ FS1/FS2 are **mock test servers** — their DNS failures are expected, not block
 - Fresh working copy: `D:\playout-it` — its `flussonic.db` is a new, empty dev DB (one `admin` user), not production data.
 - Previous working copy (pre-reinstall, formerly on `E:`): `D:\NEW DOWNLOADS\Fluplayout\playout-it`. Holds the real `.env`, `flussonic.db`
   and backups, plus an uncommitted 12-line `WATCHDOG_ENABLED=0` kill switch in `services/watchdog.ts`. All local commits are on GitHub.
-  **Do not modify or delete it.** A copy (DB, `.env`, backups, patch, git bundle) is in `D:\playout-it-recovery-2026-10-28\`.
+  **Do not modify or delete it.** A copy (DB, `.env`, `backups\`, `local-test\`, `uncommitted-changes.patch`, `all-local-branches.bundle`)
+  is in `D:\playout-it-recovery-2026-10-28\`. That folder contains production credentials — never commit or share it; do not delete it.
 - Historical production: CDN-ITAssist (~47 streams, 10 VODs). Not contacted from the new machine.
 
 **Safety gates (both OFF by default — production channels cannot be armed accidentally):**
@@ -42,9 +46,11 @@ FS1/FS2 are **mock test servers** — their DNS failures are expected, not block
 **Open items for the operator:**
 1. Review PR #17 (staging harness) — needs an authorized staging Flussonic server to exercise.
 2. Apply the branch ruleset in `docs/BRANCH_PROTECTION.md` — `main` is currently unprotected, so CODEOWNERS is not enforced.
-3. CI npm-audit step: apply `docs/patches/security-ci-npm-audit.patch` (needs a token with `workflow` scope).
+3. **Pending — CI npm-audit step not in CI:** `.github/workflows/security-ci.yml` does not run `npm audit`. The change is ready in
+   `docs/patches/security-ci-npm-audit.patch`; applying it needs an owner push or a token with `workflow` scope. Until then, run `npm audit --audit-level=high` manually.
 4. `FS1`/`FS2` (`fs.local`/`fs2.local`) — mock servers from the old DB; fix URLs or remove.
-5. Phase F (not startable on staging): 24h+ continuous playout, 50+ channel load, failover drills.
+5. Phase F: 24h+ continuous playout, 50+ channel load and failover drills. These may run as isolated tests on **authorized staging
+   infrastructure** (never production); results still need confirming against real production-host ffmpeg/network costs before go-live.
 
 **Architecture constraint:** single-process / single-writer. SQLite + process-local locks. No PM2 cluster. See `docs/OPERATIONS_RECOVERY.md` + `docs/PHASE3_P5_RELIABILITY.md` for failure reconciliation and rollback.
 
@@ -180,6 +186,8 @@ Phase 2 columns: `streams.lifecycle_state`, `streams.channel_group`, `user_strea
 5. **Stale untracked `backups/` dir in the old working copy** — keep, don't delete.
 6. **No graceful shutdown** — no SIGTERM/SIGINT handler; on restart, old ffmpeg overlay workers may keep publishing while new ones start.
 7. **Scheduler tick** defaults to 30s (`SCHEDULER_TICK_MS`); `docs/CAPACITY_PLAN.md` assumes ~1s.
+8. **Upload error statuses** — malformed multipart bodies, and multer errors on `POST /api/streams/:id/videos` and `/api/vods/:id/files/chunk`,
+   return 500 instead of 4xx (the global error handler only maps body-parser size/parse errors). No crash; same before and after PR #18.
 
 ---
 
@@ -200,7 +208,7 @@ Phase 2 columns: `streams.lifecycle_state`, `streams.channel_group`, `user_strea
 | 2 | Owner applies branch protection |
 | 3 | Hardening phase (needs authorization): graceful shutdown that stops ffmpeg workers, scheduler failure alerts, overlay output-liveness checks, scheduler tick vs capacity doc |
 | 4 | Resolve FS1/FS2 (ask owner first) |
-| 5 | Phase F long-run / load / failover validation |
+| 5 | Phase F long-run / load / failover tests on authorized staging infrastructure |
 
 ### Rules for the next agent
 
