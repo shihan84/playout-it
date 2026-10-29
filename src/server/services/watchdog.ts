@@ -252,3 +252,8 @@ export const startWatchdog = () => {
     console.log('Auto-sync is disabled');
   }
 };
+
+export const stopWatchdog = () => {
+  if (watchdogTimer) clearInterval(watchdogTimer);
+  if (autoSyncTimer) clearInterval(autoSyncTimer);
+};

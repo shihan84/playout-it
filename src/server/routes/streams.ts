@@ -1,6 +1,5 @@
 import { Router } from 'express';
 import multer from 'multer';
-import os from 'os';
 import fs from 'fs';
 import { db } from '../db';
 import { flussonicRequest, resolveCompanionVodName } from '../services/flussonic';
@@ -8,11 +7,11 @@ import { updatePlaylistFile } from '../services/playlist';
 import { broadcastStreamsUpdate } from '../websocket';
 import { parseStream } from '../utils/streams';
 import { authenticateToken, requireAdmin, requireStreamAccess, AuthRequest } from '../middleware/auth';
-import { singleUpload, uploadPathSegment } from '../utils/upload';
+import { singleUpload, uploadPathSegment, UPLOAD_TMP_DIR } from '../utils/upload';
 import { transitionStream, getStreamEvents, allowedTransitions, isLifecycleState, recordStreamEvent } from '../services/lifecycle';
 
 const upload = multer({
-  dest: os.tmpdir(),
+  dest: UPLOAD_TMP_DIR,
   limits: { fileSize: 1000 * 1024 * 1024 * 1024 }
 });
 
