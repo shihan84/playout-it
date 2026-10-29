@@ -269,7 +269,7 @@ export default function BroadcastPlaylist({
             <input
               ref={fileInputRef}
               type="file"
-              accept="video/*"
+              accept="video/*,.mp4,.mov,.mkv,.ts,.m2ts,.mxf,.avi,.webm,.flv,.mpg,.mpeg"
               multiple
               onChange={handleFileSelect}
               disabled={isUploading}

@@ -9,12 +9,23 @@ import { flussonicRequest } from '../services/flussonic';
 import { syncVodFilesFromRemote } from '../services/sync';
 import { updateVodPlaylistFile } from '../services/playlist';
 import { authenticateToken, requireAdmin } from '../middleware/auth';
-import { singleUpload, uploadPathSegment } from '../utils/upload';
+import { singleUpload, uploadPathSegment, MAX_UPLOAD_BYTES, MAX_UPLOAD_GB, videoFileFilter, isAllowedVideoName, UNSUPPORTED_TYPE_MESSAGE } from '../utils/upload';
 
 const upload = multer({
   dest: os.tmpdir(),
-  limits: { fileSize: 1000 * 1024 * 1024 * 1024 }
+  limits: { fileSize: MAX_UPLOAD_BYTES },
+  fileFilter: videoFileFilter
 });
+// Chunks are anonymous blobs; type and total size are enforced per upload session.
+const chunkUpload = multer({
+  dest: os.tmpdir(),
+  limits: { fileSize: MAX_UPLOAD_BYTES }
+});
+const TOO_LARGE = { error: `File too large. Max limit is ${MAX_UPLOAD_GB}GB.` };
+
+function dirBytes(dir: string): number {
+  return fs.readdirSync(dir).reduce((sum, f) => sum + fs.statSync(path.join(dir, f)).size, 0);
+}
 
 const router = Router();
 
@@ -224,6 +235,8 @@ router.post('/:id/files/init-chunked', (req, res) => {
   if (!filename || !totalChunks) return res.status(400).json({ error: 'Missing filename or totalChunks' });
 
   if (!Number.isSafeInteger(Number(totalChunks)) || Number(totalChunks) < 1 || Number(totalChunks) > 10000 || typeof filename !== 'string' || !/^[^/\\\\]+$/.test(filename) || filename === '.' || filename === '..') return res.status(400).json({ error: 'Invalid upload parameters' });
+  if (!isAllowedVideoName(filename)) return res.status(415).json({ error: UNSUPPORTED_TYPE_MESSAGE });
+  if (req.body.size !== undefined && Number(req.body.size) > MAX_UPLOAD_BYTES) return res.status(413).json(TOO_LARGE);
   const uploadId = randomBytes(16).toString('hex');
   const chunkDir = path.join(os.tmpdir(), `upload_${uploadId}`);
 
@@ -234,7 +247,7 @@ router.post('/:id/files/init-chunked', (req, res) => {
   res.json({ uploadId, chunkDir });
 });
 
-router.post('/:id/files/chunk', singleUpload(upload, 'chunk'), (req, res) => {
+router.post('/:id/files/chunk', singleUpload(chunkUpload, 'chunk'), (req, res) => {
   const { uploadId, chunkIndex } = req.body;
   if (!uploadId || chunkIndex === undefined || !req.file) {
     return res.status(400).json({ error: 'Missing uploadId, chunkIndex, or chunk file' });
@@ -248,6 +261,10 @@ router.post('/:id/files/chunk', singleUpload(upload, 'chunk'), (req, res) => {
 
   const chunkPath = path.join(chunkDir, `chunk_${chunkIndex}`);
   fs.renameSync(req.file.path, chunkPath);
+  if (dirBytes(chunkDir) > MAX_UPLOAD_BYTES) {
+    fs.rmSync(chunkDir, { recursive: true, force: true });
+    return res.status(413).json(TOO_LARGE);
+  }
 
   res.json({ success: true });
 });
@@ -261,6 +278,12 @@ router.post('/:id/files/complete-chunked', async (req, res) => {
   if (typeof uploadId !== 'string' || !/^[a-f0-9]{32}$/.test(uploadId) || typeof filename !== 'string' || !/^[^/\\\\]+$/.test(filename) || filename === '.' || filename === '..' || !Number.isSafeInteger(Number(totalChunks)) || Number(totalChunks) < 1 || Number(totalChunks) > 10000) return res.status(400).json({ error: 'Invalid upload parameters' });
   const chunkDir = path.join(os.tmpdir(), `upload_${uploadId}`);
   const finalPath = path.join(os.tmpdir(), `final_${uploadId}_${filename}`);
+  if (!isAllowedVideoName(filename) || Number(size) > MAX_UPLOAD_BYTES) {
+    if (fs.existsSync(chunkDir)) fs.rmSync(chunkDir, { recursive: true, force: true });
+    return isAllowedVideoName(filename)
+      ? res.status(413).json(TOO_LARGE)
+      : res.status(415).json({ error: UNSUPPORTED_TYPE_MESSAGE });
+  }
 
   try {
     const writeStream = fs.createWriteStream(finalPath);

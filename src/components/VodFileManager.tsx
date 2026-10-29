@@ -224,7 +224,7 @@ export default function VodFileManager({ vod, onClose, showNotification }: VodFi
               <input 
                 type="file" 
                 className="hidden" 
-                accept="video/*"
+                accept="video/*,.mp4,.mov,.mkv,.ts,.m2ts,.mxf,.avi,.webm,.flv,.mpg,.mpeg"
                 onChange={handleFileUpload}
                 disabled={isUploading}
                 multiple
