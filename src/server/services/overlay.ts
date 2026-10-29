@@ -377,6 +377,21 @@ const activeJobs = new Map<number, ChildProcess>(); // jobId -> process
 // trigger. Clearing next_retry_at (stop, retry consumed, boot reconcile)
 // always wins over a stale timer.
 const pendingRetries = new Map<number, ReturnType<typeof setTimeout>>();
+let shuttingDown = false;
+
+// App shutdown: cancel pending restarts, SIGTERM every worker, SIGKILL after
+// graceMs, and resolve once all have exited so none outlives the process.
+export async function shutdownOverlays(graceMs = 5000): Promise<void> {
+  shuttingDown = true;
+  for (const t of pendingRetries.values()) clearTimeout(t);
+  pendingRetries.clear();
+  await Promise.all([...activeJobs.values()].map(proc => new Promise<void>(resolve => {
+    if (proc.exitCode !== null || proc.signalCode !== null) return resolve();
+    const kill = setTimeout(() => { try { proc.kill('SIGKILL'); } catch { /* gone */ } }, graceMs);
+    proc.once('exit', () => { clearTimeout(kill); resolve(); });
+    try { proc.kill('SIGTERM'); } catch { clearTimeout(kill); resolve(); }
+  })));
+}
 const MAX_PER_STREAM = 1;                            // one overlay per channel
 // Global ffmpeg worker cap — each job is a full decode+encode process; an
 // unbounded count would saturate CPU and starve the management server.
@@ -531,6 +546,11 @@ export async function startOverlay(profileId: number): Promise<any> {
       `overlay job #${jobId} failed to start: ${e.message}`);
   });
   proc.on('exit', (code: any) => {
+    if (shuttingDown) {
+      db.prepare(`UPDATE overlay_jobs SET status='exited', exit_code=?, last_error='app shutdown', stopped_at=CURRENT_TIMESTAMP WHERE id=? AND status NOT IN ('stopped','failed')`).run(code, jobId);
+      activeJobs.delete(jobId);
+      return;
+    }
     const cur = db.prepare('SELECT status FROM overlay_jobs WHERE id = ?').get(jobId) as any;
     // 'stopped'/'failed' are deliberate terminal states (stop request or the
     // 'error' handler already recorded the spawn failure) — never overwrite.

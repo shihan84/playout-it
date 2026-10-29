@@ -8,10 +8,11 @@ import { authenticateToken, requireAdmin } from './src/server/middleware/auth';
 import { csrfProtection } from './src/server/middleware/csrf';
 
 import { config } from './src/server/config';
-import './src/server/db'; // initializes DB as side effect
+import { db } from './src/server/db';
 import { wss, verifyWsAuth } from './src/server/websocket';
-import { startWatchdog } from './src/server/services/watchdog';
-import { startScheduler } from './src/server/services/scheduler';
+import { startWatchdog, stopWatchdog } from './src/server/services/watchdog';
+import { startScheduler, stopScheduler } from './src/server/services/scheduler';
+import { sweepStaleUploads } from './src/server/utils/upload';
 
 import authRoutes from './src/server/routes/auth';
 import usersRoutes from './src/server/routes/users';
@@ -27,7 +28,7 @@ import settingsRoutes from './src/server/routes/settings';
 import sslRoutes from './src/server/routes/ssl';
 import channelsRoutes from './src/server/routes/channels';
 import overlaysRoutes from './src/server/routes/overlays';
-import { recoverOverlayJobs } from './src/server/services/overlay';
+import { recoverOverlayJobs, shutdownOverlays } from './src/server/services/overlay';
 import schedulesRoutes from './src/server/routes/schedules';
 import monitoringRoutes from './src/server/routes/monitoring';
 
@@ -85,6 +86,8 @@ app.use((err: any, req: express.Request, res: express.Response, _next: express.N
   }
 });
 
+let httpServer: any;
+
 async function startServer() {
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
@@ -101,7 +104,6 @@ async function startServer() {
   }
 
   let server: any;
-
   if (SSL_ENABLED && SSL_KEY_PATH && SSL_CERT_PATH) {
     // Validate SSL files exist
     if (!fs.existsSync(SSL_KEY_PATH)) {
@@ -125,6 +127,7 @@ async function startServer() {
     });
   }
 
+  httpServer = server;
   server.on('upgrade', (request: any, socket: any, head: any) => {
     if (request.url === '/ws') {
       const wsUser = verifyWsAuth(request);
@@ -142,6 +145,26 @@ async function startServer() {
     }
   });
 }
+
+let shuttingDown = false;
+async function shutdown(signal: string) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(`${signal} received — shutting down`);
+  setTimeout(() => process.exit(1), 15000).unref();
+  stopScheduler();
+  stopWatchdog();
+  httpServer?.close();
+  for (const client of wss.clients) client.terminate();
+  try { await shutdownOverlays(); } catch (e: any) { console.error('Overlay shutdown failed:', e.message); }
+  try { db.close(); } catch { /* already closed */ }
+  process.exit(0);
+}
+process.on('SIGTERM', () => void shutdown('SIGTERM'));
+process.on('SIGINT', () => void shutdown('SIGINT'));
+
+const swept = sweepStaleUploads();
+if (swept) console.log(`Removed ${swept} stale upload temp file(s)`);
 
 // Start background services
 startWatchdog();

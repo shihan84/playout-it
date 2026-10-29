@@ -9,16 +9,16 @@ import { flussonicRequest } from '../services/flussonic';
 import { syncVodFilesFromRemote } from '../services/sync';
 import { updateVodPlaylistFile } from '../services/playlist';
 import { authenticateToken, requireAdmin } from '../middleware/auth';
-import { singleUpload, uploadPathSegment, MAX_UPLOAD_BYTES, MAX_UPLOAD_GB, videoFileFilter, isAllowedVideoName, UNSUPPORTED_TYPE_MESSAGE } from '../utils/upload';
+import { singleUpload, uploadPathSegment, MAX_UPLOAD_BYTES, MAX_UPLOAD_GB, videoFileFilter, isAllowedVideoName, UNSUPPORTED_TYPE_MESSAGE, UPLOAD_TMP_DIR } from '../utils/upload';
 
 const upload = multer({
-  dest: os.tmpdir(),
+  dest: UPLOAD_TMP_DIR,
   limits: { fileSize: MAX_UPLOAD_BYTES },
   fileFilter: videoFileFilter
 });
 // Chunks are anonymous blobs; type and total size are enforced per upload session.
 const chunkUpload = multer({
-  dest: os.tmpdir(),
+  dest: UPLOAD_TMP_DIR,
   limits: { fileSize: MAX_UPLOAD_BYTES }
 });
 const TOO_LARGE = { error: `File too large. Max limit is ${MAX_UPLOAD_GB}GB.` };

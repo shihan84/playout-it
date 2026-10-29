@@ -8,7 +8,7 @@ Phase F validates them with real load tests.
 | Component | Cost driver | Budget notes |
 |---|---|---|
 | **Overlay worker** (ffmpeg decode + logo/ticker + encode) | ~0.5–1.5 CPU cores per worker at 1080p25 h264/veryfast; ~100–200 MB RSS | Dominant resource. `OVERLAY_MAX_WORKERS` (default 8) caps fleet. |
-| **Scheduler swap** | one Flussonic PUT per window boundary | negligible; tick `SCHEDULER_TICK_MS` (default ~1s, test 400ms) |
+| **Scheduler swap** | one Flussonic PUT per window boundary | negligible; tick `SCHEDULER_TICK_MS` (default 30s, tests 400ms); a window boundary can fire up to one tick late |
 | **Watchdog tick** | 1 GET `/streams` per server per `watchdog_interval` (60s) | `mapLimit(servers, 4)` bounds concurrency |
 | **Auto-sync** | full stream + VOD inventory per server per effective interval | `mapLimit(servers, 4)`; per-server `sync_interval_secs` staggers load (fixed in this PR — see below) |
 | **HTTP/API** | SQLite `better-sqlite3`, synchronous single-writer (WAL) | Single-process constraint is intentional; fine at this scale |

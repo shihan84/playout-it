@@ -47,8 +47,7 @@ FS1/FS2 are **mock test servers** — their DNS failures are expected, not block
 1. Review PR #17 (staging harness) — needs an authorized staging Flussonic server to exercise.
 2. Finish branch protection per `docs/BRANCH_PROTECTION.md`: `main` is protected (classic rule), but `validate` is not yet a required
    status check and admins are exempt (`enforcement_level: non_admins`). Approval/CODEOWNERS/force-push settings need owner verification.
-3. **Pending — CI npm-audit step not in CI:** `.github/workflows/security-ci.yml` does not run `npm audit`. The change is ready in
-   `docs/patches/security-ci-npm-audit.patch`; applying it needs an owner push or a token with `workflow` scope. Until then, run `npm audit --audit-level=high` manually.
+3. **CI npm-audit step:** the `validate` job in `.github/workflows/security-ci.yml` runs `npm audit --audit-level=high` (fails on high/critical advisories).
 4. `FS1`/`FS2` (`fs.local`/`fs2.local`) — mock servers from the old DB; fix URLs or remove.
 5. Phase F: 24h+ continuous playout, 50+ channel load and failover drills. These may run as isolated tests on **authorized staging
    infrastructure** (never production); results still need confirming against real production-host ffmpeg/network costs before go-live.
@@ -186,7 +185,7 @@ Phase 2 columns: `streams.lifecycle_state`, `streams.channel_group`, `user_strea
 4. **Heavy `any`** typing in server code; frontend bundle ~991 kB warning.
 5. **Stale untracked `backups/` dir in the old working copy** — keep, don't delete.
 6. **No graceful shutdown** — no SIGTERM/SIGINT handler; on restart, old ffmpeg overlay workers may keep publishing while new ones start.
-7. **Scheduler tick** defaults to 30s (`SCHEDULER_TICK_MS`); `docs/CAPACITY_PLAN.md` assumes ~1s.
+7. **Scheduler tick** defaults to 30s (`SCHEDULER_TICK_MS`), so a window boundary can fire up to 30s late; lower it per deployment if tighter timing is needed (documented in `docs/CAPACITY_PLAN.md`).
 8. **Upload handling** (pre-existing; same before and after PR #18; no crash):
    - Malformed multipart bodies return 500; on `POST /api/streams/:id/videos` and `/api/vods/:id/files/chunk` wrong-field and oversized
      files also return 500 (no multer error wrapper; the global handler only maps body-parser errors). `/api/vods/:id/files` returns raw parser messages with 500.
