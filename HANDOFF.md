@@ -186,7 +186,7 @@ Phase 2 columns: `streams.lifecycle_state`, `streams.channel_group`, `user_strea
 4. **Heavy `any`** typing in server code; frontend bundle ~991 kB warning.
 5. **Stale untracked `backups/` dir in the old working copy** — keep, don't delete.
 6. **No graceful shutdown** — no SIGTERM/SIGINT handler; on restart, old ffmpeg overlay workers may keep publishing while new ones start.
-7. **Scheduler tick** defaults to 30s (`SCHEDULER_TICK_MS`); `docs/CAPACITY_PLAN.md` assumes ~1s.
+7. **Scheduler tick** defaults to 30s (`SCHEDULER_TICK_MS`), so a window boundary can fire up to 30s late; lower it per deployment if tighter timing is needed (documented in `docs/CAPACITY_PLAN.md`).
 8. **Upload handling** (pre-existing; same before and after PR #18; no crash):
    - Malformed multipart bodies return 500; on `POST /api/streams/:id/videos` and `/api/vods/:id/files/chunk` wrong-field and oversized
      files also return 500 (no multer error wrapper; the global handler only maps body-parser errors). `/api/vods/:id/files` returns raw parser messages with 500.
