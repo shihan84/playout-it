@@ -8,6 +8,7 @@ import { updatePlaylistFile } from '../services/playlist';
 import { broadcastStreamsUpdate } from '../websocket';
 import { parseStream } from '../utils/streams';
 import { authenticateToken, requireAdmin, requireStreamAccess, AuthRequest } from '../middleware/auth';
+import { singleUpload, uploadPathSegment } from '../utils/upload';
 import { transitionStream, getStreamEvents, allowedTransitions, isLifecycleState, recordStreamEvent } from '../services/lifecycle';
 
 const upload = multer({
@@ -473,7 +474,7 @@ router.patch('/:id/videos/:videoId/duration', authenticateToken, requireStreamAc
   res.json({ success: true });
 });
 
-router.post('/:id/videos', authenticateToken, requireStreamAccess, upload.single('video'), async (req, res) => {
+router.post('/:id/videos', authenticateToken, requireStreamAccess, singleUpload(upload, 'video'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
 
   const stream = db.prepare('SELECT * FROM streams WHERE id = ?').get(req.params.id) as any;
@@ -490,11 +491,13 @@ router.post('/:id/videos', authenticateToken, requireStreamAccess, upload.single
     // Flussonic shares a namespace between streams and VODs). Resolves to
     // the legacy same-name VOD when one exists from a pre-upgrade install.
     const vodName = await resolveCompanionVodName(server, stream.name);
-    const uploadUrl = `${server.url}/flussonic/api/v3/vods/${encodeURIComponent(vodName)}/storages/0/files/${req.file.originalname}`;
-    const fileBuffer = fs.readFileSync(req.file.path);
+    const uploadUrl = `${server.url}/flussonic/api/v3/vods/${encodeURIComponent(vodName)}/storages/0/files/${uploadPathSegment(req.file.originalname)}`;
+    const filePath = req.file.path;
+    // Stream from disk (fresh stream per attempt) instead of buffering the whole file in memory.
+    const putFile = () => flussonicRequest('PUT', uploadUrl, server, fs.createReadStream(filePath), 3600000, {}, 0);
 
     try {
-      await flussonicRequest('PUT', uploadUrl, server, fileBuffer);
+      await putFile();
     } catch (uploadError: any) {
       if (uploadError.response && uploadError.response.status === 404) {
         // VOD doesn't exist, create it
@@ -508,7 +511,7 @@ router.post('/:id/videos', authenticateToken, requireStreamAccess, upload.single
         db.prepare('INSERT INTO vods (server_id, name, paths) VALUES (?, ?, ?)').run(server.id, vodName, JSON.stringify([`/storage/vods/${vodName}`]));
 
         // Try uploading again
-        await flussonicRequest('PUT', uploadUrl, server, fileBuffer);
+        await putFile();
       } else {
         throw uploadError;
       }
@@ -544,7 +547,7 @@ router.delete('/:id/videos/:filename', authenticateToken, requireStreamAccess, a
     if (server) {
       // Delete video from Flussonic (resolve legacy same-name VODs too)
       const vodName = await resolveCompanionVodName(server, stream.name);
-      const deleteUrl = `${server.url}/flussonic/api/v3/vods/${encodeURIComponent(vodName)}/storages/0/files/${req.params.filename}`;
+      const deleteUrl = `${server.url}/flussonic/api/v3/vods/${encodeURIComponent(vodName)}/storages/0/files/${uploadPathSegment(req.params.filename)}`;
       await flussonicRequest('DELETE', deleteUrl, server).catch(e => console.warn('Failed to delete from Flussonic (ignored):', e.message));
       console.log(`Video deleted from Flussonic VOD: ${stream.name}/${req.params.filename}`);
     }

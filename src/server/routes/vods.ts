@@ -9,6 +9,7 @@ import { flussonicRequest } from '../services/flussonic';
 import { syncVodFilesFromRemote } from '../services/sync';
 import { updateVodPlaylistFile } from '../services/playlist';
 import { authenticateToken, requireAdmin } from '../middleware/auth';
+import { singleUpload, uploadPathSegment } from '../utils/upload';
 
 const upload = multer({
   dest: os.tmpdir(),
@@ -233,7 +234,7 @@ router.post('/:id/files/init-chunked', (req, res) => {
   res.json({ uploadId, chunkDir });
 });
 
-router.post('/:id/files/chunk', upload.single('chunk'), (req, res) => {
+router.post('/:id/files/chunk', singleUpload(upload, 'chunk'), (req, res) => {
   const { uploadId, chunkIndex } = req.body;
   if (!uploadId || chunkIndex === undefined || !req.file) {
     return res.status(400).json({ error: 'Missing uploadId, chunkIndex, or chunk file' });
@@ -284,7 +285,7 @@ router.post('/:id/files/complete-chunked', async (req, res) => {
     const server = db.prepare('SELECT * FROM servers WHERE id = ?').get(vod.server_id) as any;
     if (!server) throw new Error('Server not found');
 
-    const uploadUrl = `${server.url}/flussonic/api/v3/vods/${encodeURIComponent(vod.name)}/storages/0/files/${filename}`;
+    const uploadUrl = `${server.url}/flussonic/api/v3/vods/${encodeURIComponent(vod.name)}/storages/0/files/${uploadPathSegment(filename)}`;
     const fileStream = fs.createReadStream(finalPath);
 
     await flussonicRequest('PUT', uploadUrl, server, fileStream, 3600000);
@@ -302,19 +303,7 @@ router.post('/:id/files/complete-chunked', async (req, res) => {
   }
 });
 
-router.post('/:id/files', (req, res, next) => {
-  upload.single('file')(req, res, (err) => {
-    if (err instanceof multer.MulterError) {
-      if (err.code === 'LIMIT_FILE_SIZE') {
-        return res.status(413).json({ error: 'File too large. Max limit is 1000GB.' });
-      }
-      return res.status(400).json({ error: err.message });
-    } else if (err) {
-      return res.status(500).json({ error: err.message || 'Upload error' });
-    }
-    next();
-  });
-}, async (req, res) => {
+router.post('/:id/files', singleUpload(upload, 'file'), async (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'No file uploaded' });
 
   const vod = db.prepare('SELECT * FROM vods WHERE id = ?').get(req.params.id) as any;
@@ -327,7 +316,7 @@ router.post('/:id/files', (req, res, next) => {
     const server = db.prepare('SELECT * FROM servers WHERE id = ?').get(vod.server_id) as any;
     if (!server) throw new Error('Server not found');
 
-    const uploadUrl = `${server.url}/flussonic/api/v3/vods/${encodeURIComponent(vod.name)}/storages/0/files/${req.file.originalname}`;
+    const uploadUrl = `${server.url}/flussonic/api/v3/vods/${encodeURIComponent(vod.name)}/storages/0/files/${uploadPathSegment(req.file.originalname)}`;
     const fileStream = fs.createReadStream(req.file.path);
 
     // Use a much longer timeout for file uploads (1 hour)
@@ -357,7 +346,7 @@ router.delete('/:id/files/:filename', async (req, res) => {
     const server = db.prepare('SELECT * FROM servers WHERE id = ?').get(vod.server_id) as any;
     if (server) {
       const baseUrl = server.url.replace(/\/$/, '');
-      const deleteUrl = `${baseUrl}/flussonic/api/v3/vods/${encodeURIComponent(vod.name)}/storages/0/files/${req.params.filename}`;
+      const deleteUrl = `${baseUrl}/flussonic/api/v3/vods/${encodeURIComponent(vod.name)}/storages/0/files/${uploadPathSegment(req.params.filename)}`;
       await flussonicRequest('DELETE', deleteUrl, server).catch(e => console.warn('Failed to delete from Flussonic (ignored):', e.message));
     }
 
