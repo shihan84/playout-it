@@ -493,8 +493,8 @@ router.post('/:id/videos', authenticateToken, requireStreamAccess, singleUpload(
     const vodName = await resolveCompanionVodName(server, stream.name);
     const uploadUrl = `${server.url}/flussonic/api/v3/vods/${encodeURIComponent(vodName)}/storages/0/files/${uploadPathSegment(req.file.originalname)}`;
     const filePath = req.file.path;
-    // Stream from disk (fresh stream per attempt) instead of buffering the whole file in memory.
-    const putFile = () => flussonicRequest('PUT', uploadUrl, server, fs.createReadStream(filePath), 3600000, {}, 0);
+    // Stream from disk instead of buffering the whole file in memory.
+    const putFile = () => flussonicRequest('PUT', uploadUrl, server, () => fs.createReadStream(filePath), 3600000);
 
     try {
       await putFile();

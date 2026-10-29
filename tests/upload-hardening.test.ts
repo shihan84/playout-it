@@ -213,3 +213,37 @@ test('wrong field and malformed multipart return 400 on every upload route', asy
   // valid chunk still accepted
   assert.equal((await fetch(BASE + C, { method: 'POST', headers: auth, body: form('chunk', Buffer.alloc(100, 1), 'c0', { uploadId: init.uploadId, chunkIndex: '0' }) })).status, 200);
 });
+
+test('flussonicRequest sends a fresh stream on legacy-auth retry and destroys every stream', async () => {
+  const scratchDir = fs.mkdtempSync(path.join(os.tmpdir(), 'fr-test-'));
+  process.env.DATABASE_PATH = path.join(scratchDir, 'fr.db');
+  const { flussonicRequest } = await import('../src/server/services/flussonic');
+  const file = path.join(scratchDir, 'body.bin');
+  fs.writeFileSync(file, Buffer.alloc(200000, 5));
+  const received: number[] = [];
+  const srv = createServer((rq, rs) => {
+    let n = 0;
+    rq.on('data', (c) => (n += c.length));
+    rq.on('end', () => {
+      received.push(n);
+      rs.statusCode = received.length === 1 ? 401 : 200;
+      rs.end('{}');
+    });
+  });
+  await new Promise<void>((r) => srv.listen(0, '127.0.0.1', () => r()));
+  const streams: fs.ReadStream[] = [];
+  try {
+    const port = (srv.address() as any).port;
+    await flussonicRequest('PUT', `http://127.0.0.1:${port}/x`, { api_key: 'key' }, () => {
+      const s = fs.createReadStream(file);
+      streams.push(s);
+      return s;
+    });
+    assert.deepEqual(received, [200000, 200000]);
+    assert.equal(streams.length, 2);
+    assert.ok(streams.every((s) => s.destroyed));
+  } finally {
+    srv.close();
+    fs.rmSync(scratchDir, { recursive: true, force: true });
+  }
+});

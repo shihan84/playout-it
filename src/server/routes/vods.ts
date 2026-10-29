@@ -286,7 +286,7 @@ router.post('/:id/files/complete-chunked', async (req, res) => {
     if (!server) throw new Error('Server not found');
 
     const uploadUrl = `${server.url}/flussonic/api/v3/vods/${encodeURIComponent(vod.name)}/storages/0/files/${uploadPathSegment(filename)}`;
-    const fileStream = fs.createReadStream(finalPath);
+    const fileStream = () => fs.createReadStream(finalPath);
 
     await flussonicRequest('PUT', uploadUrl, server, fileStream, 3600000);
 
@@ -317,7 +317,7 @@ router.post('/:id/files', singleUpload(upload, 'file'), async (req, res) => {
     if (!server) throw new Error('Server not found');
 
     const uploadUrl = `${server.url}/flussonic/api/v3/vods/${encodeURIComponent(vod.name)}/storages/0/files/${uploadPathSegment(req.file.originalname)}`;
-    const fileStream = fs.createReadStream(req.file.path);
+    const fileStream = () => fs.createReadStream(req.file.path);
 
     // Use a much longer timeout for file uploads (1 hour)
     await flussonicRequest('PUT', uploadUrl, server, fileStream, 3600000);
