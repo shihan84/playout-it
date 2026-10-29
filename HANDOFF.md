@@ -15,8 +15,8 @@ Scope: Flussonic Media Server management dashboard (React SPA + Express + SQLite
 | Overlay auto-restart (Phase C) | #15 | ✅ Merged |
 | Watchdog/sync capacity fixes (Phase D) | #16 | ✅ Merged |
 | Staging validation harness (Phase E) | #17 `feature/staging-validation` | 🔄 Open, not merged — cleanup-in-`finally` + production guards added; not yet run against a real staging server |
-| Dependency security fix (`body-parser` 1.20.9, `multer` 2.5.0; lockfile only) | #18 `devin/security-audit-fixes` | 🔄 Open, not merged — awaiting owner approval |
-| HANDOFF refresh (this document) | #19 `devin/handoff-refresh` | 🔄 Open, not merged — awaiting owner approval |
+| Dependency security fix (`body-parser` 1.20.9, `multer` 2.5.0; lockfile only) | #18 `devin/security-audit-fixes` | 🔄 Draft, CI (`validate`) passed — awaiting owner approval |
+| HANDOFF refresh (this document) | #19 `devin/handoff-refresh` | 🔄 Draft, CI (`validate`) passed — awaiting owner approval |
 
 Verified on `main` @ `871a85f`: `tsc --noEmit` clean, **129/129 tests**, `npm run build` clean.
 FS1/FS2 are **mock test servers** — their DNS failures are expected, not blockers.
@@ -45,7 +45,8 @@ FS1/FS2 are **mock test servers** — their DNS failures are expected, not block
 
 **Open items for the operator:**
 1. Review PR #17 (staging harness) — needs an authorized staging Flussonic server to exercise.
-2. Apply the branch ruleset in `docs/BRANCH_PROTECTION.md` — `main` is currently unprotected, so CODEOWNERS is not enforced.
+2. Finish branch protection per `docs/BRANCH_PROTECTION.md`: `main` is protected (classic rule), but `validate` is not yet a required
+   status check and admins are exempt (`enforcement_level: non_admins`). Approval/CODEOWNERS/force-push settings need owner verification.
 3. **Pending — CI npm-audit step not in CI:** `.github/workflows/security-ci.yml` does not run `npm audit`. The change is ready in
    `docs/patches/security-ci-npm-audit.patch`; applying it needs an owner push or a token with `workflow` scope. Until then, run `npm audit --audit-level=high` manually.
 4. `FS1`/`FS2` (`fs.local`/`fs2.local`) — mock servers from the old DB; fix URLs or remove.
@@ -130,11 +131,11 @@ Flussonic v3 uses HTTP **Basic auth** (`username` + `password`).
 ```bash
 npm run dev      # tsx server.ts — does NOT hot-reload backend; restart manually
 npm run lint     # tsc --noEmit
-npm run build    # vite build && esbuild → dist/server.cjs (~162 kB)
+npm run build    # vite build && esbuild → dist/server.cjs (~223 kB)
 npm start        # node dist/server.cjs  (needs JWT_SECRET in .env for prod)
 
 # Tests — there is NO "npm test" script:
-npx tsx --test tests/*.test.ts     # 54 tests: http-auth.integration, migrations, security-regression, websocket
+npx tsx --test tests/*.test.ts     # 129 tests
 ```
 
 Env vars (`.env`): `PORT` (3000), `DATABASE_PATH`, `JWT_SECRET`, `TELEGRAM_BOT_TOKEN`, `SSL_*`, `NODE_ENV`. Production refuses to boot without a ≥32-char `JWT_SECRET`. Admin provisioning: `ADMIN_PASSWORD_FILE=<path> npm run admin:provision`.
@@ -186,8 +187,12 @@ Phase 2 columns: `streams.lifecycle_state`, `streams.channel_group`, `user_strea
 5. **Stale untracked `backups/` dir in the old working copy** — keep, don't delete.
 6. **No graceful shutdown** — no SIGTERM/SIGINT handler; on restart, old ffmpeg overlay workers may keep publishing while new ones start.
 7. **Scheduler tick** defaults to 30s (`SCHEDULER_TICK_MS`); `docs/CAPACITY_PLAN.md` assumes ~1s.
-8. **Upload error statuses** — malformed multipart bodies, and multer errors on `POST /api/streams/:id/videos` and `/api/vods/:id/files/chunk`,
-   return 500 instead of 4xx (the global error handler only maps body-parser size/parse errors). No crash; same before and after PR #18.
+8. **Upload handling** (pre-existing; same before and after PR #18; no crash):
+   - Malformed multipart bodies return 500; on `POST /api/streams/:id/videos` and `/api/vods/:id/files/chunk` wrong-field and oversized
+     files also return 500 (no multer error wrapper; the global handler only maps body-parser errors). `/api/vods/:id/files` returns raw parser messages with 500.
+   - Upload `originalname` is put into the Flussonic URL unencoded (`?`, `#`, `%2f` pass through).
+   - `/api/streams/:id/videos` reads the whole upload into memory (`readFileSync`) under a 1000 GB limit.
+   - No file-type validation.
 
 ---
 
