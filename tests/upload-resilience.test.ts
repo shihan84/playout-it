@@ -118,7 +118,11 @@ let app: any, auth: Record<string, string>, streamId: any, vodId: any;
 let putPlan: Act[] = [];
 const flog: { method: string; url: string; bytes: number }[] = [];
 let mock: any;
-const leftovers = () => fs.readdirSync(appTmp).filter((f) => /^[a-f0-9]{32}$/.test(f) || /^(upload|final)_/.test(f));
+const leftovers = () => {
+  const top = fs.readdirSync(appTmp).filter((f) => /^[a-f0-9]{32}$/.test(f) || /^(upload|final)_/.test(f));
+  const sub = path.join(appTmp, 'playout-it-uploads'); // multer dir once the graceful-shutdown PR lands
+  return top.concat(fs.existsSync(sub) ? fs.readdirSync(sub).map((f) => `playout-it-uploads/${f}`) : []);
+};
 
 function form(field: string, data: Buffer, filename = 'clip.mp4', extra: Record<string, string> = {}) {
   const f = new FormData();
