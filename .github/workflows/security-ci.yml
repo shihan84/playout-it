@@ -25,3 +25,5 @@ jobs:
         run: npx tsx --test tests/*.test.ts
       - name: Build
         run: npm run build
+      - name: Dependency vulnerabilities
+        run: npm audit --audit-level=high
