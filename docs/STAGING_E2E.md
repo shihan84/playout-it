@@ -13,7 +13,7 @@ STAGING_URL=http://stage.example:8080 STAGING_USER=… STAGING_PASS=… \
   npx tsx scripts/staging-validate.ts
 
 # Full lifecycle (disposable stream e2e-val-<ts>, cleaned up in `finally`,
-# also on crash or Ctrl+C). Requires confirming the staging hostname:
+# also on crash, Ctrl+C or SIGTERM). Requires confirming the staging hostname:
 STAGING_CONFIRM_HOST=stage.example … --write
 
 # With a real publish test (synthetic ffmpeg source, staging host only):
@@ -24,7 +24,9 @@ STAGING_CONFIRM_HOST=stage.example … --write
 
 | Guard | Mode | Behavior |
 |---|---|---|
-| `PRODUCTION_HOSTS=a.example,b.example` | all | refuse to run against listed hosts |
+| `PRODUCTION_HOSTS=a.example,b.example` | all | refuse to run against listed hosts, by name or resolved IP |
+| `STAGING_TIMEOUT_MS` (default 15000) | all | every request times out instead of hanging |
+| existing `e2e-val-<ts>` | `--write` | refuse to write if the disposable stream name already exists |
 | `STAGING_CONFIRM_HOST` | `--write` | must equal the `STAGING_URL` hostname |
 | `STAGING_MAX_STREAMS` (default 20) | `--write` | refuse to write if the server already has more streams (treated as production) |
 | `--publish` host | `--write` | must equal the `STAGING_URL` hostname |

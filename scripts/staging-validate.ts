@@ -21,7 +21,10 @@
  * crash or Ctrl+C). NOTHING is touched unless --write is passed.
  *
  * Production guards (all modes):
- *   - PRODUCTION_HOSTS (comma-separated) — refuse to run against these hosts.
+ *   - PRODUCTION_HOSTS (comma-separated hostnames/IPs) — refuse to run against
+ *     these hosts, compared by name AND resolved IP address (an IP or alias of
+ *     a production host is refused too).
+ *   - Every request times out after STAGING_TIMEOUT_MS (default 15000).
  * Production guards (--write only):
  *   - STAGING_CONFIRM_HOST must equal the STAGING_URL hostname.
  *   - Refuse if the server already has more than STAGING_MAX_STREAMS
@@ -36,6 +39,7 @@ const WRITE = process.argv.includes('--write');
 const PUBLISH_ARG = process.argv.find(a => a.startsWith('--publish='))?.split('=')[1];
 const FFMPEG = process.env.FFMPEG_PATH || 'ffmpeg';
 const STREAM = `e2e-val-${Date.now().toString(36)}`;
+const TIMEOUT_MS = Number(process.env.STAGING_TIMEOUT_MS) > 0 ? Number(process.env.STAGING_TIMEOUT_MS) : 15000;
 const MAX_STREAMS = Number(process.env.STAGING_MAX_STREAMS) >= 0 && process.env.STAGING_MAX_STREAMS
   ? Number(process.env.STAGING_MAX_STREAMS) : 20;
 
@@ -72,6 +76,23 @@ if (PUBLISH_ARG && hostOf(PUBLISH_ARG) !== TARGET_HOST) {
   process.exit(2);
 }
 
+async function addressesOf(host: string): Promise<string[]> {
+  const { lookup } = await import('node:dns/promises');
+  try { return (await lookup(host, { all: true })).map(a => a.address); } catch { return []; }
+}
+
+async function refuseProductionAddresses() {
+  if (!PRODUCTION_HOSTS.length) return;
+  const target = new Set(await addressesOf(TARGET_HOST));
+  for (const h of PRODUCTION_HOSTS) {
+    const hit = (await addressesOf(h)).find(a => target.has(a));
+    if (hit) {
+      console.error(`Refusing to run: ${TARGET_HOST} resolves to ${hit}, the address of production host ${h}.`);
+      process.exit(2);
+    }
+  }
+}
+
 const AUTH = 'Basic ' + Buffer.from(`${USER}:${PASS}`).toString('base64');
 let passed = 0, failed = 0;
 
@@ -84,6 +105,7 @@ async function api(method: string, path: string, body?: any) {
     headers: { Authorization: AUTH, 'Content-Type': 'application/json' },
     body: body ? JSON.stringify(body) : undefined,
     redirect: 'manual',
+    signal: AbortSignal.timeout(TIMEOUT_MS),
   });
   const text = await res.text();
   let data: any; try { data = JSON.parse(text); } catch { data = text; }
@@ -104,12 +126,15 @@ async function cleanup() {
   }
 }
 
-process.on('SIGINT', () => {
-  console.log('\nInterrupted — cleaning up');
-  cleanup().finally(() => process.exit(130));
-});
+for (const sig of ['SIGINT', 'SIGTERM'] as const) {
+  process.on(sig, () => {
+    console.log(`\n${sig} — cleaning up`);
+    cleanup().finally(() => process.exit(sig === 'SIGINT' ? 130 : 143));
+  });
+}
 
 async function main() {
+  await refuseProductionAddresses();
   console.log(`Staging validation → ${URL_BASE} (write: ${WRITE})`);
 
   // 1. Auth + config reachability
@@ -136,6 +161,12 @@ async function main() {
   }
   if (list.length > MAX_STREAMS) {
     fail('write guard', `${list.length} streams > STAGING_MAX_STREAMS=${MAX_STREAMS} — looks like production, refusing to write`);
+    return;
+  }
+
+  const existing = await api('GET', `/streams/${encodeURIComponent(STREAM)}`);
+  if (existing.status < 300) {
+    fail('write guard', `${STREAM} already exists — refusing to overwrite it`);
     return;
   }
 
