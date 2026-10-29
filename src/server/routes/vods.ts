@@ -9,10 +9,10 @@ import { flussonicRequest } from '../services/flussonic';
 import { syncVodFilesFromRemote } from '../services/sync';
 import { updateVodPlaylistFile } from '../services/playlist';
 import { authenticateToken, requireAdmin } from '../middleware/auth';
-import { singleUpload, uploadPathSegment } from '../utils/upload';
+import { singleUpload, uploadPathSegment, UPLOAD_TMP_DIR } from '../utils/upload';
 
 const upload = multer({
-  dest: os.tmpdir(),
+  dest: UPLOAD_TMP_DIR,
   limits: { fileSize: 1000 * 1024 * 1024 * 1024 }
 });
 
