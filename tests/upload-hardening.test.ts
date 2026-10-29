@@ -244,6 +244,8 @@ test('flussonicRequest sends a fresh stream on legacy-auth retry and destroys ev
     assert.ok(streams.every((s) => s.destroyed));
   } finally {
     srv.close();
+    // Close the DB opened by importing flussonic.ts; Windows can't delete open files.
+    (await import('../src/server/db')).db.close();
     fs.rmSync(scratchDir, { recursive: true, force: true });
   }
 });
