@@ -9,7 +9,7 @@ import express from 'express';
 import multer from 'multer';
 import Database from 'better-sqlite3';
 import bcrypt from 'bcrypt';
-import { singleUpload } from '../src/server/utils/upload';
+import { singleUpload, isAllowedVideoName } from '../src/server/utils/upload';
 
 const PORT = 36410;
 const MOCK_PORT = 36411;
@@ -124,6 +124,7 @@ test.before(async () => {
       PORT: String(PORT),
       DATABASE_PATH: dbPath,
       JWT_SECRET: 'test-secret-key-for-integration-tests-only-0123456789',
+      UPLOAD_MAX_GB: '0.01', // ~10.7 MB so the size policy is testable
     },
     cwd: process.cwd(),
     stdio: ['ignore', 'pipe', 'pipe'],
@@ -183,11 +184,38 @@ test('stream video upload streams the full file to Flussonic', async () => {
 
 test('upload filenames are encoded as a single URL path segment', async () => {
   puts.length = 0;
-  const name = 'a b.mp4?x=1#frag';
+  const name = 'a b?x=1#frag.mp4';
   assert.equal((await fetch(`${BASE}/api/streams/${streamId}/videos`, { method: 'POST', headers: auth, body: form('video', Buffer.alloc(10), name) })).status, 200);
   assert.equal((await fetch(`${BASE}/api/vods/${vodId}/files`, { method: 'POST', headers: auth, body: form('file', Buffer.alloc(10), name) })).status, 200);
   const encoded = `/files/${encodeURIComponent(name)}`;
   assert.equal(puts.filter((p) => p.url.endsWith(encoded)).length, 2, JSON.stringify(puts));
+});
+
+test('isAllowedVideoName accepts video extensions only', () => {
+  for (const n of ['a.mp4', 'B.MOV', 'x.mkv', 'x.ts', 'x.m2ts', 'x.mxf', 'x.avi', 'x.webm', 'x.flv', 'x.mpg', 'x.mpeg']) assert.ok(isAllowedVideoName(n), n);
+  for (const n of ['evil.exe', 'a.mp4.sh', 'noext', '.mp4x', 'a.txt', '', undefined]) assert.ok(!isAllowedVideoName(n), String(n));
+});
+
+test('upload policy: non-video types get 415, oversize gets 413, nothing reaches Flussonic', async () => {
+  puts.length = 0;
+  const json = { ...auth, 'Content-Type': 'application/json' };
+  const S = `${BASE}/api/streams/${streamId}/videos`;
+  const V = `${BASE}/api/vods/${vodId}/files`;
+  assert.equal((await fetch(S, { method: 'POST', headers: auth, body: form('video', Buffer.alloc(10), 'evil.exe') })).status, 415);
+  assert.equal((await fetch(V, { method: 'POST', headers: auth, body: form('file', Buffer.alloc(10), 'evil.exe') })).status, 415);
+  assert.equal((await fetch(`${V}/init-chunked`, { method: 'POST', headers: json, body: JSON.stringify({ filename: 'evil.exe', totalChunks: 1 }) })).status, 415);
+  assert.equal((await fetch(`${V}/init-chunked`, { method: 'POST', headers: json, body: JSON.stringify({ filename: 'big.mp4', totalChunks: 1, size: 20 * 1024 * 1024 }) })).status, 413);
+  assert.equal((await fetch(V, { method: 'POST', headers: auth, body: form('file', Buffer.alloc(11 * 1024 * 1024), 'big.mp4') })).status, 413);
+
+  const init = await (await fetch(`${V}/init-chunked`, { method: 'POST', headers: json, body: JSON.stringify({ filename: 'big.mp4', totalChunks: 2 }) })).json();
+  const chunk = (i: number) => fetch(`${V}/chunk`, { method: 'POST', headers: auth, body: form('chunk', Buffer.alloc(6 * 1024 * 1024), 'blob', { uploadId: init.uploadId, chunkIndex: String(i) }) });
+  assert.equal((await chunk(0)).status, 200);
+  assert.equal((await chunk(1)).status, 413, 'cumulative chunk size over the limit');
+  assert.equal((await chunk(2)).status, 400, 'session removed after exceeding the limit');
+
+  const init2 = await (await fetch(`${V}/init-chunked`, { method: 'POST', headers: json, body: JSON.stringify({ filename: 'ok.mp4', totalChunks: 1 }) })).json();
+  assert.equal((await fetch(`${V}/complete-chunked`, { method: 'POST', headers: json, body: JSON.stringify({ uploadId: init2.uploadId, filename: 'evil.exe', totalChunks: 1, size: 10 }) })).status, 415);
+  assert.equal(puts.length, 0, JSON.stringify(puts));
 });
 
 test('wrong field and malformed multipart return 400 on every upload route', async () => {

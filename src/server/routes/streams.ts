@@ -7,12 +7,13 @@ import { updatePlaylistFile } from '../services/playlist';
 import { broadcastStreamsUpdate } from '../websocket';
 import { parseStream } from '../utils/streams';
 import { authenticateToken, requireAdmin, requireStreamAccess, AuthRequest } from '../middleware/auth';
-import { singleUpload, uploadPathSegment, UPLOAD_TMP_DIR } from '../utils/upload';
+import { singleUpload, uploadPathSegment, MAX_UPLOAD_BYTES, videoFileFilter, UPLOAD_TMP_DIR } from '../utils/upload';
 import { transitionStream, getStreamEvents, allowedTransitions, isLifecycleState, recordStreamEvent } from '../services/lifecycle';
 
 const upload = multer({
   dest: UPLOAD_TMP_DIR,
-  limits: { fileSize: 1000 * 1024 * 1024 * 1024 }
+  limits: { fileSize: MAX_UPLOAD_BYTES },
+  fileFilter: videoFileFilter
 });
 
 const router = Router();
