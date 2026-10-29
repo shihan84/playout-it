@@ -100,10 +100,19 @@ export async function flussonicRequest(
     'Authorization': getServerAuthHeader(server),
     ...extraHeaders
   };
+  // `data` may be a factory (e.g. `() => fs.createReadStream(path)`) so every
+  // attempt, including retries, sends a fresh body. Streams are destroyed once
+  // the request settles.
+  const bodies: any[] = [];
+  const nextBody = () => {
+    const body = typeof data === 'function' ? data() : data;
+    if (body && typeof body.destroy === 'function') bodies.push(body);
+    return body;
+  };
   const doRequest = (hdrs: any) => axios({
     method,
     url,
-    data,
+    data: nextBody(),
     headers: hdrs,
     timeout: timeout,
     maxContentLength: Infinity,
@@ -118,38 +127,46 @@ export async function flussonicRequest(
   const hasExplicitCreds = !!(server.username && server.password !== undefined);
   const canLegacyRetry = !hasExplicitCreds && !key.includes(':');
 
-  let lastError: any;
-  for (let attempt = 0; attempt <= retries; attempt++) {
-    const started = Date.now();
-    try {
-      const res = await doRequest(headers);
-      if (server.id) recordServerSuccess(server.id, Date.now() - started);
-      return res;
-    } catch (e: any) {
-      lastError = e;
-      // Legacy fallback: for api_key-only servers, retry with admin:<key>
-      if (e.response && (e.response.status === 401 || e.response.status === 403) && canLegacyRetry) {
-        try {
-          const res = await doRequest({
-            'Authorization': basicAuth('admin', key),
-            ...extraHeaders
-          });
-          if (server.id) recordServerSuccess(server.id, Date.now() - started);
-          return res;
-        } catch (e2: any) {
-          lastError = e2;
-        }
-      }
-      // Never retry client errors; retry network errors and 5xx once
-      if (e.response && e.response.status < 500) {
-        if (server.id) recordServerFailure(server.id, describeNetError(lastError));
-        throw lastError;
-      }
-      if (attempt < retries) await sleep(300 * (attempt + 1));
-    }
+  try {
+    return await requestWithRetries();
+  } finally {
+    for (const b of bodies) b.destroy();
   }
-  // Record one failure per request — counting each retry attempt would
-  // double-count consecutive_failures and trip the circuit breaker early.
-  if (server.id) recordServerFailure(server.id, describeNetError(lastError));
-  throw lastError;
+
+  async function requestWithRetries() {
+    let lastError: any;
+    for (let attempt = 0; attempt <= retries; attempt++) {
+      const started = Date.now();
+      try {
+        const res = await doRequest(headers);
+        if (server.id) recordServerSuccess(server.id, Date.now() - started);
+        return res;
+      } catch (e: any) {
+        lastError = e;
+        // Legacy fallback: for api_key-only servers, retry with admin:<key>
+        if (e.response && (e.response.status === 401 || e.response.status === 403) && canLegacyRetry) {
+          try {
+            const res = await doRequest({
+              'Authorization': basicAuth('admin', key),
+              ...extraHeaders
+            });
+            if (server.id) recordServerSuccess(server.id, Date.now() - started);
+            return res;
+          } catch (e2: any) {
+            lastError = e2;
+          }
+        }
+        // Never retry client errors; retry network errors and 5xx once
+        if (e.response && e.response.status < 500) {
+          if (server.id) recordServerFailure(server.id, describeNetError(lastError));
+          throw lastError;
+        }
+        if (attempt < retries) await sleep(300 * (attempt + 1));
+      }
+    }
+    // Record one failure per request — counting each retry attempt would
+    // double-count consecutive_failures and trip the circuit breaker early.
+    if (server.id) recordServerFailure(server.id, describeNetError(lastError));
+    throw lastError;
+  }
 }
