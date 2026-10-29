@@ -47,8 +47,7 @@ FS1/FS2 are **mock test servers** — their DNS failures are expected, not block
 1. Review PR #17 (staging harness) — needs an authorized staging Flussonic server to exercise.
 2. Finish branch protection per `docs/BRANCH_PROTECTION.md`: `main` is protected (classic rule), but `validate` is not yet a required
    status check and admins are exempt (`enforcement_level: non_admins`). Approval/CODEOWNERS/force-push settings need owner verification.
-3. **Pending — CI npm-audit step not in CI:** `.github/workflows/security-ci.yml` does not run `npm audit`. The change is ready in
-   `docs/patches/security-ci-npm-audit.patch`; applying it needs an owner push or a token with `workflow` scope. Until then, run `npm audit --audit-level=high` manually.
+3. **CI npm-audit step:** the `validate` job in `.github/workflows/security-ci.yml` runs `npm audit --audit-level=high` (fails on high/critical advisories).
 4. `FS1`/`FS2` (`fs.local`/`fs2.local`) — mock servers from the old DB; fix URLs or remove.
 5. Phase F: 24h+ continuous playout, 50+ channel load and failover drills. These may run as isolated tests on **authorized staging
    infrastructure** (never production); results still need confirming against real production-host ffmpeg/network costs before go-live.
