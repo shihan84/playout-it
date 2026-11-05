@@ -191,6 +191,7 @@ test('SIGINT during the first PUT waits for it, then deletes the stream', posixO
       const timer = setInterval(() => {
         if (m.seen.some(s => s.method === 'PUT')) { clearInterval(timer); child.kill('SIGINT'); }
       }, 20);
+      child.on('exit', () => clearInterval(timer));
     });
     assert.equal(r.code, 130, r.out);
     const put = m.seen.find(s => s.method === 'PUT')!;
