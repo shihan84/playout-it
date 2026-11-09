@@ -23,6 +23,8 @@ if (process.env.NODE_ENV === 'production') {
 
 export const config = {
   port: Number(process.env.PORT || 3000),
+  // Dev defaults to loopback so a dev instance (default JWT secret) isn't reachable from the network.
+  bindHost: process.env.BIND_HOST || (process.env.NODE_ENV === 'production' ? '0.0.0.0' : '127.0.0.1'),
   nodeEnv: process.env.NODE_ENV || 'development',
   dbPath: process.env.DATABASE_PATH || 'flussonic.db',
   jwtSecret: process.env.JWT_SECRET || 'your-secret-key-change-in-production',

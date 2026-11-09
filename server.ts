@@ -35,6 +35,7 @@ import monitoringRoutes from './src/server/routes/monitoring';
 const app = express();
 
 const PORT = config.port;
+const HOST = config.bindHost;
 const SSL_ENABLED = config.sslEnabled;
 const SSL_KEY_PATH = config.sslKeyPath;
 const SSL_CERT_PATH = config.sslCertPath;
@@ -118,12 +119,12 @@ async function startServer() {
       cert: fs.readFileSync(SSL_CERT_PATH)
     };
 
-    server = https.createServer(sslOptions, app).listen(Number(PORT), "0.0.0.0", () => {
-      console.log(`Server running on https://0.0.0.0:${PORT}`);
+    server = https.createServer(sslOptions, app).listen(Number(PORT), HOST, () => {
+      console.log(`Server running on https://${HOST}:${PORT}`);
     });
   } else {
-    server = app.listen(Number(PORT), "0.0.0.0", () => {
-      console.log(`Server running on http://0.0.0.0:${PORT}`);
+    server = app.listen(Number(PORT), HOST, () => {
+      console.log(`Server running on http://${HOST}:${PORT}`);
     });
   }
 
