@@ -17,11 +17,8 @@ export default function Login() {
 
     try {
       const res = await axios.post('/api/auth/login', { username, password });
-      console.log('Login response:', res.data);
       localStorage.setItem('token', res.data.token);
       localStorage.setItem('user', JSON.stringify(res.data.user));
-      console.log('Token stored:', localStorage.getItem('token'));
-      console.log('User stored:', localStorage.getItem('user'));
       navigate('/');
     } catch (error: any) {
       console.error('Login error:', error);

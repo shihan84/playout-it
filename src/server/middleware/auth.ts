@@ -19,7 +19,9 @@ export const authenticateToken = (req: AuthRequest, res: express.Response, next:
     req.user = decoded;
     next();
   } catch (error) {
-    res.status(403).json({ error: 'Invalid token.' });
+    // 401 (not 403) so clients treat an expired/invalid session as "log in again".
+    if (req.cookies?.token) res.clearCookie('token');
+    res.status(401).json({ error: 'Session expired or invalid. Please log in again.' });
   }
 };
 
