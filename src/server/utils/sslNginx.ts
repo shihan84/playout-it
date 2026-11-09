@@ -1,9 +1,26 @@
-import { exec } from 'child_process';
+import { execFile, spawn } from 'child_process';
 import util from 'util';
+import { isValidDomain } from './sslValidation';
 
-const execPromise = util.promisify(exec);
+const execFilePromise = util.promisify(execFile);
+
+const NGINX_SITE_PATH = '/etc/nginx/sites-available/flussonic-manager';
+
+// Writes `content` to a root-owned file via `sudo tee`, passing it on stdin (no shell).
+function sudoWriteFile(filePath: string, content: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const child = spawn('sudo', ['tee', filePath], { stdio: ['pipe', 'ignore', 'pipe'] });
+    let stderr = '';
+    child.stderr.on('data', (d) => { stderr += d; });
+    child.on('error', reject);
+    child.on('close', (code) => code === 0 ? resolve() : reject(new Error(`sudo tee exited with ${code}: ${stderr.trim()}`)));
+    child.stdin.end(content);
+  });
+}
 
 export async function updateNginxConfig(domain: string) {
+  if (!isValidDomain(domain)) throw new Error('Invalid domain');
+
   const nginxConfig = `# Nginx configuration for IBS Manager
 # Place this in /etc/nginx/sites-available/flussonic-manager
 # Then symlink: sudo ln -s /etc/nginx/sites-available/flussonic-manager /etc/nginx/sites-enabled/
@@ -76,11 +93,6 @@ server {
     client_max_body_size 1000G;
 }`;
 
-  // Write new nginx config
-  await execPromise(`sudo tee /etc/nginx/sites-available/flussonic-manager > /dev/null << 'EOF'
-${nginxConfig}
-EOF`);
-
-  // Test nginx configuration
-  await execPromise('sudo nginx -t');
+  await sudoWriteFile(NGINX_SITE_PATH, nginxConfig);
+  await execFilePromise('sudo', ['nginx', '-t']);
 }
