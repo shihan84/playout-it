@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
+import { vodFileUrl } from '../utils/vodPath';
 import { 
   FileVideo, Upload, X, Trash2, RefreshCw, FileText, Search, 
   AlertCircle, Check, Copy, MoreVertical, ExternalLink, HardDrive, Play
@@ -417,7 +418,7 @@ export default function VodFileManager({ vod, onClose, showNotification }: VodFi
             </div>
             <div className="aspect-video bg-black relative">
               <iframe 
-                src={`${vod.server_url}/${vod.name}/${playingFile.filename}/embed.html?autoplay=true`}
+                src={`${vodFileUrl(vod.server_url, vod.name, playingFile.filename, 'embed.html')}?autoplay=true`}
                 className="absolute inset-0 w-full h-full border-none"
                 allowFullScreen
               />
@@ -426,12 +427,12 @@ export default function VodFileManager({ vod, onClose, showNotification }: VodFi
               <div className="flex flex-col gap-1">
                 <span className="text-[10px] text-zinc-500 uppercase font-bold tracking-wider">HLS Playback URL</span>
                 <span className="text-xs text-zinc-300 font-mono">
-                  {vod.server_url}/{vod.name}/{playingFile.filename}/index.m3u8
+                  {vodFileUrl(vod.server_url, vod.name, playingFile.filename, 'index.m3u8')}
                 </span>
               </div>
               <button
                 onClick={() => {
-                  navigator.clipboard.writeText(`${vod.server_url}/${vod.name}/${playingFile.filename}/index.m3u8`);
+                  navigator.clipboard.writeText(vodFileUrl(vod.server_url, vod.name, playingFile.filename, 'index.m3u8'));
                   showNotification('Copied HLS URL!', 'success');
                 }}
                 className="text-xs text-emerald-400 hover:border-emerald-400 border border-emerald-500/20 px-3 py-1.5 rounded-lg flex items-center gap-2 transition-all shrink-0"
