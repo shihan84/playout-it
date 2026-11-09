@@ -36,3 +36,11 @@ test('watchdog restart requires an authenticated administrator', () => {
   const source = read('server.ts');
   assert.match(source, /app\.post\('\/api\/watchdog\/restart', authenticateToken, requireAdmin/);
 });
+
+test('development binds to loopback unless BIND_HOST is set', () => {
+  const cfg = read('src/server/config/index.ts');
+  assert.match(cfg, /bindHost: process\.env\.BIND_HOST \|\| \(process\.env\.NODE_ENV === 'production' \? '0\.0\.0\.0' : '127\.0\.0\.1'\)/);
+  const srv = read('server.ts');
+  assert.doesNotMatch(srv, /listen\(Number\(PORT\), "0\.0\.0\.0"/);
+  assert.match(srv, /listen\(Number\(PORT\), HOST/);
+});
