@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
 import { Plus, Trash2, Radio, CheckCircle2, XCircle, AlertCircle, PlaySquare, Copy, Check, X, RefreshCw, Upload, FileVideo, Edit2, Search } from 'lucide-react';
 import StreamPlayer from '../components/StreamPlayer';
@@ -32,6 +32,12 @@ export default function Streams() {
   const [notification, setNotification] = useState<{ message: string, type: 'success' | 'error' } | null>(null);
   const [streamToDeleteId, setStreamToDeleteId] = useState<number | null>(null);
   const [vodToDeleteFilename, setVodToDeleteFilename] = useState<string | null>(null);
+  const streamFormRef = useRef<HTMLDivElement>(null);
+
+  // The page scrolls inside <main>, not window, so bring the form into view explicitly.
+  useEffect(() => {
+    if (isAdding) streamFormRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }, [isAdding, editingStreamId]);
 
   useEffect(() => {
     fetchData();
@@ -289,7 +295,6 @@ export default function Streams() {
     setEnableVodFallback(enableFallback);
     setFallbackVodUrl(fallbackUrl);
     setIsAdding(true);
-    window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
   const handleSubmit = async (e: React.FormEvent) => {
@@ -431,7 +436,7 @@ export default function Streams() {
       )}
 
       {isAdding && (
-        <div className="bg-zinc-900 border border-zinc-800 rounded-2xl p-6">
+        <div ref={streamFormRef} className="bg-zinc-900 border border-zinc-800 rounded-2xl p-6">
           <h2 className="text-xl font-semibold text-white mb-4">{editingStreamId ? 'Edit Stream' : 'Add New Stream'}</h2>
           <form onSubmit={handleSubmit} className="space-y-4 max-w-xl">
             <div>
