@@ -1,12 +1,15 @@
 import { Router } from 'express';
-import { exec } from 'child_process';
+import { execFile } from 'child_process';
 import util from 'util';
 import fs from 'fs';
 import { db } from '../db';
 import { updateNginxConfig } from '../utils/sslNginx';
+import { isValidDomain, isValidEmail } from '../utils/sslValidation';
 import { authenticateToken, requireAdmin } from '../middleware/auth';
 
-const execPromise = util.promisify(exec);
+// execFile passes arguments directly to the program (no shell), so user input
+// can never be interpreted as shell syntax.
+const execFilePromise = util.promisify(execFile);
 const router = Router();
 
 router.get('/status', authenticateToken, requireAdmin, (req, res) => {
@@ -17,7 +20,7 @@ router.get('/status', authenticateToken, requireAdmin, (req, res) => {
     let status = 'not_configured';
     let expiry = null;
 
-    if (sslEnabled?.value === 'true' && sslDomain?.value) {
+    if (sslEnabled?.value === 'true' && isValidDomain(sslDomain?.value)) {
       // Check if certificate exists
       const certPath = `/etc/letsencrypt/live/${sslDomain.value}/fullchain.pem`;
       if (fs.existsSync(certPath)) {
@@ -61,40 +64,37 @@ router.post('/install', authenticateToken, requireAdmin, async (req, res) => {
     return res.status(400).json({ error: 'Domain and email are required' });
   }
 
-  try {
-    // Validate domain format
-    const domainRegex = /^[a-zA-Z0-9][a-zA-Z0-9-]{0,61}[a-zA-Z0-9](?:\.[a-zA-Z0-9][a-zA-Z0-9-]{0,61}[a-zA-Z0-9])*$/;
-    if (!domainRegex.test(domain)) {
-      return res.status(400).json({ error: 'Invalid domain format' });
-    }
+  if (!isValidDomain(domain)) {
+    return res.status(400).json({ error: 'Invalid domain format' });
+  }
+  if (!isValidEmail(email)) {
+    return res.status(400).json({ error: 'Invalid email address' });
+  }
 
+  try {
+    await execFilePromise('which', ['certbot']);
+  } catch {
+    return res.status(400).json({ error: 'certbot is not installed on this server. Install certbot and python3-certbot-nginx, then retry.' });
+  }
+
+  try {
     // Save SSL settings to database
     db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run('ssl_enabled', 'true');
     db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run('ssl_domain', domain);
     db.prepare('INSERT OR REPLACE INTO settings (key, value) VALUES (?, ?)').run('ssl_email', email);
 
-    // Use certbot to obtain certificate
-    // First, ensure certbot is installed
-    try {
-      await execPromise('which certbot');
-    } catch {
-      await execPromise('sudo apt install -y certbot python3-certbot-nginx');
-    }
-
-    // Obtain certificate using certbot
-    const certbotCommand = `sudo certbot certonly --nginx -d ${domain} --non-interactive --agree-tos --email ${email}`;
-    await execPromise(certbotCommand);
+    await execFilePromise('sudo', ['certbot', 'certonly', '--nginx', '-d', domain, '--non-interactive', '--agree-tos', '--email', email]);
 
     // Update nginx configuration
     await updateNginxConfig(domain);
 
     // Restart nginx
-    await execPromise('sudo systemctl restart nginx');
+    await execFilePromise('sudo', ['systemctl', 'restart', 'nginx']);
 
     res.json({ success: true, message: 'SSL certificate installed successfully' });
   } catch (error: any) {
     console.error('Failed to install SSL certificate:', error);
-    res.status(500).json({ error: error.message || 'Failed to install SSL certificate' });
+    res.status(500).json({ error: 'Failed to install SSL certificate. Check the server logs for details.' });
   }
 });
 
@@ -106,16 +106,13 @@ router.post('/renew', authenticateToken, requireAdmin, async (req, res) => {
       return res.status(400).json({ error: 'No SSL domain configured' });
     }
 
-    // Renew certificate
-    await execPromise('sudo certbot renew --non-interactive');
-
-    // Restart nginx
-    await execPromise('sudo systemctl restart nginx');
+    await execFilePromise('sudo', ['certbot', 'renew', '--non-interactive']);
+    await execFilePromise('sudo', ['systemctl', 'restart', 'nginx']);
 
     res.json({ success: true, message: 'SSL certificate renewed successfully' });
   } catch (error: any) {
     console.error('Failed to renew SSL certificate:', error);
-    res.status(500).json({ error: error.message || 'Failed to renew SSL certificate' });
+    res.status(500).json({ error: 'Failed to renew SSL certificate. Check the server logs for details.' });
   }
 });
 
