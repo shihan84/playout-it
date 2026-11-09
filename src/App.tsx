@@ -181,13 +181,13 @@ export default function App() {
       (error) => Promise.reject(error)
     );
 
-    // Add axios interceptor to handle 401 errors only (not 403)
+    // 401 = missing/expired/invalid session: send the user back to login.
+    // 403 means "authenticated but not allowed" and is left to the caller.
     const responseInterceptor = axios.interceptors.response.use(
       (response) => response,
       (error) => {
-        console.error('Axios error:', error.response?.status, error.config?.url);
-        if (error.response?.status === 401) {
-          console.log('401 error, redirecting to login');
+        const isLoginRequest = String(error.config?.url || '').includes('/api/auth/login');
+        if (error.response?.status === 401 && !isLoginRequest && window.location.pathname !== '/login') {
           localStorage.removeItem('token');
           localStorage.removeItem('user');
           window.location.href = '/login';

@@ -276,6 +276,21 @@ test('anonymous requests are rejected with 401', async () => {
   }
 });
 
+test('invalid or forged tokens get 401 so the SPA sends users back to login', async () => {
+  const forged = [
+    'not-a-jwt',
+    // HS256 token signed with a different secret
+    'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpZCI6MSwicm9sZSI6ImFkbWluIn0.c2lnbmF0dXJlLXdpdGgtd3Jvbmctc2VjcmV0',
+  ];
+  for (const t of forged) {
+    const bearer = await fetch(`${BASE}/api/servers`, { headers: { authorization: `Bearer ${t}` } });
+    assert.equal(bearer.status, 401, `bearer ${t}`);
+    const cookie = await fetch(`${BASE}/api/servers`, { headers: { cookie: `token=${t}` } });
+    assert.equal(cookie.status, 401, `cookie ${t}`);
+    assert.match(cookie.headers.get('set-cookie') || '', /token=;/, 'stale cookie is cleared');
+  }
+});
+
 test('client role is authenticated but forbidden from admin routes', async () => {
   const { res: loginRes, cookie } = await login('itclient', 'it-client-pass-12345');
   assert.equal(loginRes.status, 200, 'client login failed');
