@@ -28,9 +28,8 @@ function Sidebar() {
   const [user, setUser] = useState<any>(null);
 
   useEffect(() => {
-    const token = localStorage.getItem('token');
     const userData = localStorage.getItem('user');
-    if (token && userData) {
+    if (userData) {
       setUser(JSON.parse(userData));
     }
   }, []);
@@ -41,7 +40,6 @@ function Sidebar() {
     } catch (error) {
       console.error('Logout error:', error);
     }
-    localStorage.removeItem('token');
     localStorage.removeItem('user');
     navigate('/login');
   };
@@ -131,21 +129,32 @@ function Layout({ children }: { children: React.ReactNode }) {
   );
 }
 
+// The session lives only in the HTTP-only cookie. On load we ask the server who
+// we are; the cached `user` entry is display metadata (never a credential) and
+// the server enforces every permission itself.
 function ProtectedRoutes() {
   const navigate = useNavigate();
-  const token = localStorage.getItem('token');
+  const [currentUser, setCurrentUser] = useState<any>(null);
 
   useEffect(() => {
-    if (!token) {
-      navigate('/login', { replace: true });
-    }
-  }, [token, navigate]);
+    let cancelled = false;
+    axios.get('/api/auth/me')
+      .then((res) => {
+        if (cancelled) return;
+        localStorage.setItem('user', JSON.stringify(res.data));
+        setCurrentUser(res.data);
+      })
+      .catch(() => {
+        if (cancelled) return;
+        localStorage.removeItem('user');
+        navigate('/login', { replace: true });
+      });
+    return () => { cancelled = true; };
+  }, [navigate]);
 
-  if (!token) return null;
+  if (!currentUser) return null;
 
-  const userStr = localStorage.getItem('user');
-  const currentUser = userStr ? JSON.parse(userStr) : null;
-  const isAdmin = currentUser?.role === 'admin';
+  const isAdmin = currentUser.role === 'admin';
 
   return (
     <Layout>
@@ -168,13 +177,10 @@ function ProtectedRoutes() {
 
 export default function App() {
   useEffect(() => {
-    // Add axios interceptor to include token in requests
+    // Tokens from older versions were kept in localStorage; drop them.
+    localStorage.removeItem('token');
     const interceptor = axios.interceptors.request.use(
       (config) => {
-        const token = localStorage.getItem('token');
-        if (token) {
-          config.headers.Authorization = `Bearer ${token}`;
-        }
         config.headers['X-Requested-With'] = 'XMLHttpRequest';
         return config;
       },
@@ -188,7 +194,6 @@ export default function App() {
       (error) => {
         const isLoginRequest = String(error.config?.url || '').includes('/api/auth/login');
         if (error.response?.status === 401 && !isLoginRequest && window.location.pathname !== '/login') {
-          localStorage.removeItem('token');
           localStorage.removeItem('user');
           window.location.href = '/login';
         }
