@@ -25,6 +25,8 @@ const remotePort = 36198;
 const remotePort2 = 36200; // must not collide with PORT (36199)
 // Test-controlled mock behavior: override GET /streams payload and add latency
 const mockBehavior = {
+  // Play sessions returned by GET /flussonic/api/v3/sessions
+  sessions: [] as any[],
   streamsPayload: null as any,
   vodsPayload: null as any,
   vodFilesPayload: null as any,
@@ -120,6 +122,10 @@ test.before(async () => {
         return;
       }
       res.setHeader('Content-Type', 'application/json');
+      if (req.method === 'GET' && /\/flussonic\/api\/v3\/sessions/.test(req.url || '')) {
+        res.end(JSON.stringify({ sessions: mockBehavior.sessions }));
+        return;
+      }
       // Test-controlled GET /streams payload override (sync tests)
       if (req.method === 'GET' && mockBehavior.streamsPayload !== null && /\/streams/.test(req.url || '')) {
         const body = mockBehavior.streamsNext
@@ -2459,4 +2465,50 @@ test('overlay job lifecycle: start spawns worker, stop/status tracked, restart n
   }
   assert.ok(['exited', 'failed', 'stopped', 'completed'].includes(cur.status),
     `job must reach a terminal state, got '${cur.status}'`);
+});
+
+test('client IP blocks are limited to current viewers of their own unexpired streams', async () => {
+  const admin = await (await login('itadmin', 'it-admin-pass-12345')).res.json();
+  const H = { authorization: `Bearer ${admin.token}`, 'Content-Type': 'application/json' };
+  const client = await (await login('itclient', 'it-client-pass-12345')).res.json();
+  const CH = { authorization: `Bearer ${client.token}`, 'Content-Type': 'application/json' };
+
+  const server = await (await fetch(`${BASE}/api/servers`, {
+    method: 'POST', headers: H,
+    body: JSON.stringify({ name: 'mock-ipblock', url: `http://127.0.0.1:${remotePort}`, username: 'u', password: 'p123456' })
+  })).json();
+  const idb = new Database(dbPath);
+  idb.prepare("INSERT INTO streams (server_id, name, live_url, playlist_url) VALUES (?, 'ipb-mine', '', ''), (?, 'ipb-other', '', '')").run(server.id, server.id);
+  const mineId = (idb.prepare("SELECT id FROM streams WHERE name = 'ipb-mine'").get() as any).id;
+  idb.close();
+  assert.equal((await fetch(`${BASE}/api/users/${client.user.id}/streams`, { method: 'POST', headers: H, body: JSON.stringify({ streamId: mineId }) })).status, 200);
+
+  mockBehavior.sessions = [
+    { ip: '203.0.113.5', name: 'ipb-mine' },
+    { ip: '203.0.113.6', name: 'ipb-other' },
+    { ip: '203.0.113.7', name: 'ipb-mine' },
+  ];
+  try {
+    const listed = await (await fetch(`${BASE}/api/servers/${server.id}/sessions`, { headers: CH })).json();
+    assert.deepEqual(listed.map((s: any) => s.ip).sort(), ['203.0.113.5', '203.0.113.7'], 'client sees only own viewers');
+
+    const block = (ip: string, stream_name: string) => fetch(`${BASE}/api/block-ip`, {
+      method: 'POST', headers: CH, body: JSON.stringify({ ip_address: ip, server_id: server.id, stream_name })
+    });
+    assert.equal((await block('203.0.113.6', 'ipb-other')).status, 403, 'not assigned');
+    assert.equal((await block('203.0.113.6', 'ipb-mine')).status, 403, 'not a viewer of own stream');
+    assert.equal((await block('198.51.100.1', 'ipb-mine')).status, 403, 'unknown IP');
+    const before = remoteRequests.length;
+    assert.equal((await block('203.0.113.5', 'ipb-mine')).status, 200);
+    assert.ok(remoteRequests.slice(before).some(r => r.startsWith('PUT /flussonic/api/v3/auth_backends/blacklist')));
+
+    await fetch(`${BASE}/api/users/${client.user.id}/streams/${mineId}`, {
+      method: 'PATCH', headers: H, body: JSON.stringify({ expires_at: new Date(Date.now() - 60_000).toISOString() })
+    });
+    assert.equal((await block('203.0.113.7', 'ipb-mine')).status, 403, 'expired assignment');
+    const alert = await fetch(`${BASE}/api/telegram-alerts`, { method: 'POST', headers: CH, body: JSON.stringify({ stream_id: mineId, telegram_chat_id: '123' }) });
+    assert.equal(alert.status, 403, 'expired assignment cannot add alerts');
+  } finally {
+    mockBehavior.sessions = [];
+  }
 });

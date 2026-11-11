@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { db } from '../db';
 import { sendTelegramMessage, dispatchStreamAlerts } from '../services/telegram';
-import { authenticateToken, requireAdmin, AuthRequest } from '../middleware/auth';
+import { authenticateToken, requireAdmin, AuthRequest, assignmentActiveSql } from '../middleware/auth';
 
 const router = Router();
 
@@ -22,7 +22,7 @@ router.post('/', authenticateToken, async (req: AuthRequest, res) => {
   // Check if user has access to this stream
   if (req.user.role !== 'admin') {
     const assignment = db.prepare(
-      'SELECT * FROM user_stream_assignments WHERE user_id = ? AND stream_id = ?'
+      `SELECT * FROM user_stream_assignments usa WHERE usa.user_id = ? AND usa.stream_id = ? AND ${assignmentActiveSql('usa')}`
     ).get(req.user.id, stream_id);
     if (!assignment) {
       return res.status(403).json({ error: 'You do not have access to this stream' });
