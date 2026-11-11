@@ -309,6 +309,23 @@ test('sessions are revoked on password/role change and delete; role comes from t
   assert.equal(await usersStatus(forged), 403);
 });
 
+test('user API validates role, password policy and protects the last admin', async () => {
+  const admin = await (await login('itadmin', 'it-admin-pass-12345')).res.json();
+  const H = { authorization: `Bearer ${admin.token}`, 'Content-Type': 'application/json' };
+  const post = (body: any) => fetch(`${BASE}/api/users`, { method: 'POST', headers: H, body: JSON.stringify(body) });
+  assert.equal((await post({ username: 'val-role', password: 'valid-pass-1234', role: 'superadmin' })).status, 400);
+  assert.equal((await post({ username: 'val-short', password: 'short', role: 'client' })).status, 400);
+  assert.equal((await post({ username: 'val admin', password: 'valid-pass-1234567', role: 'admin' })).status, 400);
+  assert.equal((await post({ username: 'val-admin', password: 'only-15-chars!!', role: 'admin' })).status, 400);
+  const ok = await post({ username: 'val-client', password: 'valid-pass-1234' });
+  assert.equal(ok.status, 200);
+  const created = await ok.json();
+  assert.equal(created.role, 'client');
+  const put = (id: number, body: any) => fetch(`${BASE}/api/users/${id}`, { method: 'PUT', headers: H, body: JSON.stringify(body) });
+  assert.equal((await put(created.id, { role: 'root' })).status, 400);
+  assert.equal((await put(admin.user.id, { role: 'client' })).status, 400, 'cannot demote yourself');
+});
+
 test('invalid or forged tokens get 401 so the SPA sends users back to login', async () => {
   const forged = [
     'not-a-jwt',
