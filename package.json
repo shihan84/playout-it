@@ -26,6 +26,7 @@
     "esbuild": "^0.28.0",
     "express": "^4.21.2",
     "express-rate-limit": "^8.6.2",
+    "helmet": "^8.3.0",
     "hls.js": "^1.6.16",
     "jsonwebtoken": "^9.0.2",
     "lucide-react": "^0.546.0",

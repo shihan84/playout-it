@@ -8,6 +8,7 @@ import { authenticateToken, requireAdmin } from './src/server/middleware/auth';
 import { csrfProtection } from './src/server/middleware/csrf';
 
 import { config } from './src/server/config';
+import { securityHeaders } from './src/server/middleware/securityHeaders';
 import { db } from './src/server/db';
 import { wss, verifyWsAuth } from './src/server/websocket';
 import { startWatchdog, stopWatchdog } from './src/server/services/watchdog';
@@ -33,6 +34,9 @@ import schedulesRoutes from './src/server/routes/schedules';
 import monitoringRoutes from './src/server/routes/monitoring';
 
 const app = express();
+app.disable('x-powered-by');
+if (config.trustProxyHops > 0) app.set('trust proxy', config.trustProxyHops);
+app.use(securityHeaders(process.env.NODE_ENV === 'production'));
 
 const PORT = config.port;
 const HOST = config.bindHost;
