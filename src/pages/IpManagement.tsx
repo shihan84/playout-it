@@ -98,7 +98,7 @@ export default function IpManagement() {
       return;
     }
     try {
-      await axios.post('/api/sessions/block-ip', { 
+      await axios.post('/api/block-ip', { 
         ip_address: ipAddress, 
         reason: 'Blocked from play session', 
         server_id: selectedServer,
