@@ -7,6 +7,30 @@ export interface AuthRequest extends express.Request {
   user?: any;
 }
 
+export interface SessionUser {
+  id: number;
+  username: string;
+  role: string;
+}
+
+// Verifies the JWT and re-loads the user so deleted users, role changes and
+// revoked sessions (token_version bump) take effect immediately. Role always
+// comes from the DB, never from the token.
+export function resolveSession(token: string | undefined | null): SessionUser | null {
+  if (!token) return null;
+  let decoded: any;
+  try {
+    decoded = jwt.verify(token, config.jwtSecret);
+  } catch {
+    return null;
+  }
+  if (!decoded || typeof decoded.id !== 'number') return null;
+  const row = db.prepare('SELECT id, username, role, token_version FROM users WHERE id = ?').get(decoded.id) as any;
+  if (!row) return null;
+  if ((decoded.tv ?? 0) !== (row.token_version ?? 0)) return null;
+  return { id: row.id, username: row.username, role: row.role };
+}
+
 export const authenticateToken = (req: AuthRequest, res: express.Response, next: express.NextFunction) => {
   const token = req.cookies.token || req.headers.authorization?.split(' ')[1];
 
@@ -14,15 +38,14 @@ export const authenticateToken = (req: AuthRequest, res: express.Response, next:
     return res.status(401).json({ error: 'Access denied. No token provided.' });
   }
 
-  try {
-    const decoded = jwt.verify(token, config.jwtSecret) as any;
-    req.user = decoded;
-    next();
-  } catch (error) {
+  const user = resolveSession(token);
+  if (!user) {
     // 401 (not 403) so clients treat an expired/invalid session as "log in again".
     if (req.cookies?.token) res.clearCookie('token');
-    res.status(401).json({ error: 'Session expired or invalid. Please log in again.' });
+    return res.status(401).json({ error: 'Session expired or invalid. Please log in again.' });
   }
+  req.user = user;
+  next();
 };
 
 export const requireAdmin = (req: AuthRequest, res: express.Response, next: express.NextFunction) => {
