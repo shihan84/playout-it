@@ -44,3 +44,11 @@ test('development binds to loopback unless BIND_HOST is set', () => {
   assert.doesNotMatch(srv, /listen\(Number\(PORT\), "0\.0\.0\.0"/);
   assert.match(srv, /listen\(Number\(PORT\), HOST/);
 });
+test('SPA keeps the session only in the HTTP-only cookie', () => {
+  for (const file of ['src/App.tsx', 'src/pages/Login.tsx']) {
+    const source = read(file);
+    assert.doesNotMatch(source, /localStorage\.(setItem|getItem)\(['"]token['"]/, file);
+    assert.doesNotMatch(source, /Authorization/, file);
+  }
+  assert.match(read('src/App.tsx'), /axios\.get\('\/api\/auth\/me'\)/);
+});

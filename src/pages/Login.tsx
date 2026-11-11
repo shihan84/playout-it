@@ -17,7 +17,7 @@ export default function Login() {
 
     try {
       const res = await axios.post('/api/auth/login', { username, password });
-      localStorage.setItem('token', res.data.token);
+      // The session is the HTTP-only cookie set by the server; only display info is cached.
       localStorage.setItem('user', JSON.stringify(res.data.user));
       navigate('/');
     } catch (error: any) {
