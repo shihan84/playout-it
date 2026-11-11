@@ -1,7 +1,6 @@
 import { WebSocketServer, WebSocket } from 'ws';
-import jwt from 'jsonwebtoken';
 import { db } from '../db';
-import { config } from '../config';
+import { resolveSession } from '../middleware/auth';
 import { parseStream } from '../utils/streams';
 
 export const wss = new WebSocketServer({ noServer: true });
@@ -16,11 +15,13 @@ export function verifyWsAuth(request: any): any | null {
     .split(';')
     .map((c: string) => c.trim().split('='))
     .find(([k]: string[]) => k === 'token')?.[1];
-  if (!token) return null;
-  try {
-    return jwt.verify(token, config.jwtSecret);
-  } catch {
-    return null;
+  return resolveSession(token);
+}
+
+// Close every open dashboard socket for a user (after their sessions are revoked).
+export function closeUserSockets(userId: number) {
+  for (const ws of clients) {
+    if ((ws as any).user?.id === userId) ws.close(4401, 'session revoked');
   }
 }
 

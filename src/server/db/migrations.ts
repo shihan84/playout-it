@@ -91,6 +91,13 @@ export function runMigrations(db: any) {
     db.prepare('INSERT INTO settings (key, value) VALUES (?, ?)').run('auto_sync_interval', '60');
   }
 
+  // Bumped to invalidate every JWT issued to a user (password/role change).
+  try {
+    db.exec('ALTER TABLE users ADD COLUMN token_version INTEGER NOT NULL DEFAULT 0');
+  } catch (e) {
+    // Column already exists
+  }
+
   // Per-server health tracking (Phase 1B)
   for (const col of [
     'ALTER TABLE servers ADD COLUMN last_seen_at DATETIME',

@@ -8,6 +8,7 @@ import path from 'node:path';
 import Database from 'better-sqlite3';
 import bcrypt from 'bcrypt';
 import WebSocket from 'ws';
+import jwt from 'jsonwebtoken';
 
 const PORT = 36199;
 const BASE = `http://localhost:${PORT}`;
@@ -274,6 +275,38 @@ test('anonymous requests are rejected with 401', async () => {
     const res = await fetch(`${BASE}${url}`, { method });
     assert.equal(res.status, 401, `${method} ${url} should be 401 for anonymous, got ${res.status}`);
   }
+});
+
+test('sessions are revoked on password/role change and delete; role comes from the DB', async () => {
+  const admin = await (await login('itadmin', 'it-admin-pass-12345')).res.json();
+  const H = { authorization: `Bearer ${admin.token}`, 'Content-Type': 'application/json' };
+  const pw = 'revoke-pass-123456';
+  const make = async (username: string) =>
+    (await fetch(`${BASE}/api/users`, { method: 'POST', headers: H, body: JSON.stringify({ username, password: pw, role: 'admin' }) })).json();
+  const tokenFor = async (username: string, password = pw) => (await (await login(username, password)).res.json()).token;
+  const usersStatus = async (t: string) => (await fetch(`${BASE}/api/users`, { headers: { authorization: `Bearer ${t}` } })).status;
+
+  const r = await make('revoke-role');
+  const tRole = await tokenFor('revoke-role');
+  assert.equal(await usersStatus(tRole), 200);
+  await fetch(`${BASE}/api/users/${r.id}`, { method: 'PUT', headers: H, body: JSON.stringify({ role: 'client' }) });
+  assert.equal(await usersStatus(tRole), 401, 'role change revokes old token');
+  assert.equal(await usersStatus(await tokenFor('revoke-role')), 403, 'new login gets the client role');
+
+  const p = await make('revoke-pw');
+  const tPw = await tokenFor('revoke-pw');
+  await fetch(`${BASE}/api/users/${p.id}`, { method: 'PUT', headers: H, body: JSON.stringify({ password: 'revoke-pass-654321' }) });
+  assert.equal(await usersStatus(tPw), 401, 'password change revokes old token');
+
+  const d = await make('revoke-del');
+  const tDel = await tokenFor('revoke-del');
+  await fetch(`${BASE}/api/users/${d.id}`, { method: 'DELETE', headers: H });
+  assert.equal(await usersStatus(tDel), 401, 'deleted user loses access');
+
+  // Valid signature but a role claim the DB doesn't back: DB role wins.
+  const me = await (await fetch(`${BASE}/api/auth/me`, { headers: { authorization: `Bearer ${await tokenFor('itclient', 'it-client-pass-12345')}` } })).json();
+  const forged = jwt.sign({ id: me.id, username: 'itclient', role: 'admin' }, 'test-secret-key-for-integration-tests-only-0123456789');
+  assert.equal(await usersStatus(forged), 403);
 });
 
 test('invalid or forged tokens get 401 so the SPA sends users back to login', async () => {

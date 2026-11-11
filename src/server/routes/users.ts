@@ -3,7 +3,7 @@ import bcrypt from 'bcrypt';
 import { db } from '../db';
 import { config } from '../config';
 import { authenticateToken, requireAdmin } from '../middleware/auth';
-import { enforceMaxSessions } from '../websocket';
+import { enforceMaxSessions, closeUserSockets } from '../websocket';
 
 const router = Router();
 
@@ -76,8 +76,13 @@ router.put('/:id', authenticateToken, requireAdmin, (req, res) => {
     return res.status(400).json({ error: 'No fields to update' });
   }
 
+  // Password or role changes invalidate every existing session for the user.
+  const revoke = !!password || (!!role && role !== existingUser.role);
+  if (revoke) updates.push('token_version = token_version + 1');
+
   values.push(id);
   db.prepare(`UPDATE users SET ${updates.join(', ')} WHERE id = ?`).run(...values);
+  if (revoke) closeUserSockets(Number(id));
 
   const user = db.prepare('SELECT id, username, email, role, created_at FROM users WHERE id = ?').get(id);
   res.json(user);
@@ -96,6 +101,7 @@ router.delete('/:id', authenticateToken, requireAdmin, (req: any, res) => {
   }
 
   db.prepare('DELETE FROM users WHERE id = ?').run(id);
+  closeUserSockets(Number(id));
   res.json({ success: true });
 });
 

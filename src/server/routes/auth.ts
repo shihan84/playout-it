@@ -8,6 +8,10 @@ import { authRateLimiter } from '../middleware/rateLimit';
 
 const router = Router();
 
+// Compared against when the username doesn't exist so response time doesn't
+// reveal which usernames are valid.
+const DUMMY_HASH = bcrypt.hashSync('dummy-password-for-timing', 10);
+
 router.post('/login', authRateLimiter, (req, res) => {
   const { username, password } = req.body;
 
@@ -16,20 +20,15 @@ router.post('/login', authRateLimiter, (req, res) => {
     return res.status(400).json({ error: 'Username and password are required' });
   }
 
-  const user = db.prepare('SELECT * FROM users WHERE username = ?').get(username);
+  const user = db.prepare('SELECT * FROM users WHERE username = ?').get(username) as any;
+  const passwordMatch = bcrypt.compareSync(String(password), user ? user.password_hash : DUMMY_HASH);
 
-  if (!user) {
-    return res.status(401).json({ error: 'Invalid credentials' });
-  }
-
-  const passwordMatch = bcrypt.compareSync(password, user.password_hash);
-
-  if (!passwordMatch) {
+  if (!user || !passwordMatch) {
     return res.status(401).json({ error: 'Invalid credentials' });
   }
 
   const token = jwt.sign(
-    { id: user.id, username: user.username, role: user.role },
+    { id: user.id, username: user.username, role: user.role, tv: user.token_version ?? 0 },
     config.jwtSecret,
     { expiresIn: '24h' }
   );
