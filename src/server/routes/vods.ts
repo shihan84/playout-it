@@ -5,7 +5,7 @@ import fs from 'fs';
 import path from 'path';
 import { randomBytes } from 'crypto';
 import { db } from '../db';
-import { flussonicRequest } from '../services/flussonic';
+import { flussonicRequest, deleteRemote, describeNetError } from '../services/flussonic';
 import { syncVodFilesFromRemote } from '../services/sync';
 import { updateVodPlaylistFile } from '../services/playlist';
 import { authenticateToken, requireAdmin } from '../middleware/auth';
@@ -148,8 +148,11 @@ router.delete('/:id', authenticateToken, requireAdmin, async (req, res) => {
       const server = db.prepare('SELECT * FROM servers WHERE id = ?').get(vod.server_id) as any;
       if (server) {
         const flussonicUrl = `${server.url}/flussonic/api/v3/vods/${encodeURIComponent(vod.name)}`;
-        await flussonicRequest('DELETE', flussonicUrl, server)
-          .catch(e => console.error('Flussonic delete error:', e.message));
+        try {
+          await deleteRemote(flussonicUrl, server);
+        } catch (e: any) {
+          return res.status(502).json({ error: `Flussonic did not delete VOD location "${vod.name}" (${describeNetError(e)}). Nothing was deleted.` });
+        }
       }
     }
     db.prepare('DELETE FROM vods WHERE id = ?').run(req.params.id);
@@ -370,7 +373,11 @@ router.delete('/:id/files/:filename', async (req, res) => {
     if (server) {
       const baseUrl = server.url.replace(/\/$/, '');
       const deleteUrl = `${baseUrl}/flussonic/api/v3/vods/${encodeURIComponent(vod.name)}/storages/0/files/${uploadPathSegment(req.params.filename)}`;
-      await flussonicRequest('DELETE', deleteUrl, server).catch(e => console.warn('Failed to delete from Flussonic (ignored):', e.message));
+      try {
+        await deleteRemote(deleteUrl, server);
+      } catch (e: any) {
+        return res.status(502).json({ error: `Flussonic did not delete "${req.params.filename}" (${describeNetError(e)}). Nothing was deleted.` });
+      }
     }
 
     db.prepare('DELETE FROM vod_files WHERE vod_id = ? AND filename = ?').run(vod.id, req.params.filename);

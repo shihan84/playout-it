@@ -339,13 +339,14 @@ export default function Streams() {
 
   const handleDelete = async (id: number) => {
     try {
-      await axios.delete(`/api/streams/${id}`);
+      const res = await axios.delete(`/api/streams/${id}`);
       setStreamToDeleteId(null);
       fetchStreams();
-      showNotification('Stream deleted successfully');
-    } catch (error) {
+      if (res.data?.warning) showNotification(res.data.warning, 'error');
+      else showNotification('Stream deleted successfully');
+    } catch (error: any) {
       console.error('Failed to delete stream', error);
-      showNotification('Failed to delete stream', 'error');
+      showNotification(error.response?.data?.error || 'Failed to delete stream', 'error');
     }
   };
 
