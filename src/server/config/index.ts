@@ -28,7 +28,7 @@ export const config = {
   nodeEnv: process.env.NODE_ENV || 'development',
   dbPath: process.env.DATABASE_PATH || 'flussonic.db',
   jwtSecret: process.env.JWT_SECRET || 'your-secret-key-change-in-production',
-  saltRounds: 10,
+  saltRounds: 12,
   sslEnabled: process.env.SSL_ENABLED === 'true',
   sslKeyPath: process.env.SSL_KEY_PATH || '',
   sslCertPath: process.env.SSL_CERT_PATH || '',

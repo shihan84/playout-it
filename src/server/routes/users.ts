@@ -4,6 +4,7 @@ import { db } from '../db';
 import { config } from '../config';
 import { authenticateToken, requireAdmin } from '../middleware/auth';
 import { enforceMaxSessions, closeUserSockets } from '../websocket';
+import { isValidRole, validateEmail, validatePassword, validateUsername } from '../utils/userValidation';
 
 const router = Router();
 
@@ -18,6 +19,14 @@ router.post('/', authenticateToken, requireAdmin, (req, res) => {
   if (!username || !password) {
     return res.status(400).json({ error: 'Username and password are required' });
   }
+  const newRole = role ?? 'client';
+  if (!isValidRole(newRole)) {
+    return res.status(400).json({ error: 'Role must be admin or client' });
+  }
+  const invalid = validateUsername(username) || validatePassword(password, newRole) || validateEmail(email);
+  if (invalid) {
+    return res.status(400).json({ error: invalid });
+  }
 
   const existingUser = db.prepare('SELECT * FROM users WHERE username = ?').get(username);
   if (existingUser) {
@@ -29,20 +38,40 @@ router.post('/', authenticateToken, requireAdmin, (req, res) => {
     username,
     passwordHash,
     email || null,
-    role || 'client'
+    newRole
   );
 
   const user = db.prepare('SELECT id, username, email, role, created_at FROM users WHERE id = ?').get(info.lastInsertRowid);
   res.json(user);
 });
 
-router.put('/:id', authenticateToken, requireAdmin, (req, res) => {
+router.put('/:id', authenticateToken, requireAdmin, (req: any, res) => {
   const { id } = req.params;
   const { username, email, role, password } = req.body;
 
-  const existingUser = db.prepare('SELECT * FROM users WHERE id = ?').get(id);
+  const existingUser = db.prepare('SELECT * FROM users WHERE id = ?').get(id) as any;
   if (!existingUser) {
     return res.status(404).json({ error: 'User not found' });
+  }
+
+  if (role !== undefined && !isValidRole(role)) {
+    return res.status(400).json({ error: 'Role must be admin or client' });
+  }
+  const effectiveRole = role ?? existingUser.role;
+  const invalid = (username !== undefined ? validateUsername(username) : null)
+    || (password ? validatePassword(password, effectiveRole) : null)
+    || validateEmail(email);
+  if (invalid) {
+    return res.status(400).json({ error: invalid });
+  }
+  if (existingUser.role === 'admin' && role === 'client') {
+    if (Number(id) === req.user.id) {
+      return res.status(400).json({ error: 'Cannot remove your own admin role' });
+    }
+    const admins = (db.prepare("SELECT COUNT(*) AS n FROM users WHERE role = 'admin'").get() as any).n;
+    if (admins <= 1) {
+      return res.status(400).json({ error: 'Cannot remove the last admin' });
+    }
   }
 
   if (username && username !== existingUser.username) {
