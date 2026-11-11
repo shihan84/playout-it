@@ -37,6 +37,8 @@ const mockBehavior = {
   redirectTo: null as null | string,
   // Optional PUT failure — mock responds 500 when the URL matches
   failPut: null as null | RegExp,
+  // Optional DELETE failure — mock responds with `status` when the URL matches
+  failDelete: null as null | { match: RegExp; status: number },
   // Optional paginated VOD file listing
   vodFilesNext: null as null | ((url: string) => string | null),
   // Simulated remote stream inventory — GET /streams/{name} returns 404
@@ -104,12 +106,17 @@ test.before(async () => {
           } catch { /* non-JSON PUT — ignore */ }
         });
       }
-      if (req.method === 'DELETE') {
+      if (req.method === 'DELETE' && !(mockBehavior.failDelete && mockBehavior.failDelete.match.test(req.url || ''))) {
         mockBehavior.remoteStreams.delete(sName);
       }
     }
 
     const respond = () => {
+      if (req.method === 'DELETE' && mockBehavior.failDelete && mockBehavior.failDelete.match.test(req.url || '')) {
+        res.statusCode = mockBehavior.failDelete.status;
+        res.end(JSON.stringify({ error: 'mock_delete_failure' }));
+        return;
+      }
       if (req.method === 'PUT' && mockBehavior.failPut && mockBehavior.failPut.test(req.url || '')) {
         res.statusCode = 500;
         res.end(JSON.stringify({ error: 'mock_put_failure' }));
@@ -492,6 +499,53 @@ test('stream and VOD write operations enforce auth and roles', async () => {
   assert.equal((await fetch(`${BASE}/api/vods`, { method: 'POST', headers: clientHeaders, body: vodBody })).status, 403);
   const vodRes = await fetch(`${BASE}/api/vods`, { method: 'POST', headers: adminHeaders, body: vodBody });
   assert.ok([200, 201].includes(vodRes.status), `admin vod create failed: ${vodRes.status} ${await vodRes.clone().text()}`);
+});
+
+test('stream and VOD deletes stop when Flussonic refuses; a remote 404 counts as already deleted', async () => {
+  const { res: loginRes } = await login('itadmin', 'it-admin-pass-12345');
+  const { token } = await loginRes.json();
+  const headers = { authorization: `Bearer ${token}`, 'Content-Type': 'application/json' };
+  const server = await (await fetch(`${BASE}/api/servers`, {
+    method: 'POST', headers,
+    body: JSON.stringify({ name: 'mock-del', url: `http://127.0.0.1:${remotePort}`, username: 'ituser', password: 'itpass123456' })
+  })).json();
+  const streamIds = async () => (await (await fetch(`${BASE}/api/streams`, { headers })).json()).map((s: any) => s.id);
+  try {
+    const stream = await (await fetch(`${BASE}/api/streams`, {
+      method: 'POST', headers, body: JSON.stringify({ server_id: server.id, name: 'del-stream', inputs: ['rtsp://x/y'] })
+    })).json();
+    assert.ok(stream.id, 'stream id missing');
+
+    mockBehavior.failDelete = { match: /\/streams\/del-stream$/, status: 500 };
+    const refused = await fetch(`${BASE}/api/streams/${stream.id}`, { method: 'DELETE', headers });
+    assert.equal(refused.status, 502);
+    assert.match((await refused.json()).error, /Nothing was deleted/);
+    assert.ok((await streamIds()).includes(stream.id), 'stream must stay when Flussonic refuses the delete');
+
+    mockBehavior.failDelete = { match: /\/vods\/del-stream_vod$/, status: 500 };
+    const partial = await fetch(`${BASE}/api/streams/${stream.id}`, { method: 'DELETE', headers });
+    assert.equal(partial.status, 200);
+    assert.match((await partial.json()).warning, /del-stream_vod/);
+    assert.ok(!(await streamIds()).includes(stream.id), 'stream should be deleted once Flussonic deleted it');
+
+    const mkVod = await fetch(`${BASE}/api/vods`, {
+      method: 'POST', headers, body: JSON.stringify({ server_id: server.id, name: 'del-vod', paths: ['/storage/del-vod'] })
+    });
+    assert.ok([200, 201].includes(mkVod.status), `vod create failed: ${mkVod.status}`);
+    const vodList = async () => (await (await fetch(`${BASE}/api/vods`, { headers })).json()) as any[];
+    const vod = (await vodList()).find((v: any) => v.name === 'del-vod');
+    assert.ok(vod, 'del-vod missing');
+
+    mockBehavior.failDelete = { match: /\/vods\/del-vod$/, status: 500 };
+    assert.equal((await fetch(`${BASE}/api/vods/${vod.id}`, { method: 'DELETE', headers })).status, 502);
+    assert.ok((await vodList()).some((v: any) => v.id === vod.id), 'VOD must stay when Flussonic refuses the delete');
+
+    mockBehavior.failDelete = { match: /\/vods\/del-vod$/, status: 404 };
+    assert.equal((await fetch(`${BASE}/api/vods/${vod.id}`, { method: 'DELETE', headers })).status, 200);
+    assert.ok(!(await vodList()).some((v: any) => v.id === vod.id), 'VOD already gone on Flussonic should be removed locally');
+  } finally {
+    mockBehavior.failDelete = null;
+  }
 });
 
 test('companion VOD resolves both _vod and legacy same-name conventions', async () => {

@@ -87,6 +87,16 @@ export async function resolveCompanionVodName(server: any, streamName: string): 
   return `${streamName}_vod`;
 }
 
+// DELETE on Flussonic; a 404 means it is already gone and counts as success.
+export async function deleteRemote(url: string, server: any): Promise<void> {
+  try {
+    await flussonicRequest('DELETE', url, server);
+  } catch (e: any) {
+    if (e?.response?.status === 404) return;
+    throw e;
+  }
+}
+
 export async function flussonicRequest(
   method: string,
   url: string,

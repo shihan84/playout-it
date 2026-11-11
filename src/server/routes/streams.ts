@@ -2,7 +2,7 @@ import { Router } from 'express';
 import multer from 'multer';
 import fs from 'fs';
 import { db } from '../db';
-import { flussonicRequest, resolveCompanionVodName } from '../services/flussonic';
+import { flussonicRequest, resolveCompanionVodName, deleteRemote, describeNetError } from '../services/flussonic';
 import { updatePlaylistFile } from '../services/playlist';
 import { broadcastStreamsUpdate } from '../websocket';
 import { parseStream } from '../utils/streams';
@@ -293,28 +293,33 @@ router.put('/:id', authenticateToken, requireAdmin, async (req, res) => {
 router.delete('/:id', authenticateToken, requireAdmin, async (req, res) => {
   try {
     const stream = db.prepare('SELECT * FROM streams WHERE id = ?').get(req.params.id) as any;
+    let warning: string | undefined;
     if (stream) {
       const server = db.prepare('SELECT * FROM servers WHERE id = ?').get(stream.server_id) as any;
       if (server) {
-        // Delete from Flussonic
         const flussonicUrl = `${server.url}/flussonic/api/v3/streams/${encodeURIComponent(stream.name)}`;
-        await flussonicRequest('DELETE', flussonicUrl, server)
-          .catch(e => console.error('Flussonic delete error (ignored):', e.message));
+        try {
+          await deleteRemote(flussonicUrl, server);
+        } catch (e: any) {
+          return res.status(502).json({ error: `Flussonic did not delete stream "${stream.name}" (${describeNetError(e)}). Nothing was deleted.` });
+        }
 
-        // Also try to delete the associated VOD location if it exists
         const vodName = await resolveCompanionVodName(server, stream.name);
         const vodUrl = `${server.url}/flussonic/api/v3/vods/${encodeURIComponent(vodName)}`;
-        await flussonicRequest('DELETE', vodUrl, server)
-          .catch(e => console.error('Flussonic delete VOD error (ignored):', e.message));
+        try {
+          await deleteRemote(vodUrl, server);
+        } catch (e: any) {
+          warning = `Stream deleted, but Flussonic did not delete its VOD location "${vodName}" (${describeNetError(e)}). It is kept under VOD locations so you can retry.`;
+        }
       }
     }
     db.prepare('DELETE FROM streams WHERE id = ?').run(req.params.id);
-    if (stream) {
+    if (stream && !warning) {
       // Clean up local VOD row under either naming convention
       db.prepare('DELETE FROM vods WHERE name IN (?, ?) AND server_id = ?')
         .run(`${stream.name}_vod`, stream.name, stream.server_id);
     }
-    res.json({ success: true });
+    res.json(warning ? { success: true, warning } : { success: true });
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }
@@ -548,7 +553,11 @@ router.delete('/:id/videos/:filename', authenticateToken, requireStreamAccess, a
       // Delete video from Flussonic (resolve legacy same-name VODs too)
       const vodName = await resolveCompanionVodName(server, stream.name);
       const deleteUrl = `${server.url}/flussonic/api/v3/vods/${encodeURIComponent(vodName)}/storages/0/files/${uploadPathSegment(req.params.filename)}`;
-      await flussonicRequest('DELETE', deleteUrl, server).catch(e => console.warn('Failed to delete from Flussonic (ignored):', e.message));
+      try {
+        await deleteRemote(deleteUrl, server);
+      } catch (e: any) {
+        return res.status(502).json({ error: `Flussonic did not delete "${req.params.filename}" (${describeNetError(e)}). Nothing was deleted.` });
+      }
       console.log(`Video deleted from Flussonic VOD: ${stream.name}/${req.params.filename}`);
     }
 

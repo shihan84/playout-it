@@ -115,9 +115,9 @@ export default function VodManager() {
       await axios.delete(`/api/vods/${id}`);
       showNotification('VOD location deleted successfully', 'success');
       fetchData();
-    } catch (error) {
+    } catch (error: any) {
       console.error('Failed to delete VOD', error);
-      showNotification('Failed to delete VOD location', 'error');
+      showNotification(error.response?.data?.error || 'Failed to delete VOD location', 'error');
     } finally {
       setDeleteConfirmId(null);
     }
