@@ -1,11 +1,11 @@
 import rateLimit from 'express-rate-limit';
 
 // IP derivation / proxy headers:
-// The app does NOT set `trust proxy`, so req.ip is always the direct socket
-// peer and client-supplied X-Forwarded-For headers are never trusted. If a
-// trusted reverse proxy is added later, set `app.set('trust proxy', <n>)` to
-// the exact number of trusted hops — never `true` — so the limiter keys on the
-// real client IP rather than a spoofable header.
+// By default `trust proxy` is off, so req.ip is the direct socket peer and
+// client-supplied X-Forwarded-For headers are never trusted. Behind a reverse
+// proxy, set TRUST_PROXY to the exact number of trusted hops (e.g. 1 for one
+// nginx) so the limiter keys on the real client IP; otherwise every user shares
+// the proxy's IP and one attacker can lock everyone out.
 //
 // Multi-instance deployments:
 // The default store is in-memory per process, so limits apply per instance.

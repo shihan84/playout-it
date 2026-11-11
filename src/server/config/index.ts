@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import { parseTrustProxy } from '../middleware/securityHeaders';
 
 const JWT_WEAK_SECRETS = new Set([
   'your-secret-key-change-in-production',
@@ -26,6 +27,7 @@ export const config = {
   // Dev defaults to loopback so a dev instance (default JWT secret) isn't reachable from the network.
   bindHost: process.env.BIND_HOST || (process.env.NODE_ENV === 'production' ? '0.0.0.0' : '127.0.0.1'),
   nodeEnv: process.env.NODE_ENV || 'development',
+  trustProxyHops: parseTrustProxy(process.env.TRUST_PROXY),
   dbPath: process.env.DATABASE_PATH || 'flussonic.db',
   jwtSecret: process.env.JWT_SECRET || 'your-secret-key-change-in-production',
   saltRounds: 10,
