@@ -3,6 +3,7 @@ import axios from 'axios';
 import { Plus, Trash2, Radio, CheckCircle2, XCircle, AlertCircle, PlaySquare, Copy, Check, X, RefreshCw, Upload, FileVideo, Edit2, Search } from 'lucide-react';
 import StreamPlayer from '../components/StreamPlayer';
 import BroadcastPlaylist from '../components/BroadcastPlaylist';
+import { playlistInputUrl } from '../utils/vodPath';
 
 export default function Streams() {
   const [streams, setStreams] = useState<any[]>([]);
@@ -23,6 +24,7 @@ export default function Streams() {
   const [vodSearchQuery, setVodSearchQuery] = useState('');
   const [vods, setVods] = useState<any[]>([]);
   const [availableVods, setAvailableVods] = useState<any[]>([]);
+  const fallbackUrlFor = (name: string) => playlistInputUrl(availableVods.find(v => v.name === name) || { name });
   const [enableVodFallback, setEnableVodFallback] = useState(false);
   const [fallbackVodUrl, setFallbackVodUrl] = useState('');
   const [isUploading, setIsUploading] = useState(false);
@@ -537,11 +539,12 @@ export default function Streams() {
               <div className="bg-zinc-950/30 border border-zinc-800/50 rounded-xl p-4 space-y-3">
                 <label className="block text-sm font-medium text-zinc-400">Select Fallback VOD</label>
                 <select
-                  value={(fallbackVodUrl || '').replace('playlist://', '').replace('/playlist.txt', '')}
+                  value={[formData.name, ...availableVods.map(v => v.name)].find(n => n && fallbackUrlFor(n) === fallbackVodUrl)
+                    ?? (fallbackVodUrl || '').replace(/^playlist:\/+/, '').replace('/playlist.txt', '')}
                   onChange={e => {
                     const vodName = e.target.value;
                     if (vodName) {
-                      setFallbackVodUrl(`playlist://${vodName}/playlist.txt`);
+                      setFallbackVodUrl(fallbackUrlFor(vodName));
                     } else {
                       setFallbackVodUrl('');
                     }

@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
-import { vodFileUrl } from '../utils/vodPath';
+import { vodFileUrl, playlistInputUrl } from '../utils/vodPath';
 import { 
   FileVideo, Upload, X, Trash2, RefreshCw, FileText, Search, 
   AlertCircle, Check, Copy, MoreVertical, ExternalLink, HardDrive, Play
@@ -285,12 +285,12 @@ export default function VodFileManager({ vod, onClose, showNotification }: VodFi
                 <div className="flex-1 min-w-0">
                   <p className="text-xs text-zinc-500 uppercase tracking-widest font-bold mb-1">Playlist URL</p>
                   <code className="text-sm text-emerald-400 font-mono break-all inline-block">
-                    playlist:///{vod.name}/playlist.txt
+                    {playlistInputUrl(vod)}
                   </code>
                 </div>
                 <button 
                   onClick={() => {
-                    navigator.clipboard.writeText(`playlist:///${vod.name}/playlist.txt`);
+                    navigator.clipboard.writeText(playlistInputUrl(vod));
                     showNotification('Copied to clipboard!', 'success');
                   }}
                   className="shrink-0 p-2 text-zinc-400 hover:text-white hover:bg-zinc-800 rounded-lg transition-all"

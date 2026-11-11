@@ -9,3 +9,13 @@ export function vodFileUrl(serverUrl: string, vodName: string, filename: string,
   const path = relative.split('/').map(encodeURIComponent).join('/');
   return `${serverUrl.replace(/\/+$/, '')}/${path}/${suffix}`;
 }
+
+/**
+ * Flussonic input URL for a VOD's playlist.txt. Flussonic needs the file's disk path
+ * (`playlist:///storage/<vod>/playlist.txt`), so the VOD's first local storage path is used.
+ */
+export function playlistInputUrl(vod: { name: string; paths?: string[] | null }): string {
+  const storage = Array.isArray(vod.paths) ? vod.paths[0] : undefined;
+  const dir = typeof storage === 'string' && storage.startsWith('/') ? storage.replace(/\/+$/, '') : `/storage/${vod.name}`;
+  return `playlist://${dir}/playlist.txt`;
+}

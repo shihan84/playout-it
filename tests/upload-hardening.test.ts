@@ -23,7 +23,7 @@ let tmpDir: string;
 let auth: Record<string, string>;
 let streamId: number | bigint;
 let vodId: number | bigint;
-const puts: { url: string; bytes: number }[] = [];
+const puts: { url: string; bytes: number; body: string }[] = [];
 
 function form(field: string, data: Buffer, filename = 'clip.mp4', extra: Record<string, string> = {}) {
   const f = new FormData();
@@ -106,10 +106,13 @@ test('singleUpload keeps storage failures as 500', async () => {
 test.before(async () => {
   mock = createServer((rq, rs) => {
     let n = 0;
-    rq.on('data', (c) => (n += c.length));
+    let body = '';
+    rq.on('data', (c) => { n += c.length; if (body.length < 65536) body += c; });
     rq.on('end', () => {
-      if (rq.method === 'PUT') puts.push({ url: rq.url!, bytes: n });
+      if (rq.method === 'PUT') puts.push({ url: rq.url!, bytes: n, body });
       rs.setHeader('Content-Type', 'application/json');
+      const vod = rq.method === 'GET' && rq.url!.match(/\/vods\/([^/?]+)$/);
+      if (vod) return rs.end(JSON.stringify({ prefix: vod[1], storages: [{ url: `/storage/${vod[1]}` }] }));
       rs.end(rq.method === 'GET' && /\/(streams|vods)$/.test(rq.url!) ? '[]' : '{}');
     });
   });
@@ -180,6 +183,25 @@ test('stream video upload streams the full file to Flussonic', async () => {
   const put = puts.find((p) => p.url.endsWith('/files/clip.mp4'));
   assert.ok(put, 'expected PUT to Flussonic');
   assert.equal(put!.bytes, 3 * 1024 * 1024);
+});
+
+test('uploads write <vod>/<file> playlist entries and a disk-path playlist input', async () => {
+  puts.length = 0;
+  assert.equal((await fetch(`${BASE}/api/streams/${streamId}/videos`, { method: 'POST', headers: auth, body: form('video', Buffer.alloc(10), 'pl-clip.mp4') })).status, 200);
+  const pl = puts.filter((p) => p.url.endsWith('/vods/up-stream_vod/storages/0/files/playlist.txt')).pop();
+  assert.ok(pl, JSON.stringify(puts.map((p) => p.url)));
+  const lines = pl!.body.split('\n');
+  assert.ok(lines.every((l) => l.startsWith('up-stream_vod/')), pl!.body);
+  assert.ok(lines.includes('up-stream_vod/pl-clip.mp4'), pl!.body);
+  const st = puts.filter((p) => p.url.endsWith('/streams/up-stream')).pop();
+  assert.ok(st, 'stream inputs not updated');
+  assert.deepEqual(JSON.parse(st!.body).inputs.at(-1), { url: 'playlist:///storage/up-stream_vod/playlist.txt' });
+
+  puts.length = 0;
+  assert.equal((await fetch(`${BASE}/api/vods/${vodId}/files`, { method: 'POST', headers: auth, body: form('file', Buffer.alloc(10), 'pl-vod.mp4') })).status, 200);
+  const vpl = puts.filter((p) => p.url.endsWith('/vods/up-vod/storages/0/files/playlist.txt')).pop();
+  assert.ok(vpl, JSON.stringify(puts.map((p) => p.url)));
+  assert.ok(vpl!.body.split('\n').every((l) => l.startsWith('up-vod/')) && vpl!.body.includes('up-vod/pl-vod.mp4'), vpl!.body);
 });
 
 test('upload filenames are encoded as a single URL path segment', async () => {

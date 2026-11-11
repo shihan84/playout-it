@@ -6,6 +6,7 @@ import {
   Check, Copy, AlertCircle, Loader2, ListVideo, Radio,
   Plus, RefreshCw, HardDrive, FileText
 } from 'lucide-react';
+import { playlistInputUrl } from '../utils/vodPath';
 
 interface Video {
   id: number;
@@ -206,10 +207,9 @@ export default function BroadcastPlaylist({
     notification?.('Playlist shuffled', 'success');
   };
 
-  const vodName = selectedVodLocationId
-    ? (availableVods.find(v => v.id === selectedVodLocationId)?.name || `${streamName}_vod`)
-    : `${streamName}_vod`;
-  const playlistUrl = `playlist:///${vodName}/playlist.txt`;
+  const selectedVod = selectedVodLocationId ? availableVods.find(v => v.id === selectedVodLocationId) : undefined;
+  const vodName = selectedVod?.name || `${streamName}_vod`;
+  const playlistUrl = playlistInputUrl(selectedVod || availableVods.find(v => v.name === vodName) || { name: vodName });
 
   const copyUrl = () => {
     navigator.clipboard.writeText(playlistUrl);
@@ -527,7 +527,7 @@ export default function BroadcastPlaylist({
           </button>
         </div>
         <p className="text-xs text-zinc-600 mt-2">
-          <span className="font-mono text-zinc-400">playlist.txt</span> is stored inside the <span className="font-mono text-zinc-400">{vodName}</span> VOD folder (<span className="font-mono text-zinc-400">/storage/{vodName}/</span>). Each line is a bare filename — Flussonic resolves <span className="font-mono text-zinc-400">video.mp4</span> as <span className="font-mono text-zinc-400">/storage/{vodName}/video.mp4</span> via the <span className="font-mono text-zinc-400">{vodName}</span> VOD location.
+          <span className="font-mono text-zinc-400">playlist.txt</span> is stored inside the <span className="font-mono text-zinc-400">{vodName}</span> VOD folder (<span className="font-mono text-zinc-400">/storage/{vodName}/</span>). Each line is <span className="font-mono text-zinc-400">{vodName}/video.mp4</span>: Flussonic resolves it through the <span className="font-mono text-zinc-400">{vodName}</span> VOD location.
         </p>
       </div>
 

@@ -6,6 +6,7 @@ import {
   Database, Server, MoreHorizontal, Settings2, Trash, HardDrive
 } from 'lucide-react';
 import VodFileManager from './VodFileManager';
+import { playlistInputUrl } from '../utils/vodPath';
 
 export default function VodManager() {
   const [vods, setVods] = useState<any[]>([]);
@@ -124,7 +125,7 @@ export default function VodManager() {
   };
 
   const handleCopy = (vod: any) => {
-    const url = `playlist://${vod.name}/playlist.txt`;
+    const url = playlistInputUrl(vod);
     navigator.clipboard.writeText(url);
     setCopiedId(vod.id);
     showNotification('Playlist URL copied!', 'success');
