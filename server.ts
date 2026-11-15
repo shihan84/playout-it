@@ -14,6 +14,7 @@ import { wss, verifyWsAuth } from './src/server/websocket';
 import { startWatchdog, stopWatchdog } from './src/server/services/watchdog';
 import { startScheduler, stopScheduler } from './src/server/services/scheduler';
 import { sweepStaleUploads } from './src/server/utils/upload';
+import { startBackups, stopBackups } from './src/server/services/backup';
 
 import authRoutes from './src/server/routes/auth';
 import usersRoutes from './src/server/routes/users';
@@ -159,6 +160,7 @@ async function shutdown(signal: string) {
   setTimeout(() => process.exit(1), 15000).unref();
   stopScheduler();
   stopWatchdog();
+  stopBackups();
   httpServer?.close();
   for (const client of wss.clients) client.terminate();
   try { await shutdownOverlays(); } catch (e: any) { console.error('Overlay shutdown failed:', e.message); }
@@ -175,6 +177,7 @@ if (swept) console.log(`Removed ${swept} stale upload temp file(s)`);
 startWatchdog();
 recoverOverlayJobs();
 startScheduler();
+startBackups();
 
 startServer().catch(err => {
   console.error("Failed to start server:", err);
