@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import path from 'path';
 import { parseTrustProxy } from '../middleware/securityHeaders';
 
 const JWT_WEAK_SECRETS = new Set([
@@ -22,13 +23,23 @@ if (process.env.NODE_ENV === 'production') {
   }
 }
 
+function envNumber(name: string, fallback: number): number {
+  const n = Number(process.env[name]);
+  return process.env[name] !== undefined && process.env[name] !== '' && Number.isFinite(n) ? n : fallback;
+}
+
+const dbPath = process.env.DATABASE_PATH || 'flussonic.db';
+
 export const config = {
   port: Number(process.env.PORT || 3000),
   // Dev defaults to loopback so a dev instance (default JWT secret) isn't reachable from the network.
   bindHost: process.env.BIND_HOST || (process.env.NODE_ENV === 'production' ? '0.0.0.0' : '127.0.0.1'),
   nodeEnv: process.env.NODE_ENV || 'development',
   trustProxyHops: parseTrustProxy(process.env.TRUST_PROXY),
-  dbPath: process.env.DATABASE_PATH || 'flussonic.db',
+  dbPath,
+  backupDir: process.env.BACKUP_DIR || path.join(path.dirname(path.resolve(dbPath)), 'backups'),
+  backupIntervalHours: envNumber('BACKUP_INTERVAL_HOURS', 24),
+  backupKeep: Math.max(1, Math.floor(envNumber('BACKUP_KEEP', 14))),
   jwtSecret: process.env.JWT_SECRET || 'your-secret-key-change-in-production',
   saltRounds: 12,
   sslEnabled: process.env.SSL_ENABLED === 'true',

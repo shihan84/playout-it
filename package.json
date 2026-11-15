@@ -10,7 +10,9 @@
     "preview": "vite preview",
     "clean": "rm -rf dist",
     "lint": "tsc --noEmit",
-    "admin:provision": "tsx scripts/provision-admin.ts"
+    "admin:provision": "tsx scripts/provision-admin.ts",
+    "db:backup": "tsx scripts/backup-db.ts",
+    "db:restore-drill": "tsx scripts/restore-drill.ts"
   },
   "dependencies": {
     "@google/genai": "^1.47.0",

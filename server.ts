@@ -1,3 +1,5 @@
+import { installJsonLogs } from './src/server/utils/jsonLogs';
+if (process.env.LOG_FORMAT === 'json') installJsonLogs();
 import express from 'express';
 import { createServer as createViteServer } from 'vite';
 import path from 'path';
@@ -14,6 +16,7 @@ import { wss, verifyWsAuth } from './src/server/websocket';
 import { startWatchdog, stopWatchdog } from './src/server/services/watchdog';
 import { startScheduler, stopScheduler } from './src/server/services/scheduler';
 import { sweepStaleUploads } from './src/server/utils/upload';
+import { startBackups, stopBackups } from './src/server/services/backup';
 
 import authRoutes from './src/server/routes/auth';
 import usersRoutes from './src/server/routes/users';
@@ -43,6 +46,22 @@ const HOST = config.bindHost;
 const SSL_ENABLED = config.sslEnabled;
 const SSL_KEY_PATH = config.sslKeyPath;
 const SSL_CERT_PATH = config.sslCertPath;
+
+let shuttingDown = false;
+
+// Unauthenticated probes for uptime monitors and load balancers; they reveal nothing else.
+app.get('/healthz', (_req, res) => {
+  res.json({ status: 'ok' });
+});
+app.get('/readyz', (_req, res) => {
+  if (shuttingDown) return res.status(503).json({ status: 'shutting_down' });
+  try {
+    db.prepare('SELECT 1').get();
+    res.json({ status: 'ready' });
+  } catch {
+    res.status(503).json({ status: 'database_unavailable' });
+  }
+});
 
 app.use(cookieParser());
 app.use('/api', csrfProtection);
@@ -151,7 +170,6 @@ async function startServer() {
   });
 }
 
-let shuttingDown = false;
 async function shutdown(signal: string) {
   if (shuttingDown) return;
   shuttingDown = true;
@@ -159,6 +177,7 @@ async function shutdown(signal: string) {
   setTimeout(() => process.exit(1), 15000).unref();
   stopScheduler();
   stopWatchdog();
+  stopBackups();
   httpServer?.close();
   for (const client of wss.clients) client.terminate();
   try { await shutdownOverlays(); } catch (e: any) { console.error('Overlay shutdown failed:', e.message); }
@@ -175,6 +194,7 @@ if (swept) console.log(`Removed ${swept} stale upload temp file(s)`);
 startWatchdog();
 recoverOverlayJobs();
 startScheduler();
+startBackups();
 
 startServer().catch(err => {
   console.error("Failed to start server:", err);
