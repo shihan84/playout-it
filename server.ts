@@ -1,3 +1,5 @@
+import { installJsonLogs } from './src/server/utils/jsonLogs';
+if (process.env.LOG_FORMAT === 'json') installJsonLogs();
 import express from 'express';
 import { createServer as createViteServer } from 'vite';
 import path from 'path';
@@ -44,6 +46,22 @@ const HOST = config.bindHost;
 const SSL_ENABLED = config.sslEnabled;
 const SSL_KEY_PATH = config.sslKeyPath;
 const SSL_CERT_PATH = config.sslCertPath;
+
+let shuttingDown = false;
+
+// Unauthenticated probes for uptime monitors and load balancers; they reveal nothing else.
+app.get('/healthz', (_req, res) => {
+  res.json({ status: 'ok' });
+});
+app.get('/readyz', (_req, res) => {
+  if (shuttingDown) return res.status(503).json({ status: 'shutting_down' });
+  try {
+    db.prepare('SELECT 1').get();
+    res.json({ status: 'ready' });
+  } catch {
+    res.status(503).json({ status: 'database_unavailable' });
+  }
+});
 
 app.use(cookieParser());
 app.use('/api', csrfProtection);
@@ -152,7 +170,6 @@ async function startServer() {
   });
 }
 
-let shuttingDown = false;
 async function shutdown(signal: string) {
   if (shuttingDown) return;
   shuttingDown = true;

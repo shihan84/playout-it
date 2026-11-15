@@ -279,6 +279,15 @@ test.after(async () => {
   }
 });
 
+test('health probes answer without auth and expose nothing else', async () => {
+  const health = await fetch(`${BASE}/healthz`);
+  assert.equal(health.status, 200);
+  assert.deepEqual(await health.json(), { status: 'ok' });
+  const ready = await fetch(`${BASE}/readyz`);
+  assert.equal(ready.status, 200);
+  assert.deepEqual(await ready.json(), { status: 'ready' });
+});
+
 test('anonymous requests are rejected with 401', async () => {
   for (const [method, url] of [
     ['GET', '/api/servers'], ['GET', '/api/vods'], ['GET', '/api/users'],
