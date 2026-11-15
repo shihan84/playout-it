@@ -7,8 +7,14 @@ APP_DIR="/opt/flussonic-manager"
 cd $APP_DIR
 
 echo "=== IBS Manager Deployment ==="
+if [ -f flussonic.db ] && [ -d node_modules ]; then
+    echo "Backing up the database before upgrading..."
+    npm run db:backup
+fi
+
 echo "Installing dependencies..."
-npm install
+npm ci --no-audit --no-fund
+npm rebuild bcrypt better-sqlite3
 
 echo "Building application..."
 npm run build
