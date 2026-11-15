@@ -1,17 +1,26 @@
+# systemd unit. Install:
+#   sudo cp scripts/flussonic-manager.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now flussonic-manager
+# Logs: journalctl -u flussonic-manager -f   (set LOG_FORMAT=json in .env for JSON lines)
+# Run exactly one instance: SQLite and the in-memory locks are single-writer.
 [Unit]
 Description=IBS Flussonic Manager
-After=network.target
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
 User=pi
 WorkingDirectory=/opt/flussonic-manager
+# JWT_SECRET and every other setting come from .env (see .env.example).
+EnvironmentFile=/opt/flussonic-manager/.env
+Environment=NODE_ENV=production
 ExecStart=/usr/bin/node dist/server.cjs
 Restart=on-failure
 RestartSec=5
-Environment=NODE_ENV=production
-Environment=PORT=3000
-Environment=DATABASE_PATH=/opt/flussonic-manager/flussonic.db
+# The app finishes its own shutdown (overlays, DB close) within 15s of SIGTERM.
+TimeoutStopSec=20
+PrivateTmp=true
 # Limit memory use on RPi 3B+ (1GB RAM)
 MemoryMax=512M
 

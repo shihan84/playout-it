@@ -10,7 +10,7 @@ echo "=== IBS Manager Deployment for Raspbian ==="
 
 echo "Installing dependencies..."
 # Low memory: use max 1 job to avoid OOM during native compilation
-npm install --prefer-offline --no-audit --max-old-space-size=768
+npm ci --prefer-offline --no-audit --no-fund
 
 echo "Rebuilding native modules (better-sqlite3, bcrypt)..."
 npm rebuild better-sqlite3 --build-from-source
